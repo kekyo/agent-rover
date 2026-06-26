@@ -2,14 +2,30 @@
   "name": "agent-rover-monorepo",
   "version": "0.1.0",
   "private": true,
-  "description": "Workspace root for agent-rover projects",
-  "engines": {
-    "node": ">=20"
+  "description": "A multi-platform TypeScript test driver for GUI applications",
+  "keywords": [
+    "test",
+    "driver",
+    "agent",
+    "windows",
+    "automation"
+  ],
+  "author": "Kouji Matsui (@kekyo@mi.kekyo.net)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kekyo/agent-rover.git"
   },
+  "homepage": "https://github.com/kekyo/agent-rover#readme",
+  "readme": "README_pack.md",
   "workspaces": [
     "agents",
     "agent-rover",
     "samples"
+  ],
+  "files": [
+    "LICENSE",
+    "images/agent-rover-120.png"
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
@@ -17,7 +33,7 @@
     "test": "npm run test --workspaces --if-present",
     "pack": "npm run pack --workspaces --if-present"
   },
-  "devDependencies": {
-    "vitest": ">=2.0.0"
+  "engines": {
+    "node": ">=20"
   }
 }
