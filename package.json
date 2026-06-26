@@ -1,0 +1,23 @@
+{
+  "name": "agent-rover-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Workspace root for agent-rover projects",
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "agents",
+    "agent-rover",
+    "samples"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "sample:notepad": "npm run build --workspace agent-rover && vitest run --project samples samples/src/notepad-sample.test.ts",
+    "test": "npm run test --workspaces --if-present",
+    "pack": "npm run pack --workspaces --if-present"
+  },
+  "devDependencies": {
+    "vitest": ">=2.0.0"
+  }
+}
