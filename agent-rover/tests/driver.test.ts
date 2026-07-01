@@ -29,6 +29,7 @@ import {
   defaultFakeCapabilities,
   defaultFakeChildWindow,
   defaultFakeWindow,
+  type FakeManagedProcessLaunchOptions,
   startFakeTcpAgent,
 } from './helpers/fake-tcp-agent';
 
@@ -855,6 +856,73 @@ describe.concurrent('remote agent connection api', () => {
         running: false,
       });
       await process.dispose();
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('uses native managed process protocol when available', async () => {
+    const launches: RemoteApplicationLaunchOptions[] = [];
+    const managedLaunches: FakeManagedProcessLaunchOptions[] = [];
+    const killedManagedProcessIds: number[] = [];
+    const disposedManagedProcessIds: number[] = [];
+    const fakeAgent = await startFakeTcpAgent({
+      disposedManagedProcessIds,
+      killedManagedProcessIds,
+      launches,
+      managedLaunches,
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const process = await agent.processes.launchManaged({
+        arguments: ['--native-managed'],
+        captureStderr: true,
+        captureStdout: true,
+        killTreeOnDispose: true,
+        path: 'fake-native-managed-process.exe',
+      });
+
+      expect(launches).toEqual([]);
+      expect(managedLaunches[0]).toMatchObject({
+        arguments: ['--native-managed'],
+        captureStderr: true,
+        captureStdout: true,
+        killTreeOnDispose: true,
+        path: 'fake-native-managed-process.exe',
+      });
+      expect(managedLaunches[0]?.stdoutPath).toBe(
+        'C:/agent-rover-managed-process-fake/stdout.log'
+      );
+      expect(managedLaunches[0]?.stderrPath).toBe(
+        'C:/agent-rover-managed-process-fake/stderr.log'
+      );
+
+      await expect(process.stdoutText()).resolves.toBe('managed stdout');
+      await expect(process.stderrText()).resolves.toBe('managed stderr');
+      await expect(process.snapshot()).resolves.toMatchObject({
+        id: 4321,
+        running: true,
+      });
+
+      await process.kill();
+      expect(killedManagedProcessIds).toEqual([1]);
+      await expect(
+        process.waitForExit({
+          intervalMs: 1,
+          timeoutMs: 100,
+        })
+      ).resolves.toMatchObject({
+        exitCode: 1,
+        id: 4321,
+        running: false,
+      });
+
+      await process.dispose();
+      expect(disposedManagedProcessIds).toEqual([1]);
     } finally {
       agent.release();
       await fakeAgent.close();

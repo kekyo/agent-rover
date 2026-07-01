@@ -18,6 +18,19 @@
 
 namespace agent_rover {
 
+struct ManagedProcessEntry {
+  uint32_t managed_id;
+  uint32_t process_id;
+  std::string name;
+  std::string path;
+  HANDLE process;
+  HANDLE job;
+  bool kill_tree_on_dispose;
+};
+
+static std::map<uint32_t, ManagedProcessEntry> g_managed_processes;
+static uint32_t g_next_managed_process_id = 1;
+
 static std::string Basename(const std::string& path) {
   const size_t slash = path.find_last_of("\\/");
   if (slash == std::string::npos) {
@@ -128,8 +141,42 @@ static ProcessSnapshot MissingProcessSnapshot(uint32_t process_id) {
   };
 }
 
-bool LaunchApplication(
+static bool SnapshotProcessHandle(
+    uint32_t process_id,
+    HANDLE process,
+    const std::string& fallback_name,
+    const std::string& fallback_path,
+    ProcessSnapshot* snapshot,
+    std::string* error) {
+  DWORD exit_code = 0;
+  if (!GetExitCodeProcess(process, &exit_code)) {
+    *error = "GetExitCodeProcess failed.";
+    return false;
+  }
+  const bool running = exit_code == STILL_ACTIVE;
+  std::string path = running ? ReadProcessPath(process) : fallback_path;
+  if (path.empty()) {
+    path = fallback_path;
+  }
+  std::string name = Basename(path);
+  if (name.empty()) {
+    name = fallback_name;
+  }
+  *snapshot = {
+      process_id,
+      name,
+      path,
+      running,
+      !running,
+      running ? 0 : static_cast<uint32_t>(exit_code),
+  };
+  return true;
+}
+
+static bool CreateApplicationProcess(
     const ApplicationLaunchOptions& options,
+    DWORD extra_creation_flags,
+    PROCESS_INFORMATION* process_information,
     ApplicationProcess* process,
     std::string* error) {
   const std::wstring executable = Utf8ToWide(options.path);
@@ -173,8 +220,8 @@ bool LaunchApplication(
         stderr_handle == nullptr ? GetStdHandle(STD_ERROR_HANDLE)
                                  : stderr_handle;
   }
-  PROCESS_INFORMATION process_information = {};
   DWORD creation_flags = options.create_no_window ? CREATE_NO_WINDOW : 0;
+  creation_flags |= extra_creation_flags;
   if (!environment_block.empty()) {
     creation_flags |= CREATE_UNICODE_ENVIRONMENT;
   }
@@ -185,7 +232,7 @@ bool LaunchApplication(
       environment_block.empty() ? nullptr
                                 : const_cast<wchar_t*>(environment_block.c_str()),
       working_directory.empty() ? nullptr : working_directory.c_str(),
-      &startup, &process_information);
+      &startup, process_information);
   if (stdout_handle != nullptr) {
     CloseHandle(stdout_handle);
   }
@@ -197,10 +244,98 @@ bool LaunchApplication(
     return false;
   }
 
-  process->id = static_cast<uint32_t>(process_information.dwProcessId);
+  process->id = static_cast<uint32_t>(process_information->dwProcessId);
   process->name = Basename(options.path);
+  return true;
+}
+
+bool LaunchApplication(
+    const ApplicationLaunchOptions& options,
+    ApplicationProcess* process,
+    std::string* error) {
+  PROCESS_INFORMATION process_information = {};
+  if (!CreateApplicationProcess(options, 0, &process_information, process, error)) {
+    return false;
+  }
   CloseHandle(process_information.hThread);
   CloseHandle(process_information.hProcess);
+  return true;
+}
+
+bool LaunchManagedProcess(
+    const ManagedProcessLaunchOptions& options,
+    ManagedProcess* process,
+    std::string* error) {
+  HANDLE job = nullptr;
+  DWORD extra_creation_flags = 0;
+  if (options.kill_tree_on_dispose) {
+    job = CreateJobObjectW(nullptr, nullptr);
+    if (job == nullptr) {
+      *error = "CreateJobObjectW failed.";
+      return false;
+    }
+    extra_creation_flags |= CREATE_SUSPENDED;
+  }
+
+  PROCESS_INFORMATION process_information = {};
+  ApplicationProcess application_process = {};
+  if (!CreateApplicationProcess(
+          options.launch, extra_creation_flags, &process_information,
+          &application_process, error)) {
+    if (job != nullptr) {
+      CloseHandle(job);
+    }
+    return false;
+  }
+
+  if (job != nullptr) {
+    if (!AssignProcessToJobObject(job, process_information.hProcess)) {
+      TerminateProcess(process_information.hProcess, 1);
+      CloseHandle(process_information.hThread);
+      CloseHandle(process_information.hProcess);
+      CloseHandle(job);
+      *error = "AssignProcessToJobObject failed.";
+      return false;
+    }
+    if (ResumeThread(process_information.hThread) == static_cast<DWORD>(-1)) {
+      TerminateJobObject(job, 1);
+      CloseHandle(process_information.hThread);
+      CloseHandle(process_information.hProcess);
+      CloseHandle(job);
+      *error = "ResumeThread failed.";
+      return false;
+    }
+  }
+
+  const std::string process_path = ReadProcessPath(process_information.hProcess);
+  if (!process_path.empty()) {
+    application_process.name = Basename(process_path);
+  }
+  CloseHandle(process_information.hThread);
+
+  uint32_t managed_id = 0;
+  managed_id = g_next_managed_process_id;
+  g_next_managed_process_id += 1;
+  if (g_next_managed_process_id == 0) {
+    g_next_managed_process_id = 1;
+  }
+  ManagedProcessEntry entry = {
+      managed_id,
+      application_process.id,
+      application_process.name,
+      process_path,
+      process_information.hProcess,
+      job,
+      options.kill_tree_on_dispose,
+  };
+  g_managed_processes[managed_id] = entry;
+
+  *process = {
+      managed_id,
+      application_process,
+      options.launch.stdout_path,
+      options.launch.stderr_path,
+  };
   return true;
 }
 
@@ -215,23 +350,13 @@ bool SnapshotProcess(
     *snapshot = MissingProcessSnapshot(process_id);
     return true;
   }
-  DWORD exit_code = 0;
-  if (!GetExitCodeProcess(process, &exit_code)) {
+  const std::string path = ReadProcessPath(process);
+  const std::string name = Basename(path);
+  if (!SnapshotProcessHandle(process_id, process, name, path, snapshot, error)) {
     CloseHandle(process);
-    *error = "GetExitCodeProcess failed.";
     return false;
   }
-  const bool running = exit_code == STILL_ACTIVE;
-  const std::string path = ReadProcessPath(process);
   CloseHandle(process);
-  *snapshot = {
-      process_id,
-      Basename(path),
-      path,
-      running,
-      !running,
-      running ? 0 : static_cast<uint32_t>(exit_code),
-  };
   return true;
 }
 
@@ -273,6 +398,20 @@ bool ListProcesses(
   return true;
 }
 
+bool SnapshotManagedProcess(
+    uint32_t managed_id,
+    ProcessSnapshot* snapshot,
+    std::string* error) {
+  const auto iterator = g_managed_processes.find(managed_id);
+  if (iterator == g_managed_processes.end()) {
+    *error = "Unknown managed process id.";
+    return false;
+  }
+  const ManagedProcessEntry& entry = iterator->second;
+  return SnapshotProcessHandle(
+      entry.process_id, entry.process, entry.name, entry.path, snapshot, error);
+}
+
 bool KillProcess(uint32_t process_id, std::string* error) {
   HANDLE process =
       OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(process_id));
@@ -286,6 +425,69 @@ bool KillProcess(uint32_t process_id, std::string* error) {
     return false;
   }
   CloseHandle(process);
+  return true;
+}
+
+bool KillManagedProcess(uint32_t managed_id, std::string* error) {
+  const auto iterator = g_managed_processes.find(managed_id);
+  if (iterator == g_managed_processes.end()) {
+    *error = "Unknown managed process id.";
+    return false;
+  }
+  const ManagedProcessEntry& entry = iterator->second;
+  if (entry.job != nullptr && entry.kill_tree_on_dispose) {
+    if (!TerminateJobObject(entry.job, 1)) {
+      *error = "TerminateJobObject failed.";
+      return false;
+    }
+    return true;
+  }
+  if (!TerminateProcess(entry.process, 1)) {
+    *error = "TerminateProcess failed.";
+    return false;
+  }
+  return true;
+}
+
+bool DisposeManagedProcess(uint32_t managed_id, std::string* error) {
+  const auto iterator = g_managed_processes.find(managed_id);
+  if (iterator == g_managed_processes.end()) {
+    return true;
+  }
+  ManagedProcessEntry entry = iterator->second;
+  g_managed_processes.erase(iterator);
+
+  if (entry.kill_tree_on_dispose) {
+    ProcessSnapshot snapshot = {};
+    if (!SnapshotProcessHandle(
+            entry.process_id, entry.process, entry.name, entry.path, &snapshot,
+            error)) {
+      CloseHandle(entry.process);
+      if (entry.job != nullptr) {
+        CloseHandle(entry.job);
+      }
+      return false;
+    }
+    if (snapshot.running) {
+      if (entry.job != nullptr) {
+        if (!TerminateJobObject(entry.job, 1)) {
+          CloseHandle(entry.process);
+          CloseHandle(entry.job);
+          *error = "TerminateJobObject failed.";
+          return false;
+        }
+      } else if (!TerminateProcess(entry.process, 1)) {
+        CloseHandle(entry.process);
+        *error = "TerminateProcess failed.";
+        return false;
+      }
+    }
+  }
+
+  CloseHandle(entry.process);
+  if (entry.job != nullptr) {
+    CloseHandle(entry.job);
+  }
   return true;
 }
 

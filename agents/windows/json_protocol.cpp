@@ -470,7 +470,11 @@ static std::string CapabilitiesJson() {
       "\"file.rename\","
       "\"file.mkdtemp\","
       "\"process.kill\","
+      "\"process.killManaged\","
       "\"process.list\","
+      "\"process.disposeManaged\","
+      "\"process.launchManaged\","
+      "\"process.managedSnapshot\","
       "\"process.snapshot\","
       "\"eventLogs.read\","
       "\"";
@@ -632,6 +636,29 @@ static std::string ApplicationProcessJson(const ApplicationProcess& process) {
   output += std::to_string(process.id);
   output += ",\"name\":";
   AppendJsonString(&output, process.name);
+  output += "}";
+  return output;
+}
+
+static std::string ManagedProcessJson(const ManagedProcess& process) {
+  std::string output = "{\"managedProcessId\":";
+  output += std::to_string(process.managed_id);
+  output += ",\"id\":";
+  output += std::to_string(process.process.id);
+  output += ",\"name\":";
+  AppendJsonString(&output, process.process.name);
+  output += ",\"stdoutPath\":";
+  if (process.stdout_path.empty()) {
+    output += "null";
+  } else {
+    AppendJsonString(&output, process.stdout_path);
+  }
+  output += ",\"stderrPath\":";
+  if (process.stderr_path.empty()) {
+    output += "null";
+  } else {
+    AppendJsonString(&output, process.stderr_path);
+  }
   output += "}";
   return output;
 }
@@ -814,6 +841,31 @@ static bool ReadRectField(
          FindJsonNumberField(object, "height", &rect->height);
 }
 
+static bool ReadApplicationLaunchOptions(
+    const std::string& payload,
+    const std::string& method,
+    ApplicationLaunchOptions* options,
+    std::string* error) {
+  *options = {};
+  if (!FindJsonStringField(payload, "path", &options->path)) {
+    *error = method + " requires path.";
+    return false;
+  }
+  std::vector<std::string> arguments;
+  if (FindJsonStringArrayField(payload, "arguments", &arguments)) {
+    options->arguments = arguments;
+  }
+  std::string working_directory;
+  if (FindJsonStringField(payload, "workingDirectory", &working_directory)) {
+    options->working_directory = working_directory;
+  }
+  FindJsonStringObjectField(payload, "environment", &options->environment);
+  FindJsonStringField(payload, "stdoutPath", &options->stdout_path);
+  FindJsonStringField(payload, "stderrPath", &options->stderr_path);
+  FindJsonBoolField(payload, "createNoWindow", &options->create_no_window);
+  return true;
+}
+
 static bool ParseInputOperation(
     const std::string& payload,
     InputOperation* operation,
@@ -969,27 +1021,75 @@ std::string HandleJsonRequest(
   }
   if (method == "applications.launch") {
     ApplicationLaunchOptions options;
-    if (!FindJsonStringField(payload, "path", &options.path)) {
-      return FailureResponseJson(id, "applications.launch requires path.");
+    std::string parse_error;
+    if (!ReadApplicationLaunchOptions(
+            payload, "applications.launch", &options, &parse_error)) {
+      return FailureResponseJson(id, parse_error);
     }
-    std::vector<std::string> arguments;
-    if (FindJsonStringArrayField(payload, "arguments", &arguments)) {
-      options.arguments = arguments;
-    }
-    std::string working_directory;
-    if (FindJsonStringField(payload, "workingDirectory", &working_directory)) {
-      options.working_directory = working_directory;
-    }
-    FindJsonStringObjectField(payload, "environment", &options.environment);
-    FindJsonStringField(payload, "stdoutPath", &options.stdout_path);
-    FindJsonStringField(payload, "stderrPath", &options.stderr_path);
-    FindJsonBoolField(payload, "createNoWindow", &options.create_no_window);
     ApplicationProcess process = {};
     std::string error;
     if (!LaunchApplication(options, &process, &error)) {
       return FailureResponseJson(id, error);
     }
     return SuccessResponseJson(id, ApplicationProcessJson(process));
+  }
+  if (method == "process.launchManaged") {
+    ManagedProcessLaunchOptions options = {};
+    std::string parse_error;
+    if (!ReadApplicationLaunchOptions(
+            payload, "process.launchManaged", &options.launch, &parse_error)) {
+      return FailureResponseJson(id, parse_error);
+    }
+    FindJsonBoolField(
+        payload, "killTreeOnDispose", &options.kill_tree_on_dispose);
+    ManagedProcess process = {};
+    std::string error;
+    if (!LaunchManagedProcess(options, &process, &error)) {
+      return FailureResponseJson(id, error);
+    }
+    return SuccessResponseJson(id, ManagedProcessJson(process));
+  }
+  if (method == "process.managedSnapshot") {
+    int managed_process_id = 0;
+    if (!FindJsonNumberField(payload, "managedProcessId", &managed_process_id) ||
+        managed_process_id < 0) {
+      return FailureResponseJson(
+          id, "process.managedSnapshot requires managedProcessId.");
+    }
+    ProcessSnapshot process = {};
+    std::string error;
+    if (!SnapshotManagedProcess(
+            static_cast<uint32_t>(managed_process_id), &process, &error)) {
+      return FailureResponseJson(id, error);
+    }
+    return SuccessResponseJson(id, ProcessSnapshotJson(process));
+  }
+  if (method == "process.killManaged") {
+    int managed_process_id = 0;
+    if (!FindJsonNumberField(payload, "managedProcessId", &managed_process_id) ||
+        managed_process_id < 0) {
+      return FailureResponseJson(
+          id, "process.killManaged requires managedProcessId.");
+    }
+    std::string error;
+    if (!KillManagedProcess(static_cast<uint32_t>(managed_process_id), &error)) {
+      return FailureResponseJson(id, error);
+    }
+    return SuccessResponseJson(id, "null");
+  }
+  if (method == "process.disposeManaged") {
+    int managed_process_id = 0;
+    if (!FindJsonNumberField(payload, "managedProcessId", &managed_process_id) ||
+        managed_process_id < 0) {
+      return FailureResponseJson(
+          id, "process.disposeManaged requires managedProcessId.");
+    }
+    std::string error;
+    if (!DisposeManagedProcess(
+            static_cast<uint32_t>(managed_process_id), &error)) {
+      return FailureResponseJson(id, error);
+    }
+    return SuccessResponseJson(id, "null");
   }
   if (method == "process.snapshot") {
     int process_id = 0;

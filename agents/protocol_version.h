@@ -11,7 +11,7 @@
 namespace agent_rover {
 
 /** Current JSON protocol version spoken by driver and agent. */
-constexpr char kProtocolVersion[] = "2026-06-25";
+constexpr char kProtocolVersion[] = "2026-07-01";
 
 /** TCP frame protocol version spoken by driver and agent. */
 constexpr uint16_t kTcpFrameVersion = 2;

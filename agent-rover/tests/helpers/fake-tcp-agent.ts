@@ -20,6 +20,7 @@ import type {
   RemoteCursor,
   RemoteAgentCapabilities,
   RemoteInputOperation,
+  RemoteManagedProcessLaunchOptions,
   RemoteMonitor,
   RemoteProcessSnapshot,
 } from '../../src/index';
@@ -59,6 +60,9 @@ export interface FakeTcpAgentOptions {
   readonly inputOperations?: RemoteInputOperation[];
   readonly launchResult?: RemoteApplicationProcess;
   readonly launches?: RemoteApplicationLaunchOptions[];
+  readonly disposedManagedProcessIds?: number[];
+  readonly killedManagedProcessIds?: number[];
+  readonly managedLaunches?: FakeManagedProcessLaunchOptions[];
   readonly protocolVersionOverride?: string;
   readonly screenshotImage?: Buffer;
   readonly windows?: readonly AppWindowSnapshot[];
@@ -103,7 +107,11 @@ export const defaultFakeCapabilities: RemoteAgentCapabilities = {
     'file.stat',
     'file.write',
     'process.kill',
+    'process.killManaged',
     'process.list',
+    'process.disposeManaged',
+    'process.launchManaged',
+    'process.managedSnapshot',
     'process.snapshot',
     'eventLogs.read',
     tcpFrameCapabilityId,
@@ -200,6 +208,12 @@ const defaultLaunchResult: RemoteApplicationProcess = {
   id: 4321,
   name: 'fake-launched-app',
 };
+
+export type FakeManagedProcessLaunchOptions =
+  RemoteManagedProcessLaunchOptions & {
+    readonly stderrPath?: string;
+    readonly stdoutPath?: string;
+  };
 
 const createFakeProcessSnapshot = (
   process: RemoteApplicationProcess,
@@ -371,10 +385,16 @@ export const startFakeTcpAgent = async (
   const directories = new Set<string>(['C:/']);
   const files = new Map<string, Buffer>();
   const processes = new Map<number, RemoteProcessSnapshot>();
+  const managedProcesses = new Map<number, number>();
+  const managedProcessOptions = new Map<
+    number,
+    FakeManagedProcessLaunchOptions
+  >();
   const receivedTransferParts = new Map<string, Buffer[]>();
   const receivedTransfers = new Map<string, Buffer>();
   const sockets = new Set<Socket>();
   let clipboardText = '';
+  let nextManagedProcessId = 1;
   let sawBase64Write = false;
 
   const ensureDirectory = (path: string): void => {
@@ -409,6 +429,23 @@ export const startFakeTcpAgent = async (
       };
     }
     return undefined;
+  };
+
+  const writeLaunchedOutputFiles = (params: Record<string, unknown>): void => {
+    if (typeof params.stdoutPath === 'string') {
+      ensureDirectory(parentPath(params.stdoutPath));
+      files.set(
+        normalizePath(params.stdoutPath),
+        Buffer.from(options.launchedStdout ?? 'managed stdout', 'utf8')
+      );
+    }
+    if (typeof params.stderrPath === 'string') {
+      ensureDirectory(parentPath(params.stderrPath));
+      files.set(
+        normalizePath(params.stderrPath),
+        Buffer.from(options.launchedStderr ?? 'managed stderr', 'utf8')
+      );
+    }
   };
 
   const server: Server = createServer((socket) => {
@@ -673,24 +710,127 @@ export const startFakeTcpAgent = async (
             const process = options.launchResult ?? defaultLaunchResult;
             const path =
               typeof recordParams.path === 'string' ? recordParams.path : '';
-            if (typeof recordParams.stdoutPath === 'string') {
-              ensureDirectory(parentPath(recordParams.stdoutPath));
-              files.set(
-                normalizePath(recordParams.stdoutPath),
-                Buffer.from(options.launchedStdout ?? 'managed stdout', 'utf8')
-              );
-            }
-            if (typeof recordParams.stderrPath === 'string') {
-              ensureDirectory(parentPath(recordParams.stderrPath));
-              files.set(
-                normalizePath(recordParams.stderrPath),
-                Buffer.from(options.launchedStderr ?? 'managed stderr', 'utf8')
-              );
-            }
+            writeLaunchedOutputFiles(recordParams);
             processes.set(process.id, createFakeProcessSnapshot(process, path));
             sendSuccess(id, toJson(process));
           }
           return;
+        case 'process.launchManaged':
+          options.managedLaunches?.push(
+            recordParams as unknown as FakeManagedProcessLaunchOptions
+          );
+          {
+            const process = options.launchResult ?? defaultLaunchResult;
+            const managedProcessId = nextManagedProcessId;
+            nextManagedProcessId += 1;
+            const path =
+              typeof recordParams.path === 'string' ? recordParams.path : '';
+            const launchOptions =
+              recordParams as unknown as FakeManagedProcessLaunchOptions;
+            writeLaunchedOutputFiles(recordParams);
+            processes.set(process.id, createFakeProcessSnapshot(process, path));
+            managedProcesses.set(managedProcessId, process.id);
+            managedProcessOptions.set(managedProcessId, launchOptions);
+            sendSuccess(id, {
+              id: process.id,
+              managedProcessId,
+              name: process.name,
+              stderrPath:
+                typeof recordParams.stderrPath === 'string'
+                  ? recordParams.stderrPath
+                  : null,
+              stdoutPath:
+                typeof recordParams.stdoutPath === 'string'
+                  ? recordParams.stdoutPath
+                  : null,
+            });
+          }
+          return;
+        case 'process.managedSnapshot': {
+          const managedProcessId = recordParams.managedProcessId;
+          if (typeof managedProcessId !== 'number') {
+            sendFailure(
+              id,
+              'process.managedSnapshot requires managedProcessId.'
+            );
+            return;
+          }
+          const processId = managedProcesses.get(managedProcessId);
+          if (processId === undefined) {
+            sendFailure(
+              id,
+              'process.managedSnapshot requires a known process.'
+            );
+            return;
+          }
+          sendSuccess(
+            id,
+            toJson(
+              processes.get(processId) ?? {
+                exitCode: null,
+                id: processId,
+                name: '',
+                path: '',
+                running: false,
+              }
+            )
+          );
+          return;
+        }
+        case 'process.killManaged': {
+          const managedProcessId = recordParams.managedProcessId;
+          if (typeof managedProcessId !== 'number') {
+            sendFailure(id, 'process.killManaged requires managedProcessId.');
+            return;
+          }
+          const processId = managedProcesses.get(managedProcessId);
+          if (processId === undefined) {
+            sendFailure(id, 'process.killManaged requires a known process.');
+            return;
+          }
+          options.killedManagedProcessIds?.push(managedProcessId);
+          const current = processes.get(processId);
+          processes.set(processId, {
+            exitCode: 1,
+            id: processId,
+            name: current?.name ?? '',
+            path: current?.path ?? '',
+            running: false,
+          });
+          sendSuccess(id, null);
+          return;
+        }
+        case 'process.disposeManaged': {
+          const managedProcessId = recordParams.managedProcessId;
+          if (typeof managedProcessId !== 'number') {
+            sendFailure(
+              id,
+              'process.disposeManaged requires managedProcessId.'
+            );
+            return;
+          }
+          const processId = managedProcesses.get(managedProcessId);
+          if (processId === undefined) {
+            sendSuccess(id, null);
+            return;
+          }
+          options.disposedManagedProcessIds?.push(managedProcessId);
+          const launchOptions = managedProcessOptions.get(managedProcessId);
+          const current = processes.get(processId);
+          if (launchOptions?.killTreeOnDispose === true) {
+            processes.set(processId, {
+              exitCode: 1,
+              id: processId,
+              name: current?.name ?? '',
+              path: current?.path ?? '',
+              running: false,
+            });
+          }
+          managedProcesses.delete(managedProcessId);
+          managedProcessOptions.delete(managedProcessId);
+          sendSuccess(id, null);
+          return;
+        }
         case 'process.snapshot': {
           const processId = recordParams.processId;
           if (typeof processId !== 'number') {
