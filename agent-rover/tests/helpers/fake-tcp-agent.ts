@@ -58,8 +58,11 @@ export interface FakeTcpAgentOptions {
   readonly launchedStderr?: string;
   readonly launchedStdout?: string;
   readonly inputOperations?: RemoteInputOperation[];
+  readonly initialProcesses?: readonly RemoteProcessSnapshot[];
+  readonly killedProcessIds?: number[];
   readonly launchResult?: RemoteApplicationProcess;
   readonly launches?: RemoteApplicationLaunchOptions[];
+  readonly lockedRenameFailures?: Readonly<Record<string, number>>;
   readonly killedManagedProcessIds?: number[];
   readonly managedLaunches?: FakeManagedProcessLaunchOptions[];
   readonly releasedManagedProcessIds?: number[];
@@ -100,6 +103,7 @@ export const defaultFakeCapabilities: RemoteAgentCapabilities = {
     'file.exists',
     'file.mkdir',
     'file.mkdtemp',
+    'file.manifest',
     'file.read',
     'file.readdir',
     'file.remove',
@@ -397,6 +401,17 @@ export const startFakeTcpAgent = async (
   let nextManagedProcessId = 1;
   let sawBase64Write = false;
 
+  for (const process of options.initialProcesses ?? []) {
+    processes.set(process.id, process);
+  }
+
+  const lockedRenameFailures = new Map(
+    Object.entries(options.lockedRenameFailures ?? {}).map(([path, count]) => [
+      normalizePath(path),
+      count,
+    ])
+  );
+
   const ensureDirectory = (path: string): void => {
     const normalized = normalizePath(path);
     if (normalized === '') {
@@ -446,6 +461,42 @@ export const startFakeTcpAgent = async (
         Buffer.from(options.launchedStderr ?? 'managed stderr', 'utf8')
       );
     }
+  };
+
+  const relativePath = (root: string, path: string): string => {
+    const normalizedRoot = normalizePath(root);
+    const normalizedPath = normalizePath(path);
+    if (normalizedPath === normalizedRoot) {
+      return '';
+    }
+    return normalizedPath.slice(normalizedRoot.length + 1);
+  };
+
+  const manifestEntries = (root: string): readonly JsonValue[] => {
+    const normalizedRoot = normalizePath(root);
+    const entries = [
+      ...[...directories]
+        .filter((entry) => entry.startsWith(`${normalizedRoot}/`))
+        .map((entry) => ({
+          modifiedAt: fakeTimestamp,
+          path: relativePath(normalizedRoot, entry),
+          size: 0,
+          type: 'directory',
+        })),
+      ...[...files.entries()]
+        .filter(([entry]) => entry.startsWith(`${normalizedRoot}/`))
+        .map(([entry, data]) => ({
+          modifiedAt: fakeTimestamp,
+          path: relativePath(normalizedRoot, entry),
+          sha256: sha256Hex(data),
+          size: data.byteLength,
+          type: 'file',
+        })),
+    ];
+    return entries
+      .filter((entry) => entry.path !== '')
+      .sort((left, right) => left.path.localeCompare(right.path))
+      .map((entry) => toJson(entry));
   };
 
   const server: Server = createServer((socket) => {
@@ -868,6 +919,7 @@ export const startFakeTcpAgent = async (
             return;
           }
           const current = processes.get(processId);
+          options.killedProcessIds?.push(processId);
           processes.set(processId, {
             exitCode: 1,
             id: processId,
@@ -992,6 +1044,20 @@ export const startFakeTcpAgent = async (
           sendSuccess(id, toJson(entries));
           return;
         }
+        case 'file.manifest': {
+          const path = recordParams.path;
+          if (
+            typeof path !== 'string' ||
+            !directories.has(normalizePath(path))
+          ) {
+            sendFailure(id, 'file.manifest requires directory path.');
+            return;
+          }
+          sendSuccess(id, {
+            entries: toJson(manifestEntries(path)),
+          });
+          return;
+        }
         case 'file.rename': {
           const from = recordParams.from;
           const to = recordParams.to;
@@ -1001,6 +1067,16 @@ export const startFakeTcpAgent = async (
           }
           const normalizedFrom = normalizePath(from);
           const normalizedTo = normalizePath(to);
+          const remainingLockedFailures =
+            lockedRenameFailures.get(normalizedTo) ?? 0;
+          if (remainingLockedFailures > 0) {
+            lockedRenameFailures.set(normalizedTo, remainingLockedFailures - 1);
+            sendFailure(
+              id,
+              `MoveFileExW failed. path=${normalizedTo} win32Error=32`
+            );
+            return;
+          }
           const file = files.get(normalizedFrom);
           if (file !== undefined) {
             ensureDirectory(parentPath(normalizedTo));

@@ -579,6 +579,14 @@ export interface RemoteFileSystem {
   readonly rename: (from: string, to: string) => Promise<void>;
   /** Creates a temporary directory from a prefix and returns its path. */
   readonly mkdtemp: (prefix: string) => Promise<string>;
+  /** Synchronizes a local directory to the agent machine. */
+  readonly syncDirectory: (
+    options: RemoteDirectorySyncOptions
+  ) => Promise<RemoteDirectorySyncResult>;
+  /** Downloads a remote directory from the agent machine. */
+  readonly downloadDirectory: (
+    options: RemoteDirectoryDownloadOptions
+  ) => Promise<RemoteDirectoryDownloadResult>;
 }
 
 /** Remote file type. */
@@ -600,6 +608,94 @@ export interface RemoteFileStat {
 export interface RemoteDirectoryEntry extends RemoteFileStat {
   /** Entry name. */
   readonly name: string;
+}
+
+/** Directory synchronization mode. */
+export type RemoteDirectorySyncMode = 'mirror' | 'update';
+
+/** Directory synchronization checksum algorithm. */
+export type RemoteDirectoryChecksum = 'sha256';
+
+/** Policy used when a remote file operation fails because a file is locked. */
+export type RemoteLockedFilePolicy =
+  | 'fail'
+  | 'retry'
+  | 'killRelatedProcessesAndRetry';
+
+/** Recursive directory manifest entry. */
+export interface RemoteDirectoryManifestEntry {
+  /** Relative path using forward slashes. */
+  readonly path: string;
+  /** Entry type. */
+  readonly type: RemoteFileType;
+  /** Size in bytes. */
+  readonly size: number;
+  /** Last modification timestamp as an ISO string. */
+  readonly modifiedAt: string;
+  /** SHA-256 digest for file entries when requested and available. */
+  readonly sha256?: string;
+}
+
+/** Options for synchronizing a local directory to the agent machine. */
+export interface RemoteDirectorySyncOptions {
+  /** Local source directory. */
+  readonly localPath: string;
+  /** Remote destination directory. */
+  readonly remotePath: string;
+  /** Synchronization mode. */
+  readonly mode?: RemoteDirectorySyncMode;
+  /** Checksum algorithm used for file comparison. */
+  readonly checksum?: RemoteDirectoryChecksum;
+  /** Whether remote entries missing from the local source should be deleted. */
+  readonly deleteExtraneous?: boolean;
+  /** Include glob patterns matched against forward-slash relative paths. */
+  readonly include?: readonly string[];
+  /** Exclude glob patterns matched against forward-slash relative paths. */
+  readonly exclude?: readonly string[];
+  /** Policy used when remote files are locked. */
+  readonly onLockedFile?: RemoteLockedFilePolicy;
+  /** Remote process executable path prefixes related to locked files. */
+  readonly relatedProcessPaths?: readonly string[];
+}
+
+/** Result returned after synchronizing a directory to the agent machine. */
+export interface RemoteDirectorySyncResult {
+  /** Number of files uploaded or replaced. */
+  readonly uploadedFiles: number;
+  /** Number of unchanged files skipped. */
+  readonly skippedFiles: number;
+  /** Number of directories created on the agent machine. */
+  readonly createdDirectories: number;
+  /** Number of extraneous remote files deleted. */
+  readonly deletedFiles: number;
+  /** Number of extraneous remote directories deleted. */
+  readonly deletedDirectories: number;
+  /** Number of uploaded bytes. */
+  readonly bytesUploaded: number;
+}
+
+/** Options for downloading a remote directory from the agent machine. */
+export interface RemoteDirectoryDownloadOptions {
+  /** Remote source directory. */
+  readonly remotePath: string;
+  /** Local destination directory. */
+  readonly localPath: string;
+  /** Whether a missing remote source should be ignored. */
+  readonly ignoreMissing?: boolean;
+  /** Include glob patterns matched against forward-slash relative paths. */
+  readonly include?: readonly string[];
+  /** Exclude glob patterns matched against forward-slash relative paths. */
+  readonly exclude?: readonly string[];
+}
+
+/** Result returned after downloading a remote directory. */
+export interface RemoteDirectoryDownloadResult {
+  /** Number of files downloaded. */
+  readonly downloadedFiles: number;
+  /** Number of directories created locally. */
+  readonly createdDirectories: number;
+  /** Number of downloaded bytes. */
+  readonly bytesDownloaded: number;
 }
 
 /** Directory creation options. */
@@ -729,6 +825,41 @@ export interface RemoteDiagnosticsArtifact {
   readonly contentType: string;
 }
 
+/** Remote or process artifact to save with diagnostics. */
+export type RemoteDiagnosticsAttachment =
+  | {
+      /** Attachment kind discriminator. */
+      readonly kind: 'remoteFile';
+      /** Stable attachment name used under the attachments directory. */
+      readonly name: string;
+      /** Remote file path. */
+      readonly path: string;
+      /** Whether attachment failures should be recorded instead of thrown. */
+      readonly optional?: boolean;
+      /** Content type recorded in the diagnostics manifest. */
+      readonly contentType?: string;
+    }
+  | {
+      /** Attachment kind discriminator. */
+      readonly kind: 'remoteDirectory';
+      /** Stable attachment name used under the attachments directory. */
+      readonly name: string;
+      /** Remote directory path. */
+      readonly path: string;
+      /** Whether attachment failures should be recorded instead of thrown. */
+      readonly optional?: boolean;
+    }
+  | {
+      /** Attachment kind discriminator. */
+      readonly kind: 'managedProcess';
+      /** Stable attachment name used under the attachments directory. */
+      readonly name: string;
+      /** Managed process whose captured stdout and stderr should be saved. */
+      readonly process: RemoteManagedProcess;
+      /** Whether attachment failures should be recorded instead of thrown. */
+      readonly optional?: boolean;
+    };
+
 /** Result returned after diagnostics artifacts are saved. */
 export interface RemoteDiagnosticsSaveResult {
   /** Directory containing all diagnostics artifacts. */
@@ -749,6 +880,8 @@ export interface SaveDiagnosticsOptions {
   readonly agent?: RemoteAgent;
   /** Capture options used when agent is supplied. */
   readonly captureOptions?: RemoteDiagnosticsCaptureOptions;
+  /** Additional remote or process artifacts saved with the diagnostics bundle. */
+  readonly attachments?: readonly RemoteDiagnosticsAttachment[];
 }
 
 /** Options for wrapping an operation with failure diagnostics. */

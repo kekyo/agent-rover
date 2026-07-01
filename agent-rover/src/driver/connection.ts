@@ -4,6 +4,18 @@
 // https://github.com/kekyo/agent-rover
 
 import { createHash } from 'node:crypto';
+import {
+  mkdir as makeLocalDirectory,
+  readdir as readLocalDirectory,
+  readFile as readLocalFile,
+  stat as statLocalPath,
+  writeFile as writeLocalFile,
+} from 'node:fs/promises';
+import {
+  dirname as localDirname,
+  join as joinLocalPath,
+  relative as relativeLocalPath,
+} from 'node:path';
 
 import type {
   AppWindow,
@@ -31,8 +43,14 @@ import type {
   RemoteDiagnosticsCapture,
   RemoteDiagnosticsCaptureOptions,
   RemoteDiagnosticsWindow,
+  RemoteDirectoryDownloadOptions,
+  RemoteDirectoryDownloadResult,
   RemoteDirectoryEntry,
+  RemoteDirectoryManifestEntry,
+  RemoteDirectorySyncOptions,
+  RemoteDirectorySyncResult,
   RemoteFileStat,
+  RemoteFileType,
   RemoteStableBoundsWaitOptions,
   RemoteInputOperation,
   RemoteKeyboardPressOptions,
@@ -93,10 +111,41 @@ interface ManagedProcessLaunchResult {
   readonly stderrPath: string | undefined;
 }
 
+interface LocalDirectoryManifestEntry extends RemoteDirectoryManifestEntry {
+  readonly absolutePath: string;
+}
+
+interface DirectoryFilter {
+  readonly included: (path: string, type: RemoteFileType) => boolean;
+  readonly excluded: (path: string, type: RemoteFileType) => boolean;
+}
+
+interface DirectorySyncCounters {
+  uploadedFiles: number;
+  skippedFiles: number;
+  createdDirectories: number;
+  deletedFiles: number;
+  deletedDirectories: number;
+  bytesUploaded: number;
+}
+
+interface DirectoryDownloadCounters {
+  downloadedFiles: number;
+  createdDirectories: number;
+  bytesDownloaded: number;
+}
+
+interface LockedFileRetryOptions {
+  readonly policy: 'fail' | 'retry' | 'killRelatedProcessesAndRetry';
+  readonly relatedProcessPaths: readonly string[];
+}
+
 const defaultTimeoutMs = 30000;
 const defaultPasteRestoreDelayMs = 500;
 const binaryTransferChunkSize = 64 * 1024;
 const maxRecentDiagnosticsOperations = 100;
+const lockedFileRetryAttempts = 5;
+const lockedFileRetryDelayMs = 100;
 
 const sha256Hex = (data: Buffer): string =>
   createHash('sha256').update(data).digest('hex');
@@ -155,6 +204,155 @@ const cloneInputOperation = (
   operation: RemoteInputOperation
 ): RemoteInputOperation =>
   JSON.parse(JSON.stringify(operation)) as RemoteInputOperation;
+
+const normalizeDirectoryRelativePath = (path: string): string =>
+  path.replace(/\\/gu, '/').replace(/^\/+/u, '').replace(/\/+$/u, '');
+
+const normalizeRemotePath = (path: string): string => {
+  const normalized = path.replace(/\\/gu, '/').replace(/\/+$/u, '');
+  return /^[A-Za-z]:$/u.test(normalized) ? `${normalized}/` : normalized;
+};
+
+const joinRemotePath = (root: string, relativePath: string): string => {
+  const normalizedRoot = normalizeRemotePath(root);
+  const normalizedRelative = normalizeDirectoryRelativePath(relativePath);
+  if (normalizedRelative === '') {
+    return normalizedRoot;
+  }
+  if (normalizedRoot.endsWith('/')) {
+    return `${normalizedRoot}${normalizedRelative}`;
+  }
+  return `${normalizedRoot}/${normalizedRelative}`;
+};
+
+const normalizeLocalRelativePath = (root: string, path: string): string =>
+  normalizeDirectoryRelativePath(relativeLocalPath(root, path));
+
+const escapeRegExpCharacter = (character: string): string =>
+  character.replace(/[\\^$.*+?()[\]{}|]/gu, '\\$&');
+
+const globToRegExp = (pattern: string): RegExp => {
+  const normalized = normalizeDirectoryRelativePath(pattern);
+  let source = '^';
+  for (let index = 0; index < normalized.length; index += 1) {
+    const character = normalized[index];
+    if (character === '*') {
+      if (normalized[index + 1] === '*') {
+        source += '.*';
+        index += 1;
+      } else {
+        source += '[^/]*';
+      }
+    } else if (character === '?') {
+      source += '[^/]';
+    } else if (character !== undefined) {
+      source += escapeRegExpCharacter(character);
+    }
+  }
+  source += '$';
+  return new RegExp(source, 'u');
+};
+
+const pathMatchesAnyPattern = (
+  path: string,
+  type: RemoteFileType,
+  patterns: readonly RegExp[]
+): boolean => {
+  const normalized = normalizeDirectoryRelativePath(path);
+  const candidates =
+    type === 'directory' ? [normalized, `${normalized}/`] : [normalized];
+  return patterns.some((pattern) =>
+    candidates.some((candidate) => pattern.test(candidate))
+  );
+};
+
+const createDirectoryFilter = (
+  include: readonly string[] | undefined,
+  exclude: readonly string[] | undefined
+): DirectoryFilter => {
+  const includePatterns = (include ?? []).map((pattern) =>
+    globToRegExp(pattern)
+  );
+  const excludePatterns = (exclude ?? []).map((pattern) =>
+    globToRegExp(pattern)
+  );
+  return {
+    excluded: (path, type): boolean =>
+      pathMatchesAnyPattern(path, type, excludePatterns),
+    included: (path, type): boolean =>
+      (includePatterns.length === 0 ||
+        pathMatchesAnyPattern(path, type, includePatterns)) &&
+      !pathMatchesAnyPattern(path, type, excludePatterns),
+  };
+};
+
+const buildLocalDirectoryManifest = async (
+  root: string,
+  filter: DirectoryFilter
+): Promise<readonly LocalDirectoryManifestEntry[]> => {
+  const entries: LocalDirectoryManifestEntry[] = [];
+  const visit = async (directory: string): Promise<void> => {
+    for (const name of await readLocalDirectory(directory)) {
+      const absolutePath = joinLocalPath(directory, name);
+      const stat = await statLocalPath(absolutePath);
+      const relativePath = normalizeLocalRelativePath(root, absolutePath);
+      if (stat.isDirectory()) {
+        if (filter.excluded(relativePath, 'directory')) {
+          continue;
+        }
+        if (filter.included(relativePath, 'directory')) {
+          entries.push({
+            absolutePath,
+            modifiedAt: stat.mtime.toISOString(),
+            path: relativePath,
+            size: 0,
+            type: 'directory',
+          });
+        }
+        await visit(absolutePath);
+      } else if (stat.isFile() && filter.included(relativePath, 'file')) {
+        const data = await readLocalFile(absolutePath);
+        entries.push({
+          absolutePath,
+          modifiedAt: stat.mtime.toISOString(),
+          path: relativePath,
+          sha256: sha256Hex(data),
+          size: data.byteLength,
+          type: 'file',
+        });
+      }
+    }
+  };
+  await visit(root);
+  return entries.sort((left, right) => left.path.localeCompare(right.path));
+};
+
+const isLockedFileError = (error: unknown): boolean => {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const message = error.message.toLowerCase();
+  return (
+    message.includes('win32error=32') ||
+    message.includes('win32error=33') ||
+    message.includes('win32error=5') ||
+    message.includes('sharing violation') ||
+    message.includes('lock violation') ||
+    message.includes('access is denied') ||
+    message.includes('access denied')
+  );
+};
+
+const pathIsUnderRemotePrefix = (path: string, prefix: string): boolean => {
+  const normalizedPath = normalizeRemotePath(path).toLowerCase();
+  const normalizedPrefix = normalizeRemotePath(prefix).toLowerCase();
+  return (
+    normalizedPath === normalizedPrefix ||
+    normalizedPath.startsWith(
+      normalizedPrefix.endsWith('/') ? normalizedPrefix : `${normalizedPrefix}/`
+    )
+  );
+};
 
 const copyWindowSnapshot = (window: AppWindowSnapshot): AppWindowSnapshot => ({
   active: window.active,
@@ -529,6 +727,44 @@ const parseDirectoryEntries = (
     );
   }
   return value.map((entry) => parseDirectoryEntry(entry));
+};
+
+const parseDirectoryManifestEntry = (
+  value: unknown
+): RemoteDirectoryManifestEntry => {
+  if (!isRecord(value)) {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'file.manifest entry must be an object.'
+    );
+  }
+  const type = value.type;
+  if (type !== 'file' && type !== 'directory' && type !== 'other') {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'file.manifest entry type is invalid.'
+    );
+  }
+  const sha256 = readOptionalString(value, 'sha256');
+  return {
+    ...(sha256 === undefined ? {} : { sha256 }),
+    modifiedAt: readString(value, 'modifiedAt'),
+    path: normalizeDirectoryRelativePath(readString(value, 'path')),
+    size: readNumber(value, 'size'),
+    type,
+  };
+};
+
+const parseDirectoryManifest = (
+  value: JsonValue | undefined
+): readonly RemoteDirectoryManifestEntry[] => {
+  if (!isRecord(value) || !Array.isArray(value.entries)) {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'file.manifest result must include entries.'
+    );
+  }
+  return value.entries.map((entry) => parseDirectoryManifestEntry(entry));
 };
 
 const parseExists = (value: JsonValue | undefined): boolean => {
@@ -1721,6 +1957,40 @@ export const connectRemoteAgent = async (
       readBinaryTransfer
     );
 
+  const remotePathExists = async (path: string): Promise<boolean> =>
+    parseExists(
+      await requestJson('file.exists', {
+        path,
+      })
+    );
+
+  const makeRemoteDirectory = async (path: string): Promise<void> => {
+    await requestJson('file.mkdir', {
+      path,
+      recursive: true,
+    });
+  };
+
+  const readRemoteDirectoryManifest = async (
+    path: string
+  ): Promise<readonly RemoteDirectoryManifestEntry[]> =>
+    parseDirectoryManifest(
+      await requestJson('file.manifest', {
+        path,
+      })
+    );
+
+  const writeRemoteFile = async (path: string, data: Buffer): Promise<void> => {
+    const transfer = await sendBinaryTransfer('application/octet-stream', data);
+    await requestJson('file.write', {
+      contentType: transfer.contentType,
+      path,
+      sha256: transfer.sha256,
+      totalBytes: transfer.totalBytes,
+      transferId: transfer.transferId,
+    });
+  };
+
   const removeRemotePath = async (
     path: string,
     recursive: boolean
@@ -1729,6 +1999,326 @@ export const connectRemoteAgent = async (
       path,
       recursive,
     });
+  };
+
+  const renameRemotePath = async (from: string, to: string): Promise<void> => {
+    await requestJson('file.rename', {
+      from,
+      to,
+    });
+  };
+
+  const killRelatedProcesses = async (
+    relatedProcessPaths: readonly string[]
+  ): Promise<void> => {
+    const processes = parseProcessSnapshotArray(
+      await requestJson('process.list', {})
+    );
+    const related = processes.filter(
+      (process) =>
+        process.running &&
+        process.path !== '' &&
+        relatedProcessPaths.some((path) =>
+          pathIsUnderRemotePrefix(process.path, path)
+        )
+    );
+    for (const process of related) {
+      await requestJson('process.kill', {
+        processId: process.id,
+      });
+      await waitForProcessExit(process.id, {
+        intervalMs: 50,
+        timeoutMs: 5000,
+      });
+    }
+  };
+
+  const withLockedFileRetry = async <T>(
+    retryOptions: LockedFileRetryOptions,
+    operation: () => Promise<T>
+  ): Promise<T> => {
+    let killedProcesses = false;
+    for (let attempt = 0; attempt < lockedFileRetryAttempts; attempt += 1) {
+      try {
+        return await operation();
+      } catch (error) {
+        if (
+          retryOptions.policy === 'fail' ||
+          !isLockedFileError(error) ||
+          attempt === lockedFileRetryAttempts - 1
+        ) {
+          throw error;
+        }
+        if (
+          retryOptions.policy === 'killRelatedProcessesAndRetry' &&
+          !killedProcesses
+        ) {
+          await killRelatedProcesses(retryOptions.relatedProcessPaths);
+          killedProcesses = true;
+        }
+        await waitForDelay(lockedFileRetryDelayMs);
+      }
+    }
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'Locked file retry exhausted.'
+    );
+  };
+
+  const createRemoteManifestMap = (
+    entries: readonly RemoteDirectoryManifestEntry[]
+  ): Map<string, RemoteDirectoryManifestEntry> =>
+    new Map(
+      entries.map((entry) => [
+        normalizeDirectoryRelativePath(entry.path),
+        {
+          ...entry,
+          path: normalizeDirectoryRelativePath(entry.path),
+        },
+      ])
+    );
+
+  const createLocalManifestMap = (
+    entries: readonly LocalDirectoryManifestEntry[]
+  ): Map<string, LocalDirectoryManifestEntry> =>
+    new Map(entries.map((entry) => [entry.path, entry]));
+
+  const directoryDepth = (path: string): number =>
+    path === '' ? 0 : path.split('/').length;
+
+  const removeRemoteManifestEntry = async (
+    remoteRoot: string,
+    entry: RemoteDirectoryManifestEntry,
+    retryOptions: LockedFileRetryOptions
+  ): Promise<void> => {
+    await withLockedFileRetry(retryOptions, async () => {
+      await removeRemotePath(
+        joinRemotePath(remoteRoot, entry.path),
+        entry.type === 'directory'
+      );
+    });
+  };
+
+  const syncDirectory = async (
+    options: RemoteDirectorySyncOptions
+  ): Promise<RemoteDirectorySyncResult> => {
+    const mode = options.mode ?? 'mirror';
+    if (mode !== 'mirror' && mode !== 'update') {
+      throw createRemoteAgentError(
+        'INVALID_ARGUMENT',
+        'syncDirectory mode must be mirror or update.'
+      );
+    }
+    const checksum = options.checksum ?? 'sha256';
+    if (checksum !== 'sha256') {
+      throw createRemoteAgentError(
+        'INVALID_ARGUMENT',
+        'syncDirectory checksum must be sha256.'
+      );
+    }
+    const policy = options.onLockedFile ?? 'retry';
+    const retryOptions: LockedFileRetryOptions = {
+      policy,
+      relatedProcessPaths:
+        options.relatedProcessPaths ??
+        (policy === 'killRelatedProcessesAndRetry' ? [options.remotePath] : []),
+    };
+    const deleteExtraneous = options.deleteExtraneous ?? mode === 'mirror';
+    const filter = createDirectoryFilter(options.include, options.exclude);
+    const localManifest = await buildLocalDirectoryManifest(
+      options.localPath,
+      filter
+    );
+    const counters: DirectorySyncCounters = {
+      bytesUploaded: 0,
+      createdDirectories: 0,
+      deletedDirectories: 0,
+      deletedFiles: 0,
+      skippedFiles: 0,
+      uploadedFiles: 0,
+    };
+
+    if (!(await remotePathExists(options.remotePath))) {
+      await makeRemoteDirectory(options.remotePath);
+      counters.createdDirectories += 1;
+    }
+
+    const remoteManifest = await readRemoteDirectoryManifest(
+      options.remotePath
+    );
+    const remoteEntries = remoteManifest.map((entry) => ({
+      ...entry,
+      path: normalizeDirectoryRelativePath(entry.path),
+    }));
+    const includedRemoteEntries = remoteEntries.filter((entry) =>
+      filter.included(entry.path, entry.type)
+    );
+    const excludedRemoteEntries = remoteEntries.filter((entry) =>
+      filter.excluded(entry.path, entry.type)
+    );
+    const remoteMap = createRemoteManifestMap(includedRemoteEntries);
+    const localMap = createLocalManifestMap(localManifest);
+
+    for (const directory of localManifest
+      .filter((entry) => entry.type === 'directory')
+      .sort(
+        (left, right) => directoryDepth(left.path) - directoryDepth(right.path)
+      )) {
+      const remoteEntry = remoteMap.get(directory.path);
+      if (remoteEntry?.type === 'directory') {
+        continue;
+      }
+      if (remoteEntry !== undefined) {
+        await removeRemoteManifestEntry(
+          options.remotePath,
+          remoteEntry,
+          retryOptions
+        );
+      }
+      await withLockedFileRetry(retryOptions, async () => {
+        await makeRemoteDirectory(
+          joinRemotePath(options.remotePath, directory.path)
+        );
+      });
+      counters.createdDirectories += 1;
+    }
+
+    let uploadIndex = 0;
+    for (const file of localManifest.filter((entry) => entry.type === 'file')) {
+      const remoteEntry = remoteMap.get(file.path);
+      if (
+        remoteEntry?.type === 'file' &&
+        remoteEntry.size === file.size &&
+        remoteEntry.sha256 === file.sha256
+      ) {
+        counters.skippedFiles += 1;
+        continue;
+      }
+      if (remoteEntry !== undefined && remoteEntry.type === 'directory') {
+        await removeRemoteManifestEntry(
+          options.remotePath,
+          remoteEntry,
+          retryOptions
+        );
+      }
+      const remoteFilePath = joinRemotePath(options.remotePath, file.path);
+      const remoteTempPath = `${remoteFilePath}.agent-rover-${String(
+        Date.now()
+      )}-${String(uploadIndex)}.tmp`;
+      uploadIndex += 1;
+      const data = await readLocalFile(file.absolutePath);
+      await withLockedFileRetry(retryOptions, async () => {
+        await writeRemoteFile(remoteTempPath, data);
+        await renameRemotePath(remoteTempPath, remoteFilePath);
+      });
+      counters.uploadedFiles += 1;
+      counters.bytesUploaded += data.byteLength;
+    }
+
+    if (deleteExtraneous) {
+      const hasExcludedDescendant = (
+        entry: RemoteDirectoryManifestEntry
+      ): boolean =>
+        excludedRemoteEntries.some((excluded) =>
+          excluded.path.startsWith(`${entry.path}/`)
+        );
+      for (const entry of includedRemoteEntries.filter(
+        (candidate) =>
+          candidate.type !== 'directory' && !localMap.has(candidate.path)
+      )) {
+        await removeRemoteManifestEntry(
+          options.remotePath,
+          entry,
+          retryOptions
+        );
+        counters.deletedFiles += 1;
+      }
+      for (const entry of includedRemoteEntries
+        .filter(
+          (candidate) =>
+            candidate.type === 'directory' &&
+            !localMap.has(candidate.path) &&
+            !hasExcludedDescendant(candidate)
+        )
+        .sort(
+          (left, right) =>
+            directoryDepth(right.path) - directoryDepth(left.path)
+        )) {
+        await removeRemoteManifestEntry(
+          options.remotePath,
+          entry,
+          retryOptions
+        );
+        counters.deletedDirectories += 1;
+      }
+    }
+
+    return counters;
+  };
+
+  const downloadDirectory = async (
+    options: RemoteDirectoryDownloadOptions
+  ): Promise<RemoteDirectoryDownloadResult> => {
+    const counters: DirectoryDownloadCounters = {
+      bytesDownloaded: 0,
+      createdDirectories: 0,
+      downloadedFiles: 0,
+    };
+    if (!(await remotePathExists(options.remotePath))) {
+      if (options.ignoreMissing === true) {
+        return counters;
+      }
+      await readRemoteDirectoryManifest(options.remotePath);
+    }
+
+    const filter = createDirectoryFilter(options.include, options.exclude);
+    const remoteManifest = (
+      await readRemoteDirectoryManifest(options.remotePath)
+    )
+      .map((entry) => ({
+        ...entry,
+        path: normalizeDirectoryRelativePath(entry.path),
+      }))
+      .filter((entry) => filter.included(entry.path, entry.type));
+
+    await makeLocalDirectory(options.localPath, {
+      recursive: true,
+    });
+    counters.createdDirectories += 1;
+
+    for (const directory of remoteManifest
+      .filter((entry) => entry.type === 'directory')
+      .sort(
+        (left, right) => directoryDepth(left.path) - directoryDepth(right.path)
+      )) {
+      await makeLocalDirectory(
+        joinLocalPath(options.localPath, ...directory.path.split('/')),
+        {
+          recursive: true,
+        }
+      );
+      counters.createdDirectories += 1;
+    }
+
+    for (const file of remoteManifest.filter(
+      (entry) => entry.type === 'file'
+    )) {
+      const localFilePath = joinLocalPath(
+        options.localPath,
+        ...file.path.split('/')
+      );
+      await makeLocalDirectory(localDirname(localFilePath), {
+        recursive: true,
+      });
+      const data = await readRemoteFile(
+        joinRemotePath(options.remotePath, file.path)
+      );
+      await writeLocalFile(localFilePath, data);
+      counters.downloadedFiles += 1;
+      counters.bytesDownloaded += data.byteLength;
+    }
+
+    return counters;
   };
 
   const createManagedProcessCapturePaths = async (
@@ -2165,12 +2755,11 @@ export const connectRemoteAgent = async (
     findWindows: async (query): Promise<readonly AppWindow[]> =>
       await findWindowsByQuery(query),
     files: {
-      exists: async (path): Promise<boolean> =>
-        parseExists(
-          await requestJson('file.exists', {
-            path,
-          })
-        ),
+      downloadDirectory: async (
+        options
+      ): Promise<RemoteDirectoryDownloadResult> =>
+        await downloadDirectory(options),
+      exists: async (path): Promise<boolean> => await remotePathExists(path),
       mkdir: async (path, options): Promise<void> => {
         await requestJson('file.mkdir', {
           path,
@@ -2190,10 +2779,7 @@ export const connectRemoteAgent = async (
         await removeRemotePath(path, options?.recursive ?? false);
       },
       rename: async (from, to): Promise<void> => {
-        await requestJson('file.rename', {
-          from,
-          to,
-        });
+        await renameRemotePath(from, to);
       },
       stat: async (path): Promise<RemoteFileStat> =>
         parseFileStat(
@@ -2201,18 +2787,10 @@ export const connectRemoteAgent = async (
             path,
           })
         ),
+      syncDirectory: async (options): Promise<RemoteDirectorySyncResult> =>
+        await syncDirectory(options),
       writeFile: async (path, data): Promise<void> => {
-        const transfer = await sendBinaryTransfer(
-          'application/octet-stream',
-          data
-        );
-        await requestJson('file.write', {
-          contentType: transfer.contentType,
-          path,
-          sha256: transfer.sha256,
-          totalBytes: transfer.totalBytes,
-          transferId: transfer.transferId,
-        });
+        await writeRemoteFile(path, data);
       },
     },
     keyboard: {
