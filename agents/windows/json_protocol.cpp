@@ -466,6 +466,7 @@ static std::string CapabilitiesJson() {
       "\"file.stat\","
       "\"file.mkdir\","
       "\"file.readdir\","
+      "\"file.manifest\","
       "\"file.remove\","
       "\"file.rename\","
       "\"file.mkdtemp\","
@@ -628,6 +629,37 @@ static std::string DirectoryEntryArrayJson(
     output += DirectoryEntryJson(entries[index]);
   }
   output += "]";
+  return output;
+}
+
+static std::string DirectoryManifestEntryJson(
+    const DirectoryManifestEntry& entry) {
+  std::string output = "{\"path\":";
+  AppendJsonString(&output, entry.path);
+  output += ",\"type\":";
+  AppendJsonString(&output, entry.type);
+  output += ",\"size\":";
+  output += std::to_string(entry.size);
+  output += ",\"modifiedAt\":";
+  AppendJsonString(&output, entry.modified_at);
+  if (entry.has_sha256) {
+    output += ",\"sha256\":";
+    AppendJsonString(&output, entry.sha256);
+  }
+  output += "}";
+  return output;
+}
+
+static std::string DirectoryManifestJson(
+    const std::vector<DirectoryManifestEntry>& entries) {
+  std::string output = "{\"entries\":[";
+  for (size_t index = 0; index < entries.size(); index += 1) {
+    if (index != 0) {
+      output += ",";
+    }
+    output += DirectoryManifestEntryJson(entries[index]);
+  }
+  output += "]}";
   return output;
 }
 
@@ -1274,6 +1306,18 @@ std::string HandleJsonRequest(
       return FailureResponseJson(id, error);
     }
     return SuccessResponseJson(id, DirectoryEntryArrayJson(entries));
+  }
+  if (method == "file.manifest") {
+    std::string path;
+    if (!FindJsonStringField(payload, "path", &path)) {
+      return FailureResponseJson(id, "file.manifest requires path.");
+    }
+    std::vector<DirectoryManifestEntry> entries;
+    std::string error;
+    if (!ReadDirectoryManifest(path, &entries, &error)) {
+      return FailureResponseJson(id, error);
+    }
+    return SuccessResponseJson(id, DirectoryManifestJson(entries));
   }
   if (method == "file.remove") {
     std::string path;
