@@ -328,6 +328,7 @@ await agent.waitForNoWindow(
 | API | 内容 |
 | :-- | :-- |
 | `RemoteAgent.applications.launch(options)` | 接続先セッションでアプリケーションを起動し、プロセス情報を返します。 |
+| `RemoteAgent.processes.launchManaged(options)` | プロセスを起動し、管理されたライフサイクルハンドルを返します。 |
 | `RemoteAgent.processes.snapshot(processId)` | プロセスの現在状態を取得します。 |
 | `RemoteAgent.processes.exists(processId)` | プロセスが実行中かどうかを取得します。 |
 | `RemoteAgent.processes.list(options?)` | 実行中プロセスの一覧を取得します。 |
@@ -335,7 +336,9 @@ await agent.waitForNoWindow(
 | `RemoteAgent.processes.waitForExit(processId, options?)` | プロセス終了まで待機します。 |
 
 - `applications.launch()`には、`path`、`arguments`、`workingDirectory`、`environment`、`stdoutPath`、
-- `stderrPath`、`createNoWindow`を指定できます。
+  `stderrPath`、`createNoWindow`を指定できます。
+- `processes.launchManaged()`には、`path`、`arguments`、`workingDirectory`、`environment`、
+  `captureStdout`、`captureStderr`、`createNoWindow`、`killTreeOnDispose`を指定できます。
 
 コード例:
 
@@ -370,6 +373,28 @@ const exitedProcess = await agent.processes.waitForExit(
   }
 );
 expect(exitedProcess.running).toBe(false);
+```
+
+managed process の例:
+
+```typescript
+const process = await agent.processes.launchManaged({
+  arguments: ['--run-tests'],
+  captureStderr: true,
+  captureStdout: true,
+  killTreeOnDispose: true,
+  path: String.raw`C:\tools\app-under-test.exe`,
+  workingDirectory: String.raw`C:\tools`,
+});
+
+const result = await process.waitForExit({
+  timeoutMs: 30000,
+});
+expect(result.exitCode).toBe(0);
+expect(await process.stdoutText()).toContain('completed');
+expect(await process.stderrText()).toBe('');
+
+await process.dispose();
 ```
 
 ### 入力とクリップボード

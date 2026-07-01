@@ -336,6 +336,7 @@ await agent.waitForNoWindow(
 | API | Description |
 | :-- | :-- |
 | `RemoteAgent.applications.launch(options)` | Launches an application in the connected session and returns process information. |
+| `RemoteAgent.processes.launchManaged(options)` | Launches a process and returns a managed lifecycle handle. |
 | `RemoteAgent.processes.snapshot(processId)` | Gets the current state of a process. |
 | `RemoteAgent.processes.exists(processId)` | Gets whether a process is running. |
 | `RemoteAgent.processes.list(options?)` | Gets the list of running processes. |
@@ -344,6 +345,8 @@ await agent.waitForNoWindow(
 
 - `applications.launch()` accepts `path`, `arguments`, `workingDirectory`, `environment`, `stdoutPath`,
   `stderrPath`, and `createNoWindow`.
+- `processes.launchManaged()` accepts `path`, `arguments`, `workingDirectory`, `environment`,
+  `captureStdout`, `captureStderr`, `createNoWindow`, and `killTreeOnDispose`.
 
 Code example:
 
@@ -378,6 +381,28 @@ const exitedProcess = await agent.processes.waitForExit(
   }
 );
 expect(exitedProcess.running).toBe(false);
+```
+
+Managed process example:
+
+```typescript
+const process = await agent.processes.launchManaged({
+  arguments: ['--run-tests'],
+  captureStderr: true,
+  captureStdout: true,
+  killTreeOnDispose: true,
+  path: String.raw`C:\tools\app-under-test.exe`,
+  workingDirectory: String.raw`C:\tools`,
+});
+
+const result = await process.waitForExit({
+  timeoutMs: 30000,
+});
+expect(result.exitCode).toBe(0);
+expect(await process.stdoutText()).toContain('completed');
+expect(await process.stderrText()).toBe('');
+
+await process.dispose();
 ```
 
 ### Input And Clipboard
