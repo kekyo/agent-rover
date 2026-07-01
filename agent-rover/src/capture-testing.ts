@@ -13,7 +13,7 @@ import { PNG } from 'pngjs';
 import { ssim } from 'ssim.js';
 import englishLanguageData from '@tesseract.js-data/eng';
 
-import type { Releaseable, ScreenRect } from './index';
+import type { AsyncReleaseable, ScreenRect } from './index';
 
 /////////////////////////////////////////////////////////////////////////////////////////
 
@@ -490,12 +490,12 @@ export interface CaptureExpectation {
 }
 
 /** Factory for capture visual assertions. */
-export interface CaptureExpect extends Releaseable {
+export interface CaptureExpect extends AsyncReleaseable {
   /**
    * Releases resources owned by this expectation helper.
    * @remarks Shared OCR workers are terminated when OCR support has created one.
    */
-  readonly release: () => Promise<void>;
+  readonly releaseAsync: () => Promise<void>;
 
   /**
    * Creates an assertion object for a captured image.
@@ -2242,11 +2242,8 @@ export const createCaptureExpect = (
     counter += 1;
     return value;
   };
-  const release = async (): Promise<void> => {
+  const releaseAsync = async (): Promise<void> => {
     await workerController.release();
-  };
-  const dispose = (): void => {
-    void release();
   };
   const expectCapture = (
     capture: CaptureImage,
@@ -2281,9 +2278,8 @@ export const createCaptureExpect = (
   });
   return {
     expectCapture,
-    release,
-    [Symbol.dispose]: dispose,
-    [Symbol.asyncDispose]: release,
+    releaseAsync,
+    [Symbol.asyncDispose]: releaseAsync,
   };
 };
 

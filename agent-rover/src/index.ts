@@ -17,6 +17,17 @@ export interface Releaseable extends Disposable {
   readonly release: () => void;
 }
 
+/** Object that owns an external resource and can be released asynchronously. */
+export interface AsyncReleaseable extends AsyncDisposable {
+  /**
+   * Asynchronously releases the owned resource.
+   *
+   * @remarks Implementations must be idempotent and expose the same operation
+   * through `Symbol.asyncDispose`.
+   */
+  readonly releaseAsync: () => Promise<void>;
+}
+
 /**
  * Screen-relative rectangle in physical screen pixels.
  * @remarks The origin is the virtual screen origin, so multi-monitor setups may
@@ -295,12 +306,13 @@ export interface RemoteManagedProcessLaunchOptions {
   readonly captureStderr?: boolean;
   /** Whether the process should be created without a console window. */
   readonly createNoWindow?: boolean;
-  /** Whether `dispose()` and `kill()` should terminate the process tree. */
-  readonly killTreeOnDispose?: boolean;
+  /** Whether asynchronous release and `kill()` should terminate the process tree. */
+  readonly killTreeOnRelease?: boolean;
 }
 
 /** Managed remote process handle. */
-export interface RemoteManagedProcess extends RemoteApplicationProcess {
+export interface RemoteManagedProcess
+  extends RemoteApplicationProcess, AsyncReleaseable {
   /** Reads the current process state. */
   readonly snapshot: () => Promise<RemoteProcessSnapshot>;
   /** Terminates the managed process. */
@@ -313,8 +325,6 @@ export interface RemoteManagedProcess extends RemoteApplicationProcess {
   readonly stdoutText: () => Promise<string>;
   /** Reads captured standard error as UTF-8 text. */
   readonly stderrText: () => Promise<string>;
-  /** Releases remote handles and captured-output storage. */
-  readonly dispose: () => Promise<void>;
 }
 
 /** Remote process snapshot. */

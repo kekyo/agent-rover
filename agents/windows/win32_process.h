@@ -43,8 +43,8 @@ struct ApplicationProcess {
 struct ManagedProcessLaunchOptions {
   /** Application launch options. */
   ApplicationLaunchOptions launch;
-  /** Whether disposing or killing should terminate the process tree. */
-  bool kill_tree_on_dispose;
+  /** Whether release or kill should terminate the process tree. */
+  bool kill_tree_on_release;
 };
 
 /** Managed process metadata returned after launch. */
@@ -165,13 +165,13 @@ bool KillProcess(uint32_t process_id, std::string* error);
 bool KillManagedProcess(uint32_t managed_id, std::string* error);
 
 /**
- * Disposes a managed process and closes retained handles.
+ * Releases a managed process and closes retained handles.
  *
  * @param managed_id Agent-side managed process id.
  * @param error Receives a human-readable error on failure.
  * @return true on success.
  */
-bool DisposeManagedProcess(uint32_t managed_id, std::string* error);
+bool ReleaseManagedProcess(uint32_t managed_id, std::string* error);
 
 }  // namespace agent_rover
 

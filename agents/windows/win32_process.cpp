@@ -25,7 +25,7 @@ struct ManagedProcessEntry {
   std::string path;
   HANDLE process;
   HANDLE job;
-  bool kill_tree_on_dispose;
+  bool kill_tree_on_release;
 };
 
 static std::map<uint32_t, ManagedProcessEntry> g_managed_processes;
@@ -268,7 +268,7 @@ bool LaunchManagedProcess(
     std::string* error) {
   HANDLE job = nullptr;
   DWORD extra_creation_flags = 0;
-  if (options.kill_tree_on_dispose) {
+  if (options.kill_tree_on_release) {
     job = CreateJobObjectW(nullptr, nullptr);
     if (job == nullptr) {
       *error = "CreateJobObjectW failed.";
@@ -326,7 +326,7 @@ bool LaunchManagedProcess(
       process_path,
       process_information.hProcess,
       job,
-      options.kill_tree_on_dispose,
+      options.kill_tree_on_release,
   };
   g_managed_processes[managed_id] = entry;
 
@@ -435,7 +435,7 @@ bool KillManagedProcess(uint32_t managed_id, std::string* error) {
     return false;
   }
   const ManagedProcessEntry& entry = iterator->second;
-  if (entry.job != nullptr && entry.kill_tree_on_dispose) {
+  if (entry.job != nullptr && entry.kill_tree_on_release) {
     if (!TerminateJobObject(entry.job, 1)) {
       *error = "TerminateJobObject failed.";
       return false;
@@ -449,7 +449,7 @@ bool KillManagedProcess(uint32_t managed_id, std::string* error) {
   return true;
 }
 
-bool DisposeManagedProcess(uint32_t managed_id, std::string* error) {
+bool ReleaseManagedProcess(uint32_t managed_id, std::string* error) {
   const auto iterator = g_managed_processes.find(managed_id);
   if (iterator == g_managed_processes.end()) {
     return true;
@@ -457,7 +457,7 @@ bool DisposeManagedProcess(uint32_t managed_id, std::string* error) {
   ManagedProcessEntry entry = iterator->second;
   g_managed_processes.erase(iterator);
 
-  if (entry.kill_tree_on_dispose) {
+  if (entry.kill_tree_on_release) {
     ProcessSnapshot snapshot = {};
     if (!SnapshotProcessHandle(
             entry.process_id, entry.process, entry.name, entry.path, &snapshot,

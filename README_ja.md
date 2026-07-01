@@ -338,7 +338,7 @@ await agent.waitForNoWindow(
 - `applications.launch()`には、`path`、`arguments`、`workingDirectory`、`environment`、`stdoutPath`、
   `stderrPath`、`createNoWindow`を指定できます。
 - `processes.launchManaged()`には、`path`、`arguments`、`workingDirectory`、`environment`、
-  `captureStdout`、`captureStderr`、`createNoWindow`、`killTreeOnDispose`を指定できます。
+  `captureStdout`、`captureStderr`、`createNoWindow`、`killTreeOnRelease`を指定できます。
 
 コード例:
 
@@ -382,7 +382,7 @@ const process = await agent.processes.launchManaged({
   arguments: ['--run-tests'],
   captureStderr: true,
   captureStdout: true,
-  killTreeOnDispose: true,
+  killTreeOnRelease: true,
   path: String.raw`C:\tools\app-under-test.exe`,
   workingDirectory: String.raw`C:\tools`,
 });
@@ -394,7 +394,9 @@ expect(result.exitCode).toBe(0);
 expect(await process.stdoutText()).toContain('completed');
 expect(await process.stderrText()).toBe('');
 
-await process.dispose();
+await process.releaseAsync();
+// explicit resource managementを使う場合:
+// await process[Symbol.asyncDispose]();
 ```
 
 ### 入力とクリップボード
@@ -593,7 +595,7 @@ await agent.files.remove(remoteDirectory, {
 - 成果物出力を有効にすると、`actual.png`、失敗時の`expected.png`/`diff.png`、`metadata.json`、OCR時の`ocr-input.png`を保存します。
 - 既定の成果物出力先は`AGENT_ROVER_VISUAL_OUTPUT_RESULT_PATH`、variantは`AGENT_ROVER_VISUAL_VARIANT`で指定できます。オプションの`outputResultPath`と`variant`が優先されます。
 - OCRは既定で同梱の英語データ`@tesseract.js-data/eng`を使います。他言語を使う場合はTesseract.js用の言語データを依存関係に追加し、`createCaptureExpect({ ocr: { languages, langPath, gzip } })`で指定してください。
-- OCR workerは既定で読み取りごとに作成/解放されます。`workerMode: 'shared'`を指定した場合は、最後に`await captureExpect.release()`または`await captureExpect[Symbol.asyncDispose]()`で解放してください。
+- OCR workerは既定で読み取りごとに作成/解放されます。`workerMode: 'shared'`を指定した場合は、最後に`await captureExpect.releaseAsync()`または`await captureExpect[Symbol.asyncDispose]()`で解放してください。
 - GUIの描画、ウインドウ生成、ファイル保存など、結果が非同期に安定する処理の待機に使用できます。
 
 コード例:

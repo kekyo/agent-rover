@@ -60,9 +60,9 @@ export interface FakeTcpAgentOptions {
   readonly inputOperations?: RemoteInputOperation[];
   readonly launchResult?: RemoteApplicationProcess;
   readonly launches?: RemoteApplicationLaunchOptions[];
-  readonly disposedManagedProcessIds?: number[];
   readonly killedManagedProcessIds?: number[];
   readonly managedLaunches?: FakeManagedProcessLaunchOptions[];
+  readonly releasedManagedProcessIds?: number[];
   readonly protocolVersionOverride?: string;
   readonly screenshotImage?: Buffer;
   readonly windows?: readonly AppWindowSnapshot[];
@@ -109,9 +109,9 @@ export const defaultFakeCapabilities: RemoteAgentCapabilities = {
     'process.kill',
     'process.killManaged',
     'process.list',
-    'process.disposeManaged',
     'process.launchManaged',
     'process.managedSnapshot',
+    'process.releaseManaged',
     'process.snapshot',
     'eventLogs.read',
     tcpFrameCapabilityId,
@@ -800,12 +800,12 @@ export const startFakeTcpAgent = async (
           sendSuccess(id, null);
           return;
         }
-        case 'process.disposeManaged': {
+        case 'process.releaseManaged': {
           const managedProcessId = recordParams.managedProcessId;
           if (typeof managedProcessId !== 'number') {
             sendFailure(
               id,
-              'process.disposeManaged requires managedProcessId.'
+              'process.releaseManaged requires managedProcessId.'
             );
             return;
           }
@@ -814,10 +814,10 @@ export const startFakeTcpAgent = async (
             sendSuccess(id, null);
             return;
           }
-          options.disposedManagedProcessIds?.push(managedProcessId);
+          options.releasedManagedProcessIds?.push(managedProcessId);
           const launchOptions = managedProcessOptions.get(managedProcessId);
           const current = processes.get(processId);
-          if (launchOptions?.killTreeOnDispose === true) {
+          if (launchOptions?.killTreeOnRelease === true) {
             processes.set(processId, {
               exitCode: 1,
               id: processId,

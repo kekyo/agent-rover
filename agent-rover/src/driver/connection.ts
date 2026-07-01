@@ -745,9 +745,9 @@ const managedProcessLaunchOptionsToJson = (
   ...(options.environment === undefined
     ? {}
     : { environment: { ...options.environment } }),
-  ...(options.killTreeOnDispose === undefined
+  ...(options.killTreeOnRelease === undefined
     ? {}
-    : { killTreeOnDispose: options.killTreeOnDispose }),
+    : { killTreeOnRelease: options.killTreeOnRelease }),
   path: options.path,
   ...(stderrPath === undefined ? {} : { stderrPath }),
   ...(stdoutPath === undefined ? {} : { stdoutPath }),
@@ -1786,7 +1786,7 @@ export const connectRemoteAgent = async (
   });
 
   const createManagedProcessProxy = (options: {
-    readonly killTreeOnDispose: boolean;
+    readonly killTreeOnRelease: boolean;
     readonly managedProcessId: number | undefined;
     readonly nativeManaged: boolean;
     readonly process: RemoteApplicationProcess;
@@ -1794,13 +1794,13 @@ export const connectRemoteAgent = async (
     readonly stdoutPath: string | undefined;
     readonly tempDirectory: string | undefined;
   }): RemoteManagedProcess => {
-    let disposed = false;
+    let released = false;
 
-    const assertNotDisposed = (): void => {
-      if (disposed) {
+    const assertNotReleased = (): void => {
+      if (released) {
         throw createRemoteAgentError(
           'INVALID_ARGUMENT',
-          'Managed process has already been disposed.'
+          'Managed process has already been released.'
         );
       }
     };
@@ -1830,7 +1830,7 @@ export const connectRemoteAgent = async (
     };
 
     const snapshot = async (): Promise<RemoteProcessSnapshot> => {
-      assertNotDisposed();
+      assertNotReleased();
       if (!options.nativeManaged) {
         return await snapshotProcess(options.process.id);
       }
@@ -1842,7 +1842,7 @@ export const connectRemoteAgent = async (
     };
 
     const kill = async (): Promise<void> => {
-      assertNotDisposed();
+      assertNotReleased();
       if (!options.nativeManaged) {
         await requestJson('process.kill', {
           processId: options.process.id,
@@ -1871,18 +1871,18 @@ export const connectRemoteAgent = async (
       label: 'stderr' | 'stdout',
       path: string | undefined
     ): Promise<string> => {
-      assertNotDisposed();
+      assertNotReleased();
       return (await readRemoteFile(capturedPath(label, path))).toString('utf8');
     };
 
-    const disposeNative = async (): Promise<void> => {
-      await requestJson('process.disposeManaged', {
+    const releaseNative = async (): Promise<void> => {
+      await requestJson('process.releaseManaged', {
         managedProcessId: nativeManagedProcessId(),
       });
     };
 
-    const disposeFallback = async (): Promise<void> => {
-      if (!options.killTreeOnDispose) {
+    const releaseFallback = async (): Promise<void> => {
+      if (!options.killTreeOnRelease) {
         return;
       }
       const current = await snapshotProcess(options.process.id);
@@ -1898,17 +1898,17 @@ export const connectRemoteAgent = async (
       });
     };
 
-    const dispose = async (): Promise<void> => {
-      if (disposed) {
+    const releaseAsync = async (): Promise<void> => {
+      if (released) {
         return;
       }
 
       let firstError: unknown = undefined;
       try {
         if (options.nativeManaged) {
-          await disposeNative();
+          await releaseNative();
         } else {
-          await disposeFallback();
+          await releaseFallback();
         }
       } catch (error) {
         firstError = error;
@@ -1921,7 +1921,7 @@ export const connectRemoteAgent = async (
       } catch (error) {
         firstError = firstError ?? error;
       } finally {
-        disposed = true;
+        released = true;
       }
 
       if (firstError !== undefined) {
@@ -1930,16 +1930,17 @@ export const connectRemoteAgent = async (
     };
 
     return {
-      dispose,
       id: options.process.id,
       kill,
       name: options.process.name,
+      releaseAsync,
       snapshot,
       stderrText: async (): Promise<string> =>
         await readCapturedText('stderr', options.stderrPath),
       stdoutText: async (): Promise<string> =>
         await readCapturedText('stdout', options.stdoutPath),
       waitForExit,
+      [Symbol.asyncDispose]: releaseAsync,
     };
   };
 
@@ -1960,7 +1961,7 @@ export const connectRemoteAgent = async (
         )
       );
       return createManagedProcessProxy({
-        killTreeOnDispose: options.killTreeOnDispose === true,
+        killTreeOnRelease: options.killTreeOnRelease === true,
         managedProcessId: launched.managedProcessId,
         nativeManaged: true,
         process: launched.process,
@@ -1983,7 +1984,7 @@ export const connectRemoteAgent = async (
       )
     );
     return createManagedProcessProxy({
-      killTreeOnDispose: options.killTreeOnDispose === true,
+      killTreeOnRelease: options.killTreeOnRelease === true,
       managedProcessId: undefined,
       nativeManaged: false,
       process,

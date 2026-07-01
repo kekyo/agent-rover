@@ -472,7 +472,7 @@ static std::string CapabilitiesJson() {
       "\"process.kill\","
       "\"process.killManaged\","
       "\"process.list\","
-      "\"process.disposeManaged\","
+      "\"process.releaseManaged\","
       "\"process.launchManaged\","
       "\"process.managedSnapshot\","
       "\"process.snapshot\","
@@ -1041,7 +1041,7 @@ std::string HandleJsonRequest(
       return FailureResponseJson(id, parse_error);
     }
     FindJsonBoolField(
-        payload, "killTreeOnDispose", &options.kill_tree_on_dispose);
+        payload, "killTreeOnRelease", &options.kill_tree_on_release);
     ManagedProcess process = {};
     std::string error;
     if (!LaunchManagedProcess(options, &process, &error)) {
@@ -1077,15 +1077,15 @@ std::string HandleJsonRequest(
     }
     return SuccessResponseJson(id, "null");
   }
-  if (method == "process.disposeManaged") {
+  if (method == "process.releaseManaged") {
     int managed_process_id = 0;
     if (!FindJsonNumberField(payload, "managedProcessId", &managed_process_id) ||
         managed_process_id < 0) {
       return FailureResponseJson(
-          id, "process.disposeManaged requires managedProcessId.");
+          id, "process.releaseManaged requires managedProcessId.");
     }
     std::string error;
-    if (!DisposeManagedProcess(
+    if (!ReleaseManagedProcess(
             static_cast<uint32_t>(managed_process_id), &error)) {
       return FailureResponseJson(id, error);
     }

@@ -21,7 +21,7 @@ import {
   type CaptureVisualError,
   type CaptureVisualResult,
 } from '../src/testing';
-import type { Releaseable, ScreenRect } from '../src/index';
+import type { AsyncReleaseable, ScreenRect } from '../src/index';
 
 type PixelColor = readonly [number, number, number, number];
 
@@ -686,7 +686,7 @@ describe('capture visual testing foundation', () => {
       .expectCapture(capture, 'shared-b')
       .readText({ pageSegmentationModes: ['singleBlock'] });
     await captureExpect[Symbol.asyncDispose]();
-    await captureExpect.release();
+    await captureExpect.releaseAsync();
 
     expect(tesseractMock.state.createWorker).toHaveBeenCalledTimes(1);
     expect(tesseractMock.state.workers[0]!.recognize).toHaveBeenCalledTimes(2);
@@ -930,7 +930,7 @@ describe('capture visual testing foundation types', () => {
         outputResultPath: 'test-results',
         variant: 'unit',
       });
-      const releasable: Releaseable = captureExpect;
+      const releasable: AsyncReleaseable = captureExpect;
       const lookResult: CaptureLookSimilarResult =
         await expectation.toLookSimilar(expectedBuffer, {
           masks: [region],
@@ -943,7 +943,7 @@ describe('capture visual testing foundation types', () => {
       expect(lookResult.totalPixels).toBe(region.width * region.height);
       expectType<CaptureExpectedImage>(expectedImagePath);
       expectType<CaptureExpectedImage>(expectedUrl);
-      releasable.release();
+      await releasable.releaseAsync();
       // @ts-expect-error expected image must be supplied before options.
       await expectation.toLookSimilar({
         maxDiffPixels: 1,

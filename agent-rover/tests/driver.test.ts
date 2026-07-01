@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   connectRemoteAgent,
+  type AsyncReleaseable,
   type RemoteApplicationLaunchOptions,
   type RemoteInputOperation,
 } from '../src/index';
@@ -793,7 +794,7 @@ describe.concurrent('remote agent connection api', () => {
           (feature) =>
             feature !== 'process.launchManaged' &&
             feature !== 'process.killManaged' &&
-            feature !== 'process.disposeManaged' &&
+            feature !== 'process.releaseManaged' &&
             !feature.startsWith('process.managed')
         ),
       },
@@ -812,7 +813,7 @@ describe.concurrent('remote agent connection api', () => {
         environment: {
           AGENT_ROVER_MANAGED_PROCESS: 'enabled',
         },
-        killTreeOnDispose: true,
+        killTreeOnRelease: true,
         path: 'fake-managed-process.exe',
         workingDirectory: 'C:/agent-rover',
       });
@@ -821,6 +822,9 @@ describe.concurrent('remote agent connection api', () => {
         id: 4321,
         name: 'fake-launched-app',
       });
+      expect(process).not.toHaveProperty('dispose');
+      expect(process.releaseAsync).toEqual(expect.any(Function));
+      expect(process[Symbol.asyncDispose]).toEqual(expect.any(Function));
       expect(launches[0]).toMatchObject({
         arguments: ['--mode', 'managed'],
         createNoWindow: true,
@@ -855,7 +859,8 @@ describe.concurrent('remote agent connection api', () => {
         id: process.id,
         running: false,
       });
-      await process.dispose();
+      const releasable: AsyncReleaseable = process;
+      await releasable.releaseAsync();
     } finally {
       agent.release();
       await fakeAgent.close();
@@ -866,12 +871,12 @@ describe.concurrent('remote agent connection api', () => {
     const launches: RemoteApplicationLaunchOptions[] = [];
     const managedLaunches: FakeManagedProcessLaunchOptions[] = [];
     const killedManagedProcessIds: number[] = [];
-    const disposedManagedProcessIds: number[] = [];
+    const releasedManagedProcessIds: number[] = [];
     const fakeAgent = await startFakeTcpAgent({
-      disposedManagedProcessIds,
       killedManagedProcessIds,
       launches,
       managedLaunches,
+      releasedManagedProcessIds,
     });
     const agent = await connectRemoteAgent({
       host: fakeAgent.host,
@@ -882,7 +887,7 @@ describe.concurrent('remote agent connection api', () => {
         arguments: ['--native-managed'],
         captureStderr: true,
         captureStdout: true,
-        killTreeOnDispose: true,
+        killTreeOnRelease: true,
         path: 'fake-native-managed-process.exe',
       });
 
@@ -891,7 +896,7 @@ describe.concurrent('remote agent connection api', () => {
         arguments: ['--native-managed'],
         captureStderr: true,
         captureStdout: true,
-        killTreeOnDispose: true,
+        killTreeOnRelease: true,
         path: 'fake-native-managed-process.exe',
       });
       expect(managedLaunches[0]?.stdoutPath).toBe(
@@ -921,8 +926,9 @@ describe.concurrent('remote agent connection api', () => {
         running: false,
       });
 
-      await process.dispose();
-      expect(disposedManagedProcessIds).toEqual([1]);
+      const releasable: AsyncReleaseable = process;
+      await releasable[Symbol.asyncDispose]();
+      expect(releasedManagedProcessIds).toEqual([1]);
     } finally {
       agent.release();
       await fakeAgent.close();

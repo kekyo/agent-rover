@@ -346,7 +346,7 @@ await agent.waitForNoWindow(
 - `applications.launch()` accepts `path`, `arguments`, `workingDirectory`, `environment`, `stdoutPath`,
   `stderrPath`, and `createNoWindow`.
 - `processes.launchManaged()` accepts `path`, `arguments`, `workingDirectory`, `environment`,
-  `captureStdout`, `captureStderr`, `createNoWindow`, and `killTreeOnDispose`.
+  `captureStdout`, `captureStderr`, `createNoWindow`, and `killTreeOnRelease`.
 
 Code example:
 
@@ -390,7 +390,7 @@ const process = await agent.processes.launchManaged({
   arguments: ['--run-tests'],
   captureStderr: true,
   captureStdout: true,
-  killTreeOnDispose: true,
+  killTreeOnRelease: true,
   path: String.raw`C:\tools\app-under-test.exe`,
   workingDirectory: String.raw`C:\tools`,
 });
@@ -402,7 +402,9 @@ expect(result.exitCode).toBe(0);
 expect(await process.stdoutText()).toContain('completed');
 expect(await process.stderrText()).toBe('');
 
-await process.dispose();
+await process.releaseAsync();
+// Or use explicit resource management:
+// await process[Symbol.asyncDispose]();
 ```
 
 ### Input And Clipboard
@@ -605,7 +607,7 @@ await agent.files.remove(remoteDirectory, {
 - OCR uses the bundled English data `@tesseract.js-data/eng` by default.
   To use another language, add language data for Tesseract.js as a dependency and specify it with `createCaptureExpect({ ocr: { languages, langPath, gzip } })`.
 - OCR workers are created and released for each read by default.
-  If you specify `workerMode: 'shared'`, release it at the end with `await captureExpect.release()` or `await captureExpect[Symbol.asyncDispose]()`.
+  If you specify `workerMode: 'shared'`, release it at the end with `await captureExpect.releaseAsync()` or `await captureExpect[Symbol.asyncDispose]()`.
 - These helpers can be used to wait for results that stabilize asynchronously, such as GUI rendering, window creation, and file saving.
 
 Code example:
