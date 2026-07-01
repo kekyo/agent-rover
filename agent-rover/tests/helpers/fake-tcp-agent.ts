@@ -54,6 +54,8 @@ export interface FakeTcpAgentOptions {
   >;
   readonly closedWindowIds?: string[];
   readonly eventLogs?: readonly EventLogEntry[];
+  readonly launchedStderr?: string;
+  readonly launchedStdout?: string;
   readonly inputOperations?: RemoteInputOperation[];
   readonly launchResult?: RemoteApplicationProcess;
   readonly launches?: RemoteApplicationLaunchOptions[];
@@ -671,6 +673,20 @@ export const startFakeTcpAgent = async (
             const process = options.launchResult ?? defaultLaunchResult;
             const path =
               typeof recordParams.path === 'string' ? recordParams.path : '';
+            if (typeof recordParams.stdoutPath === 'string') {
+              ensureDirectory(parentPath(recordParams.stdoutPath));
+              files.set(
+                normalizePath(recordParams.stdoutPath),
+                Buffer.from(options.launchedStdout ?? 'managed stdout', 'utf8')
+              );
+            }
+            if (typeof recordParams.stderrPath === 'string') {
+              ensureDirectory(parentPath(recordParams.stderrPath));
+              files.set(
+                normalizePath(recordParams.stderrPath),
+                Buffer.from(options.launchedStderr ?? 'managed stderr', 'utf8')
+              );
+            }
             processes.set(process.id, createFakeProcessSnapshot(process, path));
             sendSuccess(id, toJson(process));
           }

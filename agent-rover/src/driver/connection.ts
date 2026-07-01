@@ -40,6 +40,8 @@ import type {
   RemoteMouseClickOptions,
   RemoteMouseDragOptions,
   RemoteMouseWheelOptions,
+  RemoteManagedProcess,
+  RemoteManagedProcessLaunchOptions,
   RemoteProtocolTraceEntry,
   RemoteProcessListOptions,
   RemoteProcessSnapshot,
@@ -82,6 +84,13 @@ interface WaitingBinaryTransfer {
   readonly reject: (error: RemoteAgentError) => void;
   readonly resolve: (data: Buffer) => void;
   readonly timer: ReturnType<typeof setTimeout>;
+}
+
+interface ManagedProcessLaunchResult {
+  readonly managedProcessId: number;
+  readonly process: RemoteApplicationProcess;
+  readonly stdoutPath: string | undefined;
+  readonly stderrPath: string | undefined;
 }
 
 const defaultTimeoutMs = 30000;
@@ -557,6 +566,43 @@ const parseApplicationProcess = (
   };
 };
 
+const readOptionalString = (
+  record: Record<string, unknown>,
+  key: string
+): string | undefined => {
+  const value = record[key];
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'string') {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      `${key} must be a string or null.`
+    );
+  }
+  return value;
+};
+
+const parseManagedProcessLaunchResult = (
+  value: JsonValue | undefined
+): ManagedProcessLaunchResult => {
+  if (!isRecord(value)) {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'process.launchManaged result must be an object.'
+    );
+  }
+  return {
+    managedProcessId: readNumber(value, 'managedProcessId'),
+    process: {
+      id: readNumber(value, 'id'),
+      name: readString(value, 'name'),
+    },
+    stderrPath: readOptionalString(value, 'stderrPath'),
+    stdoutPath: readOptionalString(value, 'stdoutPath'),
+  };
+};
+
 const parseProcessSnapshot = (
   value: JsonValue | undefined
 ): RemoteProcessSnapshot => {
@@ -674,6 +720,37 @@ const applicationLaunchOptionsToJson = (
   ...(options.stdoutPath === undefined
     ? {}
     : { stdoutPath: options.stdoutPath }),
+  ...(options.workingDirectory === undefined
+    ? {}
+    : { workingDirectory: options.workingDirectory }),
+});
+
+const managedProcessLaunchOptionsToJson = (
+  options: RemoteManagedProcessLaunchOptions,
+  stdoutPath: string | undefined,
+  stderrPath: string | undefined
+): JsonValue => ({
+  ...(options.arguments === undefined
+    ? {}
+    : { arguments: [...options.arguments] }),
+  ...(options.captureStderr === undefined
+    ? {}
+    : { captureStderr: options.captureStderr }),
+  ...(options.captureStdout === undefined
+    ? {}
+    : { captureStdout: options.captureStdout }),
+  ...(options.createNoWindow === undefined
+    ? {}
+    : { createNoWindow: options.createNoWindow }),
+  ...(options.environment === undefined
+    ? {}
+    : { environment: { ...options.environment } }),
+  ...(options.killTreeOnDispose === undefined
+    ? {}
+    : { killTreeOnDispose: options.killTreeOnDispose }),
+  path: options.path,
+  ...(stderrPath === undefined ? {} : { stderrPath }),
+  ...(stdoutPath === undefined ? {} : { stdoutPath }),
   ...(options.workingDirectory === undefined
     ? {}
     : { workingDirectory: options.workingDirectory }),
@@ -1123,8 +1200,9 @@ export const connectRemoteAgent = async (
     },
   });
 
-  await ready;
+  const connectedCapabilities = await ready;
   const activeTransport = transport;
+  const connectedFeatures = new Set(connectedCapabilities.features);
 
   const assertConnected = (): void => {
     if (disconnected || !activeTransport.isOpen()) {
@@ -1628,6 +1706,293 @@ export const connectRemoteAgent = async (
       throw new Error(`Process is still running: ${String(processId)}.`);
     }, options);
 
+  const makeRemoteTempDirectory = async (prefix: string): Promise<string> =>
+    parseTempDirectory(
+      await requestJson('file.mkdtemp', {
+        prefix,
+      })
+    );
+
+  const readRemoteFile = async (path: string): Promise<Buffer> =>
+    await parseFileReadResult(
+      await requestJson('file.read', {
+        path,
+      }),
+      readBinaryTransfer
+    );
+
+  const removeRemotePath = async (
+    path: string,
+    recursive: boolean
+  ): Promise<void> => {
+    await requestJson('file.remove', {
+      path,
+      recursive,
+    });
+  };
+
+  const createManagedProcessCapturePaths = async (
+    options: RemoteManagedProcessLaunchOptions
+  ): Promise<{
+    readonly stderrPath: string | undefined;
+    readonly stdoutPath: string | undefined;
+    readonly tempDirectory: string | undefined;
+  }> => {
+    const captureStdout = options.captureStdout === true;
+    const captureStderr = options.captureStderr === true;
+    if (!captureStdout && !captureStderr) {
+      return {
+        stderrPath: undefined,
+        stdoutPath: undefined,
+        tempDirectory: undefined,
+      };
+    }
+
+    const tempDirectory = await makeRemoteTempDirectory(
+      'C:/agent-rover-managed-process-'
+    );
+    const normalizedDirectory = tempDirectory.replace(/[\\/]+$/u, '');
+    return {
+      stderrPath: captureStderr
+        ? `${normalizedDirectory}/stderr.log`
+        : undefined,
+      stdoutPath: captureStdout
+        ? `${normalizedDirectory}/stdout.log`
+        : undefined,
+      tempDirectory,
+    };
+  };
+
+  const managedLaunchOptionsToApplicationOptions = (
+    options: RemoteManagedProcessLaunchOptions,
+    stdoutPath: string | undefined,
+    stderrPath: string | undefined
+  ): RemoteApplicationLaunchOptions => ({
+    ...(options.arguments === undefined
+      ? {}
+      : { arguments: options.arguments }),
+    ...(options.createNoWindow === undefined
+      ? {}
+      : { createNoWindow: options.createNoWindow }),
+    ...(options.environment === undefined
+      ? {}
+      : { environment: options.environment }),
+    path: options.path,
+    ...(stderrPath === undefined ? {} : { stderrPath }),
+    ...(stdoutPath === undefined ? {} : { stdoutPath }),
+    ...(options.workingDirectory === undefined
+      ? {}
+      : { workingDirectory: options.workingDirectory }),
+  });
+
+  const createManagedProcessProxy = (options: {
+    readonly killTreeOnDispose: boolean;
+    readonly managedProcessId: number | undefined;
+    readonly nativeManaged: boolean;
+    readonly process: RemoteApplicationProcess;
+    readonly stderrPath: string | undefined;
+    readonly stdoutPath: string | undefined;
+    readonly tempDirectory: string | undefined;
+  }): RemoteManagedProcess => {
+    let disposed = false;
+
+    const assertNotDisposed = (): void => {
+      if (disposed) {
+        throw createRemoteAgentError(
+          'INVALID_ARGUMENT',
+          'Managed process has already been disposed.'
+        );
+      }
+    };
+
+    const nativeManagedProcessId = (): number => {
+      const managedProcessId = options.managedProcessId;
+      if (managedProcessId === undefined) {
+        throw createRemoteAgentError(
+          'PROTOCOL_ERROR',
+          'Managed process id is unavailable.'
+        );
+      }
+      return managedProcessId;
+    };
+
+    const capturedPath = (
+      label: 'stderr' | 'stdout',
+      path: string | undefined
+    ): string => {
+      if (path === undefined) {
+        throw createRemoteAgentError(
+          'INVALID_ARGUMENT',
+          `Managed process ${label} was not captured.`
+        );
+      }
+      return path;
+    };
+
+    const snapshot = async (): Promise<RemoteProcessSnapshot> => {
+      assertNotDisposed();
+      if (!options.nativeManaged) {
+        return await snapshotProcess(options.process.id);
+      }
+      return parseProcessSnapshot(
+        await requestJson('process.managedSnapshot', {
+          managedProcessId: nativeManagedProcessId(),
+        })
+      );
+    };
+
+    const kill = async (): Promise<void> => {
+      assertNotDisposed();
+      if (!options.nativeManaged) {
+        await requestJson('process.kill', {
+          processId: options.process.id,
+        });
+        return;
+      }
+      await requestJson('process.killManaged', {
+        managedProcessId: nativeManagedProcessId(),
+      });
+    };
+
+    const waitForExit = async (
+      waitOptions?: RemoteWaitOptions
+    ): Promise<RemoteProcessSnapshot> =>
+      await waitForResult(async () => {
+        const current = await snapshot();
+        if (!current.running) {
+          return current;
+        }
+        throw new Error(
+          `Managed process is still running: ${String(options.process.id)}.`
+        );
+      }, waitOptions);
+
+    const readCapturedText = async (
+      label: 'stderr' | 'stdout',
+      path: string | undefined
+    ): Promise<string> => {
+      assertNotDisposed();
+      return (await readRemoteFile(capturedPath(label, path))).toString('utf8');
+    };
+
+    const disposeNative = async (): Promise<void> => {
+      await requestJson('process.disposeManaged', {
+        managedProcessId: nativeManagedProcessId(),
+      });
+    };
+
+    const disposeFallback = async (): Promise<void> => {
+      if (!options.killTreeOnDispose) {
+        return;
+      }
+      const current = await snapshotProcess(options.process.id);
+      if (!current.running) {
+        return;
+      }
+      await requestJson('process.kill', {
+        processId: options.process.id,
+      });
+      await waitForProcessExit(options.process.id, {
+        intervalMs: 50,
+        timeoutMs: 5000,
+      });
+    };
+
+    const dispose = async (): Promise<void> => {
+      if (disposed) {
+        return;
+      }
+
+      let firstError: unknown = undefined;
+      try {
+        if (options.nativeManaged) {
+          await disposeNative();
+        } else {
+          await disposeFallback();
+        }
+      } catch (error) {
+        firstError = error;
+      }
+
+      try {
+        if (options.tempDirectory !== undefined) {
+          await removeRemotePath(options.tempDirectory, true);
+        }
+      } catch (error) {
+        firstError = firstError ?? error;
+      } finally {
+        disposed = true;
+      }
+
+      if (firstError !== undefined) {
+        throw firstError;
+      }
+    };
+
+    return {
+      dispose,
+      id: options.process.id,
+      kill,
+      name: options.process.name,
+      snapshot,
+      stderrText: async (): Promise<string> =>
+        await readCapturedText('stderr', options.stderrPath),
+      stdoutText: async (): Promise<string> =>
+        await readCapturedText('stdout', options.stdoutPath),
+      waitForExit,
+    };
+  };
+
+  const launchManagedProcess = async (
+    options: RemoteManagedProcessLaunchOptions
+  ): Promise<RemoteManagedProcess> => {
+    const capturePaths = await createManagedProcessCapturePaths(options);
+    const nativeManaged = connectedFeatures.has('process.launchManaged');
+    if (nativeManaged) {
+      const launched = parseManagedProcessLaunchResult(
+        await requestJson(
+          'process.launchManaged',
+          managedProcessLaunchOptionsToJson(
+            options,
+            capturePaths.stdoutPath,
+            capturePaths.stderrPath
+          )
+        )
+      );
+      return createManagedProcessProxy({
+        killTreeOnDispose: options.killTreeOnDispose === true,
+        managedProcessId: launched.managedProcessId,
+        nativeManaged: true,
+        process: launched.process,
+        stderrPath: launched.stderrPath ?? capturePaths.stderrPath,
+        stdoutPath: launched.stdoutPath ?? capturePaths.stdoutPath,
+        tempDirectory: capturePaths.tempDirectory,
+      });
+    }
+
+    const process = parseApplicationProcess(
+      await requestJson(
+        'applications.launch',
+        applicationLaunchOptionsToJson(
+          managedLaunchOptionsToApplicationOptions(
+            options,
+            capturePaths.stdoutPath,
+            capturePaths.stderrPath
+          )
+        )
+      )
+    );
+    return createManagedProcessProxy({
+      killTreeOnDispose: options.killTreeOnDispose === true,
+      managedProcessId: undefined,
+      nativeManaged: false,
+      process,
+      stderrPath: capturePaths.stderrPath,
+      stdoutPath: capturePaths.stdoutPath,
+      tempDirectory: capturePaths.tempDirectory,
+    });
+  };
+
   const captureDiagnosticsWindow = async (
     window: AppWindow,
     includeDescendants: boolean,
@@ -1812,18 +2177,8 @@ export const connectRemoteAgent = async (
         });
       },
       mkdtemp: async (prefix): Promise<string> =>
-        parseTempDirectory(
-          await requestJson('file.mkdtemp', {
-            prefix,
-          })
-        ),
-      readFile: async (path): Promise<Buffer> =>
-        await parseFileReadResult(
-          await requestJson('file.read', {
-            path,
-          }),
-          readBinaryTransfer
-        ),
+        await makeRemoteTempDirectory(prefix),
+      readFile: async (path): Promise<Buffer> => await readRemoteFile(path),
       readdir: async (path): Promise<readonly RemoteDirectoryEntry[]> =>
         parseDirectoryEntries(
           await requestJson('file.readdir', {
@@ -1831,10 +2186,7 @@ export const connectRemoteAgent = async (
           })
         ),
       remove: async (path, options): Promise<void> => {
-        await requestJson('file.remove', {
-          path,
-          recursive: options?.recursive ?? false,
-        });
+        await removeRemotePath(path, options?.recursive ?? false);
       },
       rename: async (from, to): Promise<void> => {
         await requestJson('file.rename', {
@@ -1940,6 +2292,8 @@ export const connectRemoteAgent = async (
       },
     },
     processes: {
+      launchManaged: async (options): Promise<RemoteManagedProcess> =>
+        await launchManagedProcess(options),
       exists: async (processId): Promise<boolean> =>
         (await snapshotProcess(processId)).running,
       kill: async (processId): Promise<void> => {

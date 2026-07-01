@@ -783,6 +783,84 @@ describe.concurrent('remote agent connection api', () => {
     }
   });
 
+  it('launches managed processes with captured output and cleanup', async () => {
+    const launches: RemoteApplicationLaunchOptions[] = [];
+    const fakeAgent = await startFakeTcpAgent({
+      capabilities: {
+        ...defaultFakeCapabilities,
+        features: defaultFakeCapabilities.features.filter(
+          (feature) =>
+            feature !== 'process.launchManaged' &&
+            feature !== 'process.killManaged' &&
+            feature !== 'process.disposeManaged' &&
+            !feature.startsWith('process.managed')
+        ),
+      },
+      launches,
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const process = await agent.processes.launchManaged({
+        arguments: ['--mode', 'managed'],
+        captureStderr: true,
+        captureStdout: true,
+        createNoWindow: true,
+        environment: {
+          AGENT_ROVER_MANAGED_PROCESS: 'enabled',
+        },
+        killTreeOnDispose: true,
+        path: 'fake-managed-process.exe',
+        workingDirectory: 'C:/agent-rover',
+      });
+
+      expect(process).toMatchObject({
+        id: 4321,
+        name: 'fake-launched-app',
+      });
+      expect(launches[0]).toMatchObject({
+        arguments: ['--mode', 'managed'],
+        createNoWindow: true,
+        environment: {
+          AGENT_ROVER_MANAGED_PROCESS: 'enabled',
+        },
+        path: 'fake-managed-process.exe',
+        workingDirectory: 'C:/agent-rover',
+      });
+      expect(launches[0]?.stdoutPath).toMatch(
+        /^C:\/agent-rover-managed-process-fake\/stdout\.log$/u
+      );
+      expect(launches[0]?.stderrPath).toMatch(
+        /^C:\/agent-rover-managed-process-fake\/stderr\.log$/u
+      );
+
+      await expect(process.stdoutText()).resolves.toBe('managed stdout');
+      await expect(process.stderrText()).resolves.toBe('managed stderr');
+      await expect(process.snapshot()).resolves.toMatchObject({
+        id: process.id,
+        running: true,
+      });
+
+      await process.kill();
+      await expect(
+        process.waitForExit({
+          intervalMs: 1,
+          timeoutMs: 100,
+        })
+      ).resolves.toMatchObject({
+        exitCode: 1,
+        id: process.id,
+        running: false,
+      });
+      await process.dispose();
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
   it('controls window activation, state, bounds, and snapshots', async () => {
     const fakeAgent = await startFakeTcpAgent({});
     const agent = await connectRemoteAgent({

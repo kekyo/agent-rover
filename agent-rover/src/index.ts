@@ -279,6 +279,44 @@ export interface RemoteApplicationProcess {
   readonly name: string;
 }
 
+/** Options used to launch a managed remote process. */
+export interface RemoteManagedProcessLaunchOptions {
+  /** Executable, script, or document path resolved on the agent machine. */
+  readonly path: string;
+  /** Command-line arguments passed to the process. */
+  readonly arguments?: readonly string[];
+  /** Working directory used for the launched process. */
+  readonly workingDirectory?: string;
+  /** Environment variables added or overridden for the launched process. */
+  readonly environment?: Readonly<Record<string, string>>;
+  /** Whether standard output should be captured for `stdoutText()`. */
+  readonly captureStdout?: boolean;
+  /** Whether standard error should be captured for `stderrText()`. */
+  readonly captureStderr?: boolean;
+  /** Whether the process should be created without a console window. */
+  readonly createNoWindow?: boolean;
+  /** Whether `dispose()` and `kill()` should terminate the process tree. */
+  readonly killTreeOnDispose?: boolean;
+}
+
+/** Managed remote process handle. */
+export interface RemoteManagedProcess extends RemoteApplicationProcess {
+  /** Reads the current process state. */
+  readonly snapshot: () => Promise<RemoteProcessSnapshot>;
+  /** Terminates the managed process. */
+  readonly kill: () => Promise<void>;
+  /** Waits until the managed process exits. */
+  readonly waitForExit: (
+    options?: RemoteWaitOptions
+  ) => Promise<RemoteProcessSnapshot>;
+  /** Reads captured standard output as UTF-8 text. */
+  readonly stdoutText: () => Promise<string>;
+  /** Reads captured standard error as UTF-8 text. */
+  readonly stderrText: () => Promise<string>;
+  /** Releases remote handles and captured-output storage. */
+  readonly dispose: () => Promise<void>;
+}
+
 /** Remote process snapshot. */
 export interface RemoteProcessSnapshot {
   /** Operating system process id. */
@@ -369,6 +407,10 @@ export interface RemoteApplications {
 
 /** Remote process control API. */
 export interface RemoteProcesses {
+  /** Launches a process and returns a managed lifecycle handle. */
+  readonly launchManaged: (
+    options: RemoteManagedProcessLaunchOptions
+  ) => Promise<RemoteManagedProcess>;
   /** Reads a process snapshot. */
   readonly snapshot: (processId: number) => Promise<RemoteProcessSnapshot>;
   /** Tests whether a process is running. */
