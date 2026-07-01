@@ -148,4 +148,107 @@ describe.concurrent('diagnostics artifacts', () => {
       });
     }
   });
+
+  it('saves remote files, remote directories, and managed process output as attachments', async () => {
+    const fakeAgent = await startFakeTcpAgent({
+      launchedStderr: 'stderr text',
+      launchedStdout: 'stdout text',
+    });
+    const outputDirectory = await mkdtemp(join(tmpdir(), 'agent-rover-diag-'));
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      await agent.files.writeFile(
+        'C:/artifacts/muon.json',
+        Buffer.from('{"name":"muon"}')
+      );
+      await agent.files.writeFile(
+        'C:/artifacts/profile/log.txt',
+        Buffer.from('profile log')
+      );
+      const process = await agent.processes.launchManaged({
+        captureStderr: true,
+        captureStdout: true,
+        path: 'C:/artifacts/muon.exe',
+      });
+
+      const result = await saveDiagnostics(outputDirectory, {
+        agent,
+        attachments: [
+          {
+            kind: 'remoteFile',
+            name: 'muon-json',
+            path: 'C:/artifacts/muon.json',
+          },
+          {
+            kind: 'remoteDirectory',
+            name: 'profile',
+            path: 'C:/artifacts/profile',
+          },
+          {
+            kind: 'managedProcess',
+            name: 'muon-process',
+            process,
+          },
+          {
+            kind: 'remoteFile',
+            name: 'optional-missing',
+            optional: true,
+            path: 'C:/artifacts/missing.txt',
+          },
+        ],
+      });
+
+      const manifest = JSON.parse(
+        await readFile(result.manifestPath, 'utf8')
+      ) as {
+        readonly attachmentErrors: readonly { readonly name: string }[];
+        readonly artifacts: readonly { readonly path: string }[];
+      };
+      expect(manifest.artifacts.map((artifact) => artifact.path)).toEqual(
+        expect.arrayContaining([
+          'attachments/muon-json/muon.json',
+          'attachments/profile/log.txt',
+          'attachments/muon-process/stdout.txt',
+          'attachments/muon-process/stderr.txt',
+        ])
+      );
+      expect(manifest.attachmentErrors.map((error) => error.name)).toEqual([
+        'optional-missing',
+      ]);
+      await expect(
+        readFile(
+          join(outputDirectory, 'attachments', 'muon-json', 'muon.json'),
+          'utf8'
+        )
+      ).resolves.toBe('{"name":"muon"}');
+      await expect(
+        readFile(
+          join(outputDirectory, 'attachments', 'profile', 'log.txt'),
+          'utf8'
+        )
+      ).resolves.toBe('profile log');
+      await expect(
+        readFile(
+          join(outputDirectory, 'attachments', 'muon-process', 'stdout.txt'),
+          'utf8'
+        )
+      ).resolves.toBe('stdout text');
+      await expect(
+        readFile(
+          join(outputDirectory, 'attachments', 'muon-process', 'stderr.txt'),
+          'utf8'
+        )
+      ).resolves.toBe('stderr text');
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+      await rm(outputDirectory, {
+        force: true,
+        recursive: true,
+      });
+    }
+  });
 });
