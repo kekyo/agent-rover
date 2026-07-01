@@ -506,6 +506,8 @@ await agent.clipboard.clear();
 | `RemoteAgent.files.remove(path, options?)` | Removes a file or directory. |
 | `RemoteAgent.files.rename(from, to)` | Renames or moves a file or directory. |
 | `RemoteAgent.files.mkdtemp(prefix)` | Creates a temporary directory. |
+| `RemoteAgent.files.syncDirectory(options)` | Synchronizes a local directory to the connected machine with checksum-based diffing. |
+| `RemoteAgent.files.downloadDirectory(options)` | Downloads a remote directory to a local directory. |
 | `RemoteAgent.eventLogs.read(query?)` | Gets event logs from the connected machine. |
 | `RemoteAgent.diagnostics.capture(options?)` | Collects screen images, window lists, event logs, and recent operation history in memory. |
 | `saveDiagnostics(directory, options)` | Saves diagnostics to a local directory. |
@@ -542,6 +544,18 @@ await agent.files.rename(remoteFilePath, movedFilePath);
 const received = await agent.files.readFile(movedFilePath);
 expect(received.toString('utf8')).toBe('hello');
 
+// Synchronize a local runtime directory and collect remote artifacts.
+await agent.files.syncDirectory({
+  localPath: 'fixtures/runtime',
+  remotePath: `${remoteDirectory}\\runtime`,
+  mode: 'mirror',
+  onLockedFile: 'killRelatedProcessesAndRetry',
+});
+await agent.files.downloadDirectory({
+  remotePath: `${remoteDirectory}\\runtime`,
+  localPath: 'test-results/runtime-copy',
+});
+
 // Get event logs.
 const recentLogs = await agent.eventLogs.read({
   maxEntries: 20,
@@ -558,6 +572,19 @@ const capture = await agent.diagnostics.capture({
 });
 const saved = await saveDiagnostics('test-results/diagnostics', {
   capture,
+  agent,
+  attachments: [
+    {
+      kind: 'remoteFile',
+      name: 'moved-input',
+      path: movedFilePath,
+    },
+    {
+      kind: 'remoteDirectory',
+      name: 'runtime',
+      path: `${remoteDirectory}\\runtime`,
+    },
+  ],
 });
 expect(saved.artifacts.length).toBeGreaterThan(0);
 

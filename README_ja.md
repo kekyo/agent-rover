@@ -498,6 +498,8 @@ await agent.clipboard.clear();
 | `RemoteAgent.files.remove(path, options?)` | ファイル、またはディレクトリを削除します。 |
 | `RemoteAgent.files.rename(from, to)` | ファイル、またはディレクトリをリネーム・移動します。 |
 | `RemoteAgent.files.mkdtemp(prefix)` | 一時ディレクトリを作成します。 |
+| `RemoteAgent.files.syncDirectory(options)` | ローカルディレクトリをチェックサム差分で接続先マシンへ同期します。 |
+| `RemoteAgent.files.downloadDirectory(options)` | 接続先マシンのディレクトリをローカルディレクトリへ一括取得します。 |
 | `RemoteAgent.eventLogs.read(query?)` | 接続先マシンのイベントログを取得します。 |
 | `RemoteAgent.diagnostics.capture(options?)` | 画面画像、ウインドウ一覧、イベントログ、最近の操作履歴をメモリ上に収集します。 |
 | `saveDiagnostics(directory, options)` | 診断情報をローカルディレクトリに保存します。 |
@@ -534,6 +536,18 @@ await agent.files.rename(remoteFilePath, movedFilePath);
 const received = await agent.files.readFile(movedFilePath);
 expect(received.toString('utf8')).toBe('hello');
 
+// ローカル runtime ディレクトリを同期し、リモート artifact を回収
+await agent.files.syncDirectory({
+  localPath: 'fixtures/runtime',
+  remotePath: `${remoteDirectory}\\runtime`,
+  mode: 'mirror',
+  onLockedFile: 'killRelatedProcessesAndRetry',
+});
+await agent.files.downloadDirectory({
+  remotePath: `${remoteDirectory}\\runtime`,
+  localPath: 'test-results/runtime-copy',
+});
+
 // イベントログを取得
 const recentLogs = await agent.eventLogs.read({
   maxEntries: 20,
@@ -550,6 +564,19 @@ const capture = await agent.diagnostics.capture({
 });
 const saved = await saveDiagnostics('test-results/diagnostics', {
   capture,
+  agent,
+  attachments: [
+    {
+      kind: 'remoteFile',
+      name: 'moved-input',
+      path: movedFilePath,
+    },
+    {
+      kind: 'remoteDirectory',
+      name: 'runtime',
+      path: `${remoteDirectory}\\runtime`,
+    },
+  ],
 });
 expect(saved.artifacts.length).toBeGreaterThan(0);
 
