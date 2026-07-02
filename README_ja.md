@@ -58,14 +58,15 @@ const agent = await connectRemoteAgent({
 // リモート環境にファイルを保存
 await agent.files.writeFile(`C:\test.txt`, Buffer.from('test text file'));
 
-// アプリケーションを起動
-const launchedProcess = await agent.applications.launch({
+// managed lifecycle handle付きでアプリケーションを起動
+const process = await agent.processes.launchManaged({
+  killTreeOnRelease: true,
   path: 'notepad.exe',
 });
 
 // アプリケーションのウインドウを取得
 const notepadWindow = await agent.waitForWindow({
-  processId: launchedProcess.id,
+  processId: process.id,
   visible: true,
 });
 
@@ -78,6 +79,8 @@ await agent.keyboard.pasteText('Here is a remote message');
 // ウインドウの画像キャプチャを取得して保存
 const screenshot = await notepadWindow.screenshot();
 await writeFile('capture.png', screenshot.image);
+
+await process.releaseAsync();
 ```
 
 agent-roverは、GUIアプリケーション自体の監視や操作以外にも、
@@ -261,15 +264,16 @@ try {
 コード例:
 
 ```typescript
-// アプリケーションを起動
-const launchedProcess = await agent.applications.launch({
+// managed lifecycle handle付きでアプリケーションを起動
+const process = await agent.processes.launchManaged({
+  killTreeOnRelease: true,
   path: 'notepad.exe',
 });
 
 // 起動したプロセスのウインドウが表示されるまで待機
 const notepadWindow = await agent.waitForWindow(
   {
-    processId: launchedProcess.id,
+    processId: process.id,
     visible: true,
   },
   {
@@ -315,12 +319,14 @@ expect(windowCapture.visibleBounds.width).toBeGreaterThan(0);
 await stableWindow.close();
 await agent.waitForNoWindow(
   {
-    processId: launchedProcess.id,
+    processId: process.id,
   },
   {
     timeoutMs: 5000,
   }
 );
+
+await process.releaseAsync();
 ```
 
 ### アプリケーションとプロセス
