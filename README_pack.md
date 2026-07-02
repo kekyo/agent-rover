@@ -60,13 +60,14 @@ await agent.files.writeFile(
 );
 
 // Launch the application.
-const launchedProcess = await agent.applications.launch({
+const process = await agent.processes.launchManaged({
+  killTreeOnRelease: true,
   path: 'notepad.exe',
 });
 
 // Get the application window.
 const notepadWindow = await agent.waitForWindow({
-  processId: launchedProcess.id,
+  processId: process.id,
   visible: true,
 });
 
@@ -79,6 +80,8 @@ await agent.keyboard.pasteText('Here is a remote message');
 // Capture the window image and save it.
 const screenshot = await notepadWindow.screenshot();
 await writeFile('capture.png', screenshot.image);
+
+await process.releaseAsync();
 ```
 
 In addition to observing and operating GUI applications themselves, agent-rover also includes APIs for operating the target GUI session.

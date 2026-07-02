@@ -64,7 +64,7 @@ await agent.files.writeFile(
   Buffer.from('test text file')
 );
 
-// Launch the application with a managed lifecycle handle.
+// Launch the application.
 const process = await agent.processes.launchManaged({
   killTreeOnRelease: true,
   path: 'notepad.exe',

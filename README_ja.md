@@ -58,7 +58,7 @@ const agent = await connectRemoteAgent({
 // リモート環境にファイルを保存
 await agent.files.writeFile(`C:\test.txt`, Buffer.from('test text file'));
 
-// managed lifecycle handle付きでアプリケーションを起動
+// アプリケーションを起動
 const process = await agent.processes.launchManaged({
   killTreeOnRelease: true,
   path: 'notepad.exe',
