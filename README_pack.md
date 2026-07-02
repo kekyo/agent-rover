@@ -61,13 +61,11 @@ await agent.files.writeFile(
 
 // Launch the application.
 const process = await agent.processes.launchManaged({
-  killTreeOnRelease: true,
   path: 'notepad.exe',
 });
 
 // Get the application window.
-const notepadWindow = await agent.waitForWindow({
-  processId: process.id,
+const notepadWindow = await process.waitForWindow({
   visible: true,
 });
 

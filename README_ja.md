@@ -60,13 +60,11 @@ await agent.files.writeFile(`C:\test.txt`, Buffer.from('test text file'));
 
 // アプリケーションを起動
 const process = await agent.processes.launchManaged({
-  killTreeOnRelease: true,
   path: 'notepad.exe',
 });
 
 // アプリケーションのウインドウを取得
-const notepadWindow = await agent.waitForWindow({
-  processId: process.id,
+const notepadWindow = await process.waitForWindow({
   visible: true,
 });
 
@@ -264,16 +262,14 @@ try {
 コード例:
 
 ```typescript
-// managed lifecycle handle付きでアプリケーションを起動
+// マネージドライフサイクル付きでアプリケーションを起動
 const process = await agent.processes.launchManaged({
-  killTreeOnRelease: true,
   path: 'notepad.exe',
 });
 
 // 起動したプロセスのウインドウが表示されるまで待機
-const notepadWindow = await agent.waitForWindow(
+const notepadWindow = await process.waitForWindow(
   {
-    processId: process.id,
     visible: true,
   },
   {
@@ -317,9 +313,9 @@ expect(windowCapture.visibleBounds.width).toBeGreaterThan(0);
 
 // ウインドウを閉じ、閉じ終わるまで待機
 await stableWindow.close();
-await agent.waitForNoWindow(
+await process.waitForNoWindow(
   {
-    processId: process.id,
+    visible: true,
   },
   {
     timeoutMs: 5000,
@@ -334,7 +330,7 @@ await process.releaseAsync();
 | API | 内容 |
 | :-- | :-- |
 | `RemoteAgent.applications.launch(options)` | 接続先セッションでアプリケーションを起動し、プロセス情報を返します。 |
-| `RemoteAgent.processes.launchManaged(options)` | プロセスを起動し、管理されたライフサイクルハンドルを返します。 |
+| `RemoteAgent.processes.launchManaged(options)` | プロセスを起動し、追跡付きのマネージドライフサイクルハンドルを返します。 |
 | `RemoteAgent.processes.snapshot(processId)` | プロセスの現在状態を取得します。 |
 | `RemoteAgent.processes.exists(processId)` | プロセスが実行中かどうかを取得します。 |
 | `RemoteAgent.processes.list(options?)` | 実行中プロセスの一覧を取得します。 |
@@ -345,6 +341,7 @@ await process.releaseAsync();
   `stderrPath`、`createNoWindow`を指定できます。
 - `processes.launchManaged()`には、`path`、`arguments`、`workingDirectory`、`environment`、
   `captureStdout`、`captureStderr`、`createNoWindow`、`killTreeOnRelease`を指定できます。
+  `killTreeOnRelease`のデフォルトは`true`です。
 
 コード例:
 
@@ -388,7 +385,6 @@ const process = await agent.processes.launchManaged({
   arguments: ['--run-tests'],
   captureStderr: true,
   captureStdout: true,
-  killTreeOnRelease: true,
   path: String.raw`C:\tools\app-under-test.exe`,
   workingDirectory: String.raw`C:\tools`,
 });
@@ -396,7 +392,7 @@ const process = await agent.processes.launchManaged({
 const result = await process.waitForExit({
   timeoutMs: 30000,
 });
-expect(result.exitCode).toBe(0);
+expect(result.root.exitCode).toBe(0);
 expect(await process.stdoutText()).toContain('completed');
 expect(await process.stderrText()).toBe('');
 

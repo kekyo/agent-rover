@@ -66,13 +66,11 @@ await agent.files.writeFile(
 
 // Launch the application.
 const process = await agent.processes.launchManaged({
-  killTreeOnRelease: true,
   path: 'notepad.exe',
 });
 
 // Get the application window.
-const notepadWindow = await agent.waitForWindow({
-  processId: process.id,
+const notepadWindow = await process.waitForWindow({
   visible: true,
 });
 
@@ -274,14 +272,12 @@ Code example:
 ```typescript
 // Launch the application with a managed lifecycle handle.
 const process = await agent.processes.launchManaged({
-  killTreeOnRelease: true,
   path: 'notepad.exe',
 });
 
 // Wait until the launched process shows a window.
-const notepadWindow = await agent.waitForWindow(
+const notepadWindow = await process.waitForWindow(
   {
-    processId: process.id,
     visible: true,
   },
   {
@@ -325,9 +321,9 @@ expect(windowCapture.visibleBounds.width).toBeGreaterThan(0);
 
 // Close the window and wait until it is closed.
 await stableWindow.close();
-await agent.waitForNoWindow(
+await process.waitForNoWindow(
   {
-    processId: process.id,
+    visible: true,
   },
   {
     timeoutMs: 5000,
@@ -342,7 +338,7 @@ await process.releaseAsync();
 | API | Description |
 | :-- | :-- |
 | `RemoteAgent.applications.launch(options)` | Launches an application in the connected session and returns process information. |
-| `RemoteAgent.processes.launchManaged(options)` | Launches a process and returns a managed lifecycle handle. |
+| `RemoteAgent.processes.launchManaged(options)` | Launches a process and returns a tracked managed lifecycle handle. |
 | `RemoteAgent.processes.snapshot(processId)` | Gets the current state of a process. |
 | `RemoteAgent.processes.exists(processId)` | Gets whether a process is running. |
 | `RemoteAgent.processes.list(options?)` | Gets the list of running processes. |
@@ -353,6 +349,7 @@ await process.releaseAsync();
   `stderrPath`, and `createNoWindow`.
 - `processes.launchManaged()` accepts `path`, `arguments`, `workingDirectory`, `environment`,
   `captureStdout`, `captureStderr`, `createNoWindow`, and `killTreeOnRelease`.
+  `killTreeOnRelease` defaults to `true`.
 
 Code example:
 
@@ -396,7 +393,6 @@ const process = await agent.processes.launchManaged({
   arguments: ['--run-tests'],
   captureStderr: true,
   captureStdout: true,
-  killTreeOnRelease: true,
   path: String.raw`C:\tools\app-under-test.exe`,
   workingDirectory: String.raw`C:\tools`,
 });
@@ -404,7 +400,7 @@ const process = await agent.processes.launchManaged({
 const result = await process.waitForExit({
   timeoutMs: 30000,
 });
-expect(result.exitCode).toBe(0);
+expect(result.root.exitCode).toBe(0);
 expect(await process.stdoutText()).toContain('completed');
 expect(await process.stderrText()).toBe('');
 

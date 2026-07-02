@@ -13,7 +13,7 @@ schema unless the driver is extended.
 
 | Name | Value | Source |
 | --- | --- | --- |
-| JSON protocol version | `2026-06-25` | `protocolVersion` / `kProtocolVersion` |
+| JSON protocol version | `2026-07-02` | `protocolVersion` / `kProtocolVersion` |
 | TCP frame version | `2` | `tcpFrameVersion` / `kTcpFrameVersion` |
 | TCP transport capability | `transport.tcp-frame-v1` | `tcpFrameCapabilityId` / `kTcpFrameCapabilityId` |
 | Default frame payload limit | `16 * 1024 * 1024` bytes | driver and native agent |
@@ -21,7 +21,7 @@ schema unless the driver is extended.
 | Binary transfer chunk size used by driver and native agent | `64 * 1024` bytes | implementation detail, peers must accept other positive chunk sizes |
 
 The driver rejects the connection during the ready handshake when the reported
-JSON protocol version is not exactly `2026-06-25`.
+JSON protocol version is not exactly `2026-07-02`.
 
 ## Connection Lifecycle
 
@@ -239,7 +239,7 @@ Immediately after authentication, the agent must send:
   "name": "agent.ready",
   "data": {
     "capabilities": {
-      "protocolVersion": "2026-06-25",
+      "protocolVersion": "2026-07-02",
       "platform": "windows",
       "features": [
         "capabilities",
@@ -267,25 +267,30 @@ Immediately after authentication, the agent must send:
         "file.stat",
         "file.mkdir",
         "file.readdir",
+        "file.manifest",
         "file.remove",
         "file.rename",
         "file.mkdtemp",
         "process.kill",
+        "process.killManaged",
         "process.list",
+        "process.launchManaged",
+        "process.managedSnapshot",
+        "process.releaseManaged",
         "process.snapshot",
         "eventLogs.read",
         "transport.tcp-frame-v1",
         "agent.native-windows"
       ]
     },
-    "protocolVersion": "2026-06-25"
+    "protocolVersion": "2026-07-02"
   }
 }
 ```
 
 The driver validates `data.capabilities`:
 
-- `protocolVersion` must be a string and must equal `2026-06-25`.
+- `protocolVersion` must be a string and must equal `2026-07-02`.
 - `platform` must be the string `windows`.
 - `features` must be an array of strings.
 
@@ -383,7 +388,7 @@ system. Multi-monitor systems may use negative `x` or `y` values.
 
 ```json
 {
-  "protocolVersion": "2026-06-25",
+  "protocolVersion": "2026-07-02",
   "platform": "windows",
   "features": ["transport.tcp-frame-v1"]
 }
@@ -406,7 +411,8 @@ system. Multi-monitor systems may use negative `x` or `y` values.
   "controlId": 0,
   "process": {
     "id": 1001,
-    "name": "notepad.exe"
+    "name": "notepad.exe",
+    "path": "C:\\Windows\\System32\\notepad.exe"
   }
 }
 ```
@@ -504,10 +510,16 @@ Directory entries include the file stat fields plus `name`:
   "id": 4321,
   "name": "notepad.exe",
   "path": "C:\\Windows\\System32\\notepad.exe",
+  "parentProcessId": 1234,
+  "createdAt": "2026-07-02T00:00:00.000Z",
   "running": true,
   "exitCode": null
 }
 ```
+
+`parentProcessId` and `createdAt` may be `null` when the platform cannot resolve
+them. The TypeScript driver uses these fields to correlate managed process trees
+with top-level windows.
 
 `exitCode` must be `null` while unknown or while the process is still running;
 otherwise it must be a finite number.
@@ -848,6 +860,62 @@ Only `path` is required. All other fields are optional.
 
 Result: `Application Process`.
 
+### `process.launchManaged`
+
+Params are the same as `applications.launch`, with optional
+`killTreeOnRelease`. The TypeScript driver sends `killTreeOnRelease: true`
+unless the caller explicitly disables release cleanup.
+
+Result:
+
+```json
+{
+  "managedProcessId": 1,
+  "id": 4321,
+  "name": "notepad.exe",
+  "stdoutPath": "C:\\Temp\\stdout.log",
+  "stderrPath": "C:\\Temp\\stderr.log"
+}
+```
+
+`stdoutPath` and `stderrPath` may be `null`.
+
+### `process.managedSnapshot`
+
+Params:
+
+```json
+{
+  "managedProcessId": 1
+}
+```
+
+Result: `Process Snapshot`.
+
+### `process.killManaged`
+
+Params:
+
+```json
+{
+  "managedProcessId": 1
+}
+```
+
+Result: `null`.
+
+### `process.releaseManaged`
+
+Params:
+
+```json
+{
+  "managedProcessId": 1
+}
+```
+
+Result: `null`.
+
 ### `process.snapshot`
 
 Params:
@@ -1107,7 +1175,7 @@ when no event log query is supplied.
 1. Listen on a TCP port and read/write 20-byte `TRVR` frames.
 2. Implement optional auth challenge/response, including the NUL byte in the
    HMAC message prefix.
-3. Send `agent.ready` with protocol version `2026-06-25`, platform `windows`,
+3. Send `agent.ready` with protocol version `2026-07-02`, platform `windows`,
    and a string feature array.
 4. Decode JSON request frames and return matching JSON response frames.
 5. Implement binary transfer chunk encode/decode, contiguous sequence
