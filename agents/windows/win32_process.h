@@ -67,6 +67,12 @@ struct ProcessSnapshot {
   std::string name;
   /** Full executable path when available. */
   std::string path;
+  /** Whether parent_process_id is available. */
+  bool has_parent_process_id;
+  /** Parent operating system process id when available. */
+  uint32_t parent_process_id;
+  /** Process creation timestamp as an ISO string when available. */
+  std::string created_at;
   /** Whether the process is still running. */
   bool running;
   /** Whether exit_code is available. */

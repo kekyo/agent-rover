@@ -559,6 +559,8 @@ static std::string WindowJson(const WindowInfo& window) {
   output += std::to_string(window.process.id);
   output += ",\"name\":";
   AppendJsonString(&output, window.process.name);
+  output += ",\"path\":";
+  AppendJsonString(&output, window.process.path);
   output += "}}";
   return output;
 }
@@ -702,6 +704,18 @@ static std::string ProcessSnapshotJson(const ProcessSnapshot& process) {
   AppendJsonString(&output, process.name);
   output += ",\"path\":";
   AppendJsonString(&output, process.path);
+  output += ",\"parentProcessId\":";
+  if (process.has_parent_process_id) {
+    output += std::to_string(process.parent_process_id);
+  } else {
+    output += "null";
+  }
+  output += ",\"createdAt\":";
+  if (process.created_at.empty()) {
+    output += "null";
+  } else {
+    AppendJsonString(&output, process.created_at);
+  }
   output += ",\"running\":";
   output += process.running ? "true" : "false";
   output += ",\"exitCode\":";

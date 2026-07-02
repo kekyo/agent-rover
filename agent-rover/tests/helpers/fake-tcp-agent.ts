@@ -76,6 +76,7 @@ export interface FakeTcpAgent {
   readonly host: string;
   readonly port: number;
   readonly requestUsedBase64: () => boolean;
+  readonly setProcesses: (processes: readonly RemoteProcessSnapshot[]) => void;
   readonly setWindows: (windows: readonly AppWindowSnapshot[]) => void;
 }
 
@@ -143,6 +144,7 @@ export const defaultFakeWindow: AppWindowSnapshot = {
   process: {
     id: 1001,
     name: 'notepad.exe',
+    path: 'C:/Windows/System32/notepad.exe',
   },
   title: 'Notepad',
   visible: true,
@@ -166,6 +168,7 @@ export const defaultFakeChildWindow: AppWindowSnapshot = {
   process: {
     id: 1001,
     name: 'notepad.exe',
+    path: 'C:/Windows/System32/notepad.exe',
   },
   title: 'OK',
   visible: true,
@@ -223,9 +226,11 @@ const createFakeProcessSnapshot = (
   process: RemoteApplicationProcess,
   path: string
 ): RemoteProcessSnapshot => ({
+  createdAt: fakeTimestamp,
   exitCode: null,
   id: process.id,
   name: process.name,
+  parentProcessId: null,
   path,
   running: true,
 });
@@ -818,9 +823,11 @@ export const startFakeTcpAgent = async (
             id,
             toJson(
               processes.get(processId) ?? {
+                createdAt: null,
                 exitCode: null,
                 id: processId,
                 name: '',
+                parentProcessId: null,
                 path: '',
                 running: false,
               }
@@ -842,9 +849,11 @@ export const startFakeTcpAgent = async (
           options.killedManagedProcessIds?.push(managedProcessId);
           const current = processes.get(processId);
           processes.set(processId, {
+            createdAt: current?.createdAt ?? null,
             exitCode: 1,
             id: processId,
             name: current?.name ?? '',
+            parentProcessId: current?.parentProcessId ?? null,
             path: current?.path ?? '',
             running: false,
           });
@@ -870,9 +879,11 @@ export const startFakeTcpAgent = async (
           const current = processes.get(processId);
           if (launchOptions?.killTreeOnRelease === true) {
             processes.set(processId, {
+              createdAt: current?.createdAt ?? null,
               exitCode: 1,
               id: processId,
               name: current?.name ?? '',
+              parentProcessId: current?.parentProcessId ?? null,
               path: current?.path ?? '',
               running: false,
             });
@@ -892,9 +903,11 @@ export const startFakeTcpAgent = async (
             id,
             toJson(
               processes.get(processId) ?? {
+                createdAt: null,
                 exitCode: null,
                 id: processId,
                 name: '',
+                parentProcessId: null,
                 path: '',
                 running: false,
               }
@@ -921,9 +934,11 @@ export const startFakeTcpAgent = async (
           const current = processes.get(processId);
           options.killedProcessIds?.push(processId);
           processes.set(processId, {
+            createdAt: current?.createdAt ?? null,
             exitCode: 1,
             id: processId,
             name: current?.name ?? '',
+            parentProcessId: current?.parentProcessId ?? null,
             path: current?.path ?? '',
             running: false,
           });
@@ -1311,6 +1326,12 @@ export const startFakeTcpAgent = async (
     host: '127.0.0.1',
     port: address.port,
     requestUsedBase64: (): boolean => sawBase64Write,
+    setProcesses: (nextProcesses): void => {
+      processes.clear();
+      for (const process of nextProcesses) {
+        processes.set(process.id, process);
+      }
+    },
     setWindows: (nextWindows): void => {
       windows.splice(0, windows.length, ...nextWindows);
     },

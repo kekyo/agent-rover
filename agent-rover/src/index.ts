@@ -262,6 +262,8 @@ export interface AppWindowProcess {
   readonly id: number;
   /** Process executable name when the platform can resolve it. */
   readonly name: string;
+  /** Full executable path when the platform can resolve it. */
+  readonly path: string;
 }
 
 /** Options used to launch an application on the remote agent. */
@@ -306,21 +308,53 @@ export interface RemoteManagedProcessLaunchOptions {
   readonly captureStderr?: boolean;
   /** Whether the process should be created without a console window. */
   readonly createNoWindow?: boolean;
-  /** Whether asynchronous release and `kill()` should terminate the process tree. */
+  /**
+   * Whether asynchronous release should terminate the tracked process tree.
+   *
+   * @remarks Default is true. `kill()` always terminates the tracked process tree.
+   */
   readonly killTreeOnRelease?: boolean;
+}
+
+/** Logical managed application snapshot. */
+export interface RemoteManagedProcessSnapshot {
+  /** Current root process state. */
+  readonly root: RemoteProcessSnapshot;
+  /** Running descendant processes tracked for this managed process. */
+  readonly processes: readonly RemoteProcessSnapshot[];
+  /** Whether the root or any tracked descendant process is still running. */
+  readonly running: boolean;
 }
 
 /** Managed remote process handle. */
 export interface RemoteManagedProcess
   extends RemoteApplicationProcess, AsyncReleaseable {
-  /** Reads the current process state. */
-  readonly snapshot: () => Promise<RemoteProcessSnapshot>;
-  /** Terminates the managed process. */
+  /** Reads the current root process state. */
+  readonly rootSnapshot: () => Promise<RemoteProcessSnapshot>;
+  /** Reads the current logical application state. */
+  readonly snapshot: () => Promise<RemoteManagedProcessSnapshot>;
+  /** Lists running descendant processes tracked for this managed process. */
+  readonly processes: () => Promise<readonly RemoteProcessSnapshot[]>;
+  /** Finds top-level windows related to this managed process. */
+  readonly windows: (
+    query?: RemoteWindowQuery
+  ) => Promise<readonly AppWindow[]>;
+  /** Waits until a related window matching the query is available. */
+  readonly waitForWindow: (
+    query: RemoteWindowQuery,
+    options?: RemoteWaitOptions
+  ) => Promise<AppWindow>;
+  /** Waits until no related windows match the query. */
+  readonly waitForNoWindow: (
+    query?: RemoteWindowQuery,
+    options?: RemoteWaitOptions
+  ) => Promise<void>;
+  /** Terminates the tracked process tree. */
   readonly kill: () => Promise<void>;
-  /** Waits until the managed process exits. */
+  /** Waits until the root and tracked descendants exit. */
   readonly waitForExit: (
     options?: RemoteWaitOptions
-  ) => Promise<RemoteProcessSnapshot>;
+  ) => Promise<RemoteManagedProcessSnapshot>;
   /** Reads captured standard output as UTF-8 text. */
   readonly stdoutText: () => Promise<string>;
   /** Reads captured standard error as UTF-8 text. */
@@ -335,6 +369,10 @@ export interface RemoteProcessSnapshot {
   readonly name: string;
   /** Full executable path when available. */
   readonly path: string;
+  /** Parent operating system process id when available. */
+  readonly parentProcessId: number | null;
+  /** Process creation timestamp as an ISO string when available. */
+  readonly createdAt: string | null;
   /** Whether the process is still running. */
   readonly running: boolean;
   /** Exit code when known and the process has exited. */

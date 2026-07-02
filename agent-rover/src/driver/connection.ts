@@ -60,6 +60,7 @@ import type {
   RemoteMouseWheelOptions,
   RemoteManagedProcess,
   RemoteManagedProcessLaunchOptions,
+  RemoteManagedProcessSnapshot,
   RemoteProtocolTraceEntry,
   RemoteProcessListOptions,
   RemoteProcessSnapshot,
@@ -466,9 +467,17 @@ const parseProcess = (value: unknown): AppWindowProcess => {
       'Window process must be an object.'
     );
   }
+  const path = value.path;
+  if (path !== undefined && path !== null && typeof path !== 'string') {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'Window process path field must be a string or null.'
+    );
+  }
   return {
     id: readNumber(value, 'id'),
     name: readString(value, 'name'),
+    path: typeof path === 'string' ? path : '',
   };
 };
 
@@ -850,6 +859,8 @@ const parseProcessSnapshot = (
   }
   const running = value.running;
   const exitCode = value.exitCode;
+  const parentProcessId = value.parentProcessId;
+  const createdAt = value.createdAt;
   if (typeof running !== 'boolean') {
     throw createRemoteAgentError(
       'PROTOCOL_ERROR',
@@ -865,10 +876,33 @@ const parseProcessSnapshot = (
       'process snapshot exitCode field must be null or a finite number.'
     );
   }
+  if (
+    parentProcessId !== undefined &&
+    parentProcessId !== null &&
+    (typeof parentProcessId !== 'number' || !Number.isFinite(parentProcessId))
+  ) {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'process snapshot parentProcessId field must be null or a finite number.'
+    );
+  }
+  if (
+    createdAt !== undefined &&
+    createdAt !== null &&
+    typeof createdAt !== 'string'
+  ) {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'process snapshot createdAt field must be null or a string.'
+    );
+  }
   return {
+    createdAt: typeof createdAt === 'string' ? createdAt : null,
     exitCode,
     id: readNumber(value, 'id'),
     name: readString(value, 'name'),
+    parentProcessId:
+      typeof parentProcessId === 'number' ? parentProcessId : null,
     path: readString(value, 'path'),
     running,
   };
@@ -981,9 +1015,7 @@ const managedProcessLaunchOptionsToJson = (
   ...(options.environment === undefined
     ? {}
     : { environment: { ...options.environment } }),
-  ...(options.killTreeOnRelease === undefined
-    ? {}
-    : { killTreeOnRelease: options.killTreeOnRelease }),
+  killTreeOnRelease: options.killTreeOnRelease ?? true,
   path: options.path,
   ...(stderrPath === undefined ? {} : { stderrPath }),
   ...(stdoutPath === undefined ? {} : { stdoutPath }),
@@ -2376,6 +2408,7 @@ export const connectRemoteAgent = async (
   });
 
   const createManagedProcessProxy = (options: {
+    readonly baselineWindowIds: ReadonlySet<string>;
     readonly killTreeOnRelease: boolean;
     readonly managedProcessId: number | undefined;
     readonly nativeManaged: boolean;
@@ -2385,6 +2418,7 @@ export const connectRemoteAgent = async (
     readonly tempDirectory: string | undefined;
   }): RemoteManagedProcess => {
     let released = false;
+    const knownProcessIds = new Set<number>([options.process.id]);
 
     const assertNotReleased = (): void => {
       if (released) {
@@ -2419,7 +2453,7 @@ export const connectRemoteAgent = async (
       return path;
     };
 
-    const snapshot = async (): Promise<RemoteProcessSnapshot> => {
+    const rootSnapshot = async (): Promise<RemoteProcessSnapshot> => {
       assertNotReleased();
       if (!options.nativeManaged) {
         return await snapshotProcess(options.process.id);
@@ -2431,22 +2465,142 @@ export const connectRemoteAgent = async (
       );
     };
 
+    const processCreationMs = (
+      process: RemoteProcessSnapshot
+    ): number | undefined => {
+      if (process.createdAt === null) {
+        return undefined;
+      }
+      const parsed = Date.parse(process.createdAt);
+      return Number.isFinite(parsed) ? parsed : undefined;
+    };
+
+    const processBelongsToRootEra = (
+      root: RemoteProcessSnapshot,
+      process: RemoteProcessSnapshot
+    ): boolean => {
+      const rootCreatedAtMs = processCreationMs(root);
+      const processCreatedAtMs = processCreationMs(process);
+      return (
+        rootCreatedAtMs === undefined ||
+        processCreatedAtMs === undefined ||
+        processCreatedAtMs >= rootCreatedAtMs
+      );
+    };
+
+    const listRunningProcesses = async (): Promise<
+      readonly RemoteProcessSnapshot[]
+    > =>
+      parseProcessSnapshotArray(
+        await requestJson('process.list', processListOptionsToJson(undefined))
+      ).filter((process) => process.running);
+
+    const collectTrackedProcesses = async (
+      root: RemoteProcessSnapshot
+    ): Promise<readonly RemoteProcessSnapshot[]> => {
+      const runningProcesses = await listRunningProcesses();
+      const trackedIds = new Set(knownProcessIds);
+      trackedIds.add(root.id);
+      const trackedProcesses = new Map<number, RemoteProcessSnapshot>();
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const process of runningProcesses) {
+          if (process.id === root.id || process.parentProcessId === null) {
+            continue;
+          }
+          if (!trackedIds.has(process.parentProcessId)) {
+            continue;
+          }
+          if (!processBelongsToRootEra(root, process)) {
+            continue;
+          }
+          trackedProcesses.set(process.id, process);
+          if (!trackedIds.has(process.id)) {
+            trackedIds.add(process.id);
+            changed = true;
+          }
+        }
+      }
+      for (const processId of trackedIds) {
+        knownProcessIds.add(processId);
+      }
+      return [...trackedProcesses.values()].sort(
+        (left, right) => left.id - right.id
+      );
+    };
+
+    const snapshot = async (): Promise<RemoteManagedProcessSnapshot> => {
+      const root = await rootSnapshot();
+      const trackedProcesses = await collectTrackedProcesses(root);
+      return {
+        processes: trackedProcesses,
+        root,
+        running:
+          root.running || trackedProcesses.some((process) => process.running),
+      };
+    };
+
+    const processTreeDepth = (
+      process: RemoteProcessSnapshot,
+      processes: ReadonlyMap<number, RemoteProcessSnapshot>
+    ): number => {
+      let depth = 0;
+      let parentProcessId = process.parentProcessId;
+      const visited = new Set<number>();
+      while (
+        parentProcessId !== null &&
+        processes.has(parentProcessId) &&
+        !visited.has(parentProcessId)
+      ) {
+        visited.add(parentProcessId);
+        depth += 1;
+        parentProcessId =
+          processes.get(parentProcessId)?.parentProcessId ?? null;
+      }
+      return depth;
+    };
+
+    const killProcessIfRunning = async (
+      process: RemoteProcessSnapshot
+    ): Promise<void> => {
+      try {
+        await requestJson('process.kill', {
+          processId: process.id,
+        });
+      } catch (error) {
+        const current = await snapshotProcess(process.id);
+        if (current.running) {
+          throw error;
+        }
+      }
+    };
+
+    const killTrackedProcessTree = async (): Promise<void> => {
+      const current = await snapshot();
+      const targets = [...current.processes, current.root].filter(
+        (process) => process.running
+      );
+      const processMap = new Map(
+        targets.map((process) => [process.id, process])
+      );
+      for (const process of targets.sort(
+        (left, right) =>
+          processTreeDepth(right, processMap) -
+          processTreeDepth(left, processMap)
+      )) {
+        await killProcessIfRunning(process);
+      }
+    };
+
     const kill = async (): Promise<void> => {
       assertNotReleased();
-      if (!options.nativeManaged) {
-        await requestJson('process.kill', {
-          processId: options.process.id,
-        });
-        return;
-      }
-      await requestJson('process.killManaged', {
-        managedProcessId: nativeManagedProcessId(),
-      });
+      await killTrackedProcessTree();
     };
 
     const waitForExit = async (
       waitOptions?: RemoteWaitOptions
-    ): Promise<RemoteProcessSnapshot> =>
+    ): Promise<RemoteManagedProcessSnapshot> =>
       await waitForResult(async () => {
         const current = await snapshot();
         if (!current.running) {
@@ -2471,21 +2625,98 @@ export const connectRemoteAgent = async (
       });
     };
 
-    const releaseFallback = async (): Promise<void> => {
-      if (!options.killTreeOnRelease) {
-        return;
+    const hasFallbackWindowSelector = (
+      query: RemoteWindowQuery | undefined
+    ): boolean =>
+      query !== undefined &&
+      (query.title !== undefined ||
+        query.titleRegex !== undefined ||
+        query.processId !== undefined ||
+        query.processName !== undefined ||
+        query.className !== undefined ||
+        query.controlId !== undefined);
+
+    const managedWindows = async (
+      query: RemoteWindowQuery | undefined
+    ): Promise<readonly AppWindow[]> => {
+      assertNotReleased();
+      const current = await snapshot();
+      const topLevelWindows = await listTopLevelWindows();
+      const candidates = await collectWindows(
+        topLevelWindows,
+        query?.includeDescendants ?? false
+      );
+      const effectiveQuery = query ?? {};
+      const trackedProcessIds = new Set([
+        current.root.id,
+        ...current.processes.map((process) => process.id),
+      ]);
+      const trackedMatches = candidates.filter(
+        (window) =>
+          trackedProcessIds.has(window.process.id) &&
+          windowMatchesQuery(window, effectiveQuery)
+      );
+      const matches =
+        trackedMatches.length > 0 || !hasFallbackWindowSelector(query)
+          ? trackedMatches
+          : candidates.filter(
+              (window) =>
+                !trackedProcessIds.has(window.process.id) &&
+                !options.baselineWindowIds.has(window.id) &&
+                windowMatchesQuery(window, effectiveQuery)
+            );
+      if (query?.strict === true && matches.length !== 1) {
+        throw createRemoteAgentError(
+          'INVALID_ARGUMENT',
+          `Strict window query matched ${String(matches.length)} windows: ${queryLabel(
+            query
+          )}. Candidates: ${candidates.map(formatWindowCandidate).join(', ')}.`
+        );
       }
-      const current = await snapshotProcess(options.process.id);
-      if (!current.running) {
-        return;
-      }
-      await requestJson('process.kill', {
-        processId: options.process.id,
-      });
-      await waitForProcessExit(options.process.id, {
-        intervalMs: 50,
-        timeoutMs: 5000,
-      });
+      return matches;
+    };
+
+    const waitForWindow = async (
+      query: RemoteWindowQuery,
+      waitOptions?: RemoteWaitOptions
+    ): Promise<AppWindow> =>
+      await waitForResult(async () => {
+        const matches = await managedWindows(query);
+        if (
+          matches.length === 1 ||
+          (matches.length > 0 && query.strict !== true)
+        ) {
+          const match = matches[0];
+          if (match === undefined) {
+            throw new Error('Managed window query matched no usable window.');
+          }
+          return match;
+        }
+        throw new Error(
+          `No matching managed window for ${queryLabel(
+            query
+          )}. Candidates: ${matches.map(formatWindowCandidate).join(', ')}.`
+        );
+      }, waitOptions);
+
+    const waitForNoWindow = async (
+      query?: RemoteWindowQuery,
+      waitOptions?: RemoteWaitOptions
+    ): Promise<void> => {
+      await waitForResult(async () => {
+        const matches = await managedWindows({
+          ...(query ?? {}),
+          strict: false,
+        });
+        if (matches.length === 0) {
+          return;
+        }
+        throw new Error(
+          `Managed window query still matched ${String(matches.length)} windows: ${queryLabel(
+            query ?? {}
+          )}.`
+        );
+      }, waitOptions);
     };
 
     const releaseAsync = async (): Promise<void> => {
@@ -2495,10 +2726,11 @@ export const connectRemoteAgent = async (
 
       let firstError: unknown = undefined;
       try {
+        if (options.killTreeOnRelease) {
+          await killTrackedProcessTree();
+        }
         if (options.nativeManaged) {
           await releaseNative();
-        } else {
-          await releaseFallback();
         }
       } catch (error) {
         firstError = error;
@@ -2523,13 +2755,19 @@ export const connectRemoteAgent = async (
       id: options.process.id,
       kill,
       name: options.process.name,
+      processes: async (): Promise<readonly RemoteProcessSnapshot[]> =>
+        (await snapshot()).processes,
       releaseAsync,
+      rootSnapshot,
       snapshot,
       stderrText: async (): Promise<string> =>
         await readCapturedText('stderr', options.stderrPath),
       stdoutText: async (): Promise<string> =>
         await readCapturedText('stdout', options.stdoutPath),
+      waitForNoWindow,
+      waitForWindow,
       waitForExit,
+      windows: managedWindows,
       [Symbol.asyncDispose]: releaseAsync,
     };
   };
@@ -2538,6 +2776,10 @@ export const connectRemoteAgent = async (
     options: RemoteManagedProcessLaunchOptions
   ): Promise<RemoteManagedProcess> => {
     const capturePaths = await createManagedProcessCapturePaths(options);
+    const baselineWindowIds = new Set(
+      (await listTopLevelWindows()).map((window) => window.id)
+    );
+    const killTreeOnRelease = options.killTreeOnRelease ?? true;
     const nativeManaged = connectedFeatures.has('process.launchManaged');
     if (nativeManaged) {
       const launched = parseManagedProcessLaunchResult(
@@ -2551,7 +2793,8 @@ export const connectRemoteAgent = async (
         )
       );
       return createManagedProcessProxy({
-        killTreeOnRelease: options.killTreeOnRelease === true,
+        baselineWindowIds,
+        killTreeOnRelease,
         managedProcessId: launched.managedProcessId,
         nativeManaged: true,
         process: launched.process,
@@ -2574,7 +2817,8 @@ export const connectRemoteAgent = async (
       )
     );
     return createManagedProcessProxy({
-      killTreeOnRelease: options.killTreeOnRelease === true,
+      baselineWindowIds,
+      killTreeOnRelease,
       managedProcessId: undefined,
       nativeManaged: false,
       process,

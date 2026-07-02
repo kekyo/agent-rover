@@ -7,7 +7,9 @@
 
 #include <windows.h>
 #include <psapi.h>
+#include <tlhelp32.h>
 
+#include <cstdio>
 #include <cwctype>
 #include <map>
 #include <string>
@@ -37,6 +39,32 @@ static std::string Basename(const std::string& path) {
     return path;
   }
   return path.substr(slash + 1);
+}
+
+static std::string FileTimeToIsoUtc(const FILETIME& file_time) {
+  SYSTEMTIME system_time = {};
+  if (!FileTimeToSystemTime(&file_time, &system_time)) {
+    return std::string();
+  }
+  char buffer[32] = {};
+  std::snprintf(
+      buffer, sizeof(buffer), "%04hu-%02hu-%02huT%02hu:%02hu:%02hu.%03huZ",
+      system_time.wYear, system_time.wMonth, system_time.wDay,
+      system_time.wHour, system_time.wMinute, system_time.wSecond,
+      system_time.wMilliseconds);
+  return std::string(buffer);
+}
+
+static std::string ReadProcessCreatedAt(HANDLE process) {
+  FILETIME created_at = {};
+  FILETIME exited_at = {};
+  FILETIME kernel_time = {};
+  FILETIME user_time = {};
+  if (!GetProcessTimes(
+          process, &created_at, &exited_at, &kernel_time, &user_time)) {
+    return std::string();
+  }
+  return FileTimeToIsoUtc(created_at);
 }
 
 static std::wstring Lowercase(const std::wstring& value) {
@@ -130,10 +158,37 @@ static std::string ReadProcessPath(HANDLE process) {
   return WideToUtf8(std::wstring(path, path + length));
 }
 
+static bool ReadParentProcessId(
+    uint32_t process_id,
+    uint32_t* parent_process_id) {
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snapshot == INVALID_HANDLE_VALUE) {
+    return false;
+  }
+  PROCESSENTRY32W entry = {};
+  entry.dwSize = sizeof(entry);
+  bool found = false;
+  if (Process32FirstW(snapshot, &entry)) {
+    do {
+      if (entry.th32ProcessID == static_cast<DWORD>(process_id)) {
+        *parent_process_id =
+            static_cast<uint32_t>(entry.th32ParentProcessID);
+        found = true;
+        break;
+      }
+    } while (Process32NextW(snapshot, &entry));
+  }
+  CloseHandle(snapshot);
+  return found;
+}
+
 static ProcessSnapshot MissingProcessSnapshot(uint32_t process_id) {
   return {
       process_id,
       std::string(),
+      std::string(),
+      false,
+      0,
       std::string(),
       false,
       false,
@@ -146,6 +201,8 @@ static bool SnapshotProcessHandle(
     HANDLE process,
     const std::string& fallback_name,
     const std::string& fallback_path,
+    bool has_parent_process_id,
+    uint32_t parent_process_id,
     ProcessSnapshot* snapshot,
     std::string* error) {
   DWORD exit_code = 0;
@@ -166,6 +223,9 @@ static bool SnapshotProcessHandle(
       process_id,
       name,
       path,
+      has_parent_process_id,
+      parent_process_id,
+      ReadProcessCreatedAt(process),
       running,
       !running,
       running ? 0 : static_cast<uint32_t>(exit_code),
@@ -270,11 +330,9 @@ bool LaunchManagedProcess(
   DWORD extra_creation_flags = 0;
   if (options.kill_tree_on_release) {
     job = CreateJobObjectW(nullptr, nullptr);
-    if (job == nullptr) {
-      *error = "CreateJobObjectW failed.";
-      return false;
+    if (job != nullptr) {
+      extra_creation_flags |= CREATE_SUSPENDED;
     }
-    extra_creation_flags |= CREATE_SUSPENDED;
   }
 
   PROCESS_INFORMATION process_information = {};
@@ -288,23 +346,21 @@ bool LaunchManagedProcess(
     return false;
   }
 
-  if (job != nullptr) {
-    if (!AssignProcessToJobObject(job, process_information.hProcess)) {
-      TerminateProcess(process_information.hProcess, 1);
-      CloseHandle(process_information.hThread);
-      CloseHandle(process_information.hProcess);
+  if (job != nullptr && !AssignProcessToJobObject(
+                             job, process_information.hProcess)) {
+    CloseHandle(job);
+    job = nullptr;
+  }
+  if (extra_creation_flags != 0 &&
+      ResumeThread(process_information.hThread) == static_cast<DWORD>(-1)) {
+    TerminateProcess(process_information.hProcess, 1);
+    CloseHandle(process_information.hThread);
+    CloseHandle(process_information.hProcess);
+    if (job != nullptr) {
       CloseHandle(job);
-      *error = "AssignProcessToJobObject failed.";
-      return false;
     }
-    if (ResumeThread(process_information.hThread) == static_cast<DWORD>(-1)) {
-      TerminateJobObject(job, 1);
-      CloseHandle(process_information.hThread);
-      CloseHandle(process_information.hProcess);
-      CloseHandle(job);
-      *error = "ResumeThread failed.";
-      return false;
-    }
+    *error = "ResumeThread failed.";
+    return false;
   }
 
   const std::string process_path = ReadProcessPath(process_information.hProcess);
@@ -352,7 +408,37 @@ bool SnapshotProcess(
   }
   const std::string path = ReadProcessPath(process);
   const std::string name = Basename(path);
-  if (!SnapshotProcessHandle(process_id, process, name, path, snapshot, error)) {
+  uint32_t parent_process_id = 0;
+  const bool has_parent_process_id =
+      ReadParentProcessId(process_id, &parent_process_id);
+  if (!SnapshotProcessHandle(
+          process_id, process, name, path, has_parent_process_id,
+          parent_process_id, snapshot, error)) {
+    CloseHandle(process);
+    return false;
+  }
+  CloseHandle(process);
+  return true;
+}
+
+static bool SnapshotProcessWithKnownParent(
+    uint32_t process_id,
+    bool has_parent_process_id,
+    uint32_t parent_process_id,
+    ProcessSnapshot* snapshot,
+    std::string* error) {
+  HANDLE process =
+      OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE,
+                  static_cast<DWORD>(process_id));
+  if (process == nullptr) {
+    *snapshot = MissingProcessSnapshot(process_id);
+    return true;
+  }
+  const std::string path = ReadProcessPath(process);
+  const std::string name = Basename(path);
+  if (!SnapshotProcessHandle(
+          process_id, process, name, path, has_parent_process_id,
+          parent_process_id, snapshot, error)) {
     CloseHandle(process);
     return false;
   }
@@ -364,29 +450,31 @@ bool ListProcesses(
     const ProcessListOptions& options,
     std::vector<ProcessSnapshot>* processes,
     std::string* error) {
-  DWORD needed = 0;
-  std::vector<DWORD> ids(4096);
-  while (true) {
-    if (!EnumProcesses(ids.data(), static_cast<DWORD>(ids.size() * sizeof(DWORD)),
-                       &needed)) {
-      *error = "EnumProcesses failed.";
-      return false;
-    }
-    if (needed < ids.size() * sizeof(DWORD)) {
-      break;
-    }
-    ids.resize(ids.size() * 2);
+  HANDLE process_snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (process_snapshot == INVALID_HANDLE_VALUE) {
+    *error = "CreateToolhelp32Snapshot failed.";
+    return false;
   }
 
   processes->clear();
-  const size_t count = needed / sizeof(DWORD);
-  for (size_t index = 0; index < count; index += 1) {
-    if (ids[index] == 0) {
+  PROCESSENTRY32W entry = {};
+  entry.dwSize = sizeof(entry);
+  if (!Process32FirstW(process_snapshot, &entry)) {
+    CloseHandle(process_snapshot);
+    *error = "Process32FirstW failed.";
+    return false;
+  }
+  do {
+    if (entry.th32ProcessID == 0) {
       continue;
     }
+    const uint32_t process_id = static_cast<uint32_t>(entry.th32ProcessID);
     ProcessSnapshot snapshot = {};
     std::string snapshot_error;
-    if (!SnapshotProcess(ids[index], &snapshot, &snapshot_error) ||
+    if (!SnapshotProcessWithKnownParent(
+            process_id, true,
+            static_cast<uint32_t>(entry.th32ParentProcessID), &snapshot,
+            &snapshot_error) ||
         !snapshot.running) {
       continue;
     }
@@ -394,7 +482,8 @@ bool ListProcesses(
       continue;
     }
     processes->push_back(snapshot);
-  }
+  } while (Process32NextW(process_snapshot, &entry));
+  CloseHandle(process_snapshot);
   return true;
 }
 
@@ -408,8 +497,12 @@ bool SnapshotManagedProcess(
     return false;
   }
   const ManagedProcessEntry& entry = iterator->second;
+  uint32_t parent_process_id = 0;
+  const bool has_parent_process_id =
+      ReadParentProcessId(entry.process_id, &parent_process_id);
   return SnapshotProcessHandle(
-      entry.process_id, entry.process, entry.name, entry.path, snapshot, error);
+      entry.process_id, entry.process, entry.name, entry.path,
+      has_parent_process_id, parent_process_id, snapshot, error);
 }
 
 bool KillProcess(uint32_t process_id, std::string* error) {
@@ -458,25 +551,25 @@ bool ReleaseManagedProcess(uint32_t managed_id, std::string* error) {
   g_managed_processes.erase(iterator);
 
   if (entry.kill_tree_on_release) {
-    ProcessSnapshot snapshot = {};
-    if (!SnapshotProcessHandle(
-            entry.process_id, entry.process, entry.name, entry.path, &snapshot,
-            error)) {
-      CloseHandle(entry.process);
-      if (entry.job != nullptr) {
+    if (entry.job != nullptr) {
+      if (!TerminateJobObject(entry.job, 1)) {
+        CloseHandle(entry.process);
         CloseHandle(entry.job);
+        *error = "TerminateJobObject failed.";
+        return false;
       }
-      return false;
-    }
-    if (snapshot.running) {
-      if (entry.job != nullptr) {
-        if (!TerminateJobObject(entry.job, 1)) {
-          CloseHandle(entry.process);
-          CloseHandle(entry.job);
-          *error = "TerminateJobObject failed.";
-          return false;
-        }
-      } else if (!TerminateProcess(entry.process, 1)) {
+    } else {
+      ProcessSnapshot snapshot = {};
+      uint32_t parent_process_id = 0;
+      const bool has_parent_process_id =
+          ReadParentProcessId(entry.process_id, &parent_process_id);
+      if (!SnapshotProcessHandle(
+              entry.process_id, entry.process, entry.name, entry.path,
+              has_parent_process_id, parent_process_id, &snapshot, error)) {
+        CloseHandle(entry.process);
+        return false;
+      }
+      if (snapshot.running && !TerminateProcess(entry.process, 1)) {
         CloseHandle(entry.process);
         *error = "TerminateProcess failed.";
         return false;

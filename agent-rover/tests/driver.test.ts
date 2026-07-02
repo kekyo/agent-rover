@@ -11,8 +11,10 @@ import { describe, expect, it } from 'vitest';
 import {
   connectRemoteAgent,
   type AsyncReleaseable,
+  type AppWindowSnapshot,
   type RemoteApplicationLaunchOptions,
   type RemoteInputOperation,
+  type RemoteProcessSnapshot,
 } from '../src/index';
 import {
   createTcpFrameDecoder,
@@ -48,6 +50,21 @@ const createAuthResponse = (token: string, challenge: Buffer): Buffer => {
   hmac.update(Buffer.concat([authChallengePrefix, challenge]));
   return hmac.digest();
 };
+
+const fakeProcessSnapshot = (
+  overrides: Partial<RemoteProcessSnapshot> & {
+    readonly id: number;
+  }
+): RemoteProcessSnapshot => ({
+  createdAt: '2026-06-25T00:00:00.000Z',
+  exitCode: null,
+  id: overrides.id,
+  name: `process-${String(overrides.id)}.exe`,
+  parentProcessId: null,
+  path: `C:/agent-rover/process-${String(overrides.id)}.exe`,
+  running: true,
+  ...overrides,
+});
 
 const readTcpFrame = async (socket: Socket): Promise<TcpFrame> =>
   await new Promise<TcpFrame>((resolve, reject) => {
@@ -751,8 +768,10 @@ describe.concurrent('remote agent connection api', () => {
       await expect(agent.processes.exists(process.id)).resolves.toBe(true);
       await expect(agent.processes.snapshot(process.id)).resolves.toMatchObject(
         {
+          createdAt: '2026-06-25T00:00:00.000Z',
           id: process.id,
           name: process.name,
+          parentProcessId: null,
           running: true,
         }
       );
@@ -844,7 +863,10 @@ describe.concurrent('remote agent connection api', () => {
       await expect(process.stdoutText()).resolves.toBe('managed stdout');
       await expect(process.stderrText()).resolves.toBe('managed stderr');
       await expect(process.snapshot()).resolves.toMatchObject({
-        id: process.id,
+        root: {
+          id: process.id,
+          running: true,
+        },
         running: true,
       });
 
@@ -855,8 +877,10 @@ describe.concurrent('remote agent connection api', () => {
           timeoutMs: 100,
         })
       ).resolves.toMatchObject({
-        exitCode: 1,
-        id: process.id,
+        root: {
+          exitCode: 1,
+          id: process.id,
+        },
         running: false,
       });
       const releasable: AsyncReleaseable = process;
@@ -868,12 +892,12 @@ describe.concurrent('remote agent connection api', () => {
   });
 
   it('uses native managed process protocol when available', async () => {
+    const killedProcessIds: number[] = [];
     const launches: RemoteApplicationLaunchOptions[] = [];
     const managedLaunches: FakeManagedProcessLaunchOptions[] = [];
-    const killedManagedProcessIds: number[] = [];
     const releasedManagedProcessIds: number[] = [];
     const fakeAgent = await startFakeTcpAgent({
-      killedManagedProcessIds,
+      killedProcessIds,
       launches,
       managedLaunches,
       releasedManagedProcessIds,
@@ -909,26 +933,325 @@ describe.concurrent('remote agent connection api', () => {
       await expect(process.stdoutText()).resolves.toBe('managed stdout');
       await expect(process.stderrText()).resolves.toBe('managed stderr');
       await expect(process.snapshot()).resolves.toMatchObject({
-        id: 4321,
+        root: {
+          id: 4321,
+          running: true,
+        },
         running: true,
       });
 
       await process.kill();
-      expect(killedManagedProcessIds).toEqual([1]);
+      expect(killedProcessIds).toEqual([4321]);
       await expect(
         process.waitForExit({
           intervalMs: 1,
           timeoutMs: 100,
         })
       ).resolves.toMatchObject({
-        exitCode: 1,
-        id: 4321,
+        root: {
+          exitCode: 1,
+          id: 4321,
+        },
         running: false,
       });
 
       const releasable: AsyncReleaseable = process;
       await releasable[Symbol.asyncDispose]();
       expect(releasedManagedProcessIds).toEqual([1]);
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('defaults managed release cleanup to killing the launched process tree', async () => {
+    const killedProcessIds: number[] = [];
+    const launches: RemoteApplicationLaunchOptions[] = [];
+    const fakeAgent = await startFakeTcpAgent({
+      capabilities: {
+        ...defaultFakeCapabilities,
+        features: defaultFakeCapabilities.features.filter(
+          (feature) =>
+            feature !== 'process.launchManaged' &&
+            feature !== 'process.killManaged' &&
+            feature !== 'process.releaseManaged' &&
+            !feature.startsWith('process.managed')
+        ),
+      },
+      killedProcessIds,
+      launches,
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const process = await agent.processes.launchManaged({
+        path: 'fake-default-cleanup.exe',
+      });
+
+      await process.releaseAsync();
+
+      expect(launches[0]).toMatchObject({
+        path: 'fake-default-cleanup.exe',
+      });
+      expect(killedProcessIds).toEqual([process.id]);
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('leaves the launched process running when release tree cleanup is disabled', async () => {
+    const killedProcessIds: number[] = [];
+    const fakeAgent = await startFakeTcpAgent({
+      killedProcessIds,
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const process = await agent.processes.launchManaged({
+        killTreeOnRelease: false,
+        path: 'fake-leave-running.exe',
+      });
+
+      await process.releaseAsync();
+
+      expect(killedProcessIds).toEqual([]);
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('finds managed windows owned by descendant processes', async () => {
+    const fakeAgent = await startFakeTcpAgent({
+      windows: [],
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const process = await agent.processes.launchManaged({
+        path: 'fake-bootstrap.exe',
+      });
+      const childProcess = fakeProcessSnapshot({
+        id: 9876,
+        name: 'fake-gui.exe',
+        parentProcessId: process.id,
+        path: 'C:/agent-rover/fake-gui.exe',
+      });
+      const childWindow: AppWindowSnapshot = {
+        ...defaultFakeWindow,
+        id: '0x9876',
+        process: {
+          id: childProcess.id,
+          name: childProcess.name,
+          path: childProcess.path,
+        },
+        title: 'Child GUI',
+      };
+      fakeAgent.setProcesses([
+        fakeProcessSnapshot({
+          id: process.id,
+          name: process.name,
+          path: 'C:/agent-rover/fake-bootstrap.exe',
+        }),
+        childProcess,
+      ]);
+      fakeAgent.setWindows([childWindow]);
+
+      await expect(
+        process.waitForWindow(
+          {
+            title: 'Child GUI',
+            visible: true,
+          },
+          {
+            intervalMs: 1,
+            timeoutMs: 1000,
+          }
+        )
+      ).resolves.toMatchObject({
+        id: childWindow.id,
+        process: {
+          id: childProcess.id,
+        },
+      });
+      await expect(process.windows()).resolves.toMatchObject([
+        {
+          id: childWindow.id,
+        },
+      ]);
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('keeps managed apps running while descendants remain after the launcher exits', async () => {
+    const fakeAgent = await startFakeTcpAgent({
+      windows: [],
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const process = await agent.processes.launchManaged({
+        path: 'fake-short-launcher.exe',
+      });
+      const exitedRoot = fakeProcessSnapshot({
+        exitCode: 0,
+        id: process.id,
+        name: process.name,
+        path: 'C:/agent-rover/fake-short-launcher.exe',
+        running: false,
+      });
+      const childProcess = fakeProcessSnapshot({
+        id: 2468,
+        name: 'fake-child.exe',
+        parentProcessId: process.id,
+        path: 'C:/agent-rover/fake-child.exe',
+      });
+      fakeAgent.setProcesses([exitedRoot, childProcess]);
+
+      await expect(process.rootSnapshot()).resolves.toMatchObject({
+        id: process.id,
+        running: false,
+      });
+      await expect(process.snapshot()).resolves.toMatchObject({
+        processes: [
+          {
+            id: childProcess.id,
+            running: true,
+          },
+        ],
+        root: {
+          id: process.id,
+          running: false,
+        },
+        running: true,
+      });
+
+      fakeAgent.setProcesses([
+        exitedRoot,
+        {
+          ...childProcess,
+          exitCode: 1,
+          running: false,
+        },
+      ]);
+      await expect(
+        process.waitForExit({
+          intervalMs: 1,
+          timeoutMs: 1000,
+        })
+      ).resolves.toMatchObject({
+        running: false,
+      });
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('waits for managed windows that appear after a CLI-style launch', async () => {
+    const fakeAgent = await startFakeTcpAgent({
+      windows: [],
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const process = await agent.processes.launchManaged({
+        createNoWindow: true,
+        path: 'fake-cli-with-late-ui.exe',
+      });
+      const pendingWindow = process.waitForWindow(
+        {
+          title: 'Late UI',
+          visible: true,
+        },
+        {
+          intervalMs: 1,
+          timeoutMs: 1000,
+        }
+      );
+
+      fakeAgent.setWindows([
+        {
+          ...defaultFakeWindow,
+          id: '0x4321-late',
+          process: {
+            id: process.id,
+            name: process.name,
+            path: 'C:/agent-rover/fake-cli-with-late-ui.exe',
+          },
+          title: 'Late UI',
+        },
+      ]);
+
+      await expect(pendingWindow).resolves.toMatchObject({
+        id: '0x4321-late',
+      });
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('rejects strict managed fallback window queries with candidate diagnostics', async () => {
+    const fakeAgent = await startFakeTcpAgent({
+      windows: [],
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const process = await agent.processes.launchManaged({
+        path: 'fake-window-forwarder.exe',
+      });
+      fakeAgent.setWindows([
+        {
+          ...defaultFakeWindow,
+          id: '0x7001',
+          process: {
+            id: 7001,
+            name: 'singleton.exe',
+            path: 'C:/agent-rover/singleton.exe',
+          },
+          title: 'Forwarded UI',
+        },
+        {
+          ...defaultFakeWindow,
+          id: '0x7002',
+          process: {
+            id: 7002,
+            name: 'singleton.exe',
+            path: 'C:/agent-rover/singleton.exe',
+          },
+          title: 'Forwarded UI',
+        },
+      ]);
+
+      await expect(
+        process.waitForWindow(
+          {
+            strict: true,
+            title: 'Forwarded UI',
+          },
+          {
+            intervalMs: 1,
+            timeoutMs: 100,
+          }
+        )
+      ).rejects.toThrow(/Strict window query matched 2 windows/u);
     } finally {
       agent.release();
       await fakeAgent.close();

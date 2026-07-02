@@ -137,24 +137,29 @@ static HWND FocusedWindow() {
   return GetFocus();
 }
 
-static std::string ReadProcessName(DWORD process_id) {
+static WindowProcess ReadWindowProcess(DWORD process_id) {
   if (process_id == 0) {
-    return std::string();
+    return {0, std::string(), std::string()};
   }
   HANDLE process =
       OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE,
                   process_id);
   if (process == nullptr) {
-    return std::string();
+    return {static_cast<uint32_t>(process_id), std::string(), std::string()};
   }
 
   wchar_t path[MAX_PATH] = {};
   const DWORD length = GetModuleFileNameExW(process, nullptr, path, MAX_PATH);
   CloseHandle(process);
   if (length == 0) {
-    return std::string();
+    return {static_cast<uint32_t>(process_id), std::string(), std::string()};
   }
-  return Basename(WideToUtf8(std::wstring(path, path + length)));
+  const std::string process_path = WideToUtf8(std::wstring(path, path + length));
+  return {
+      static_cast<uint32_t>(process_id),
+      Basename(process_path),
+      process_path,
+  };
 }
 
 static WindowRect ReadWindowRect(HWND window) {
@@ -183,7 +188,7 @@ static WindowInfo ReadWindowInfo(HWND window, const std::string& parent_id) {
       has_placement && placement.showCmd == SW_SHOWMINIMIZED,
       has_placement && placement.showCmd == SW_SHOWMAXIMIZED,
       ReadWindowRect(window),
-      {static_cast<uint32_t>(process_id), ReadProcessName(process_id)},
+      ReadWindowProcess(process_id),
   };
 }
 

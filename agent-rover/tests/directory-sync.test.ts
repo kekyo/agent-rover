@@ -154,9 +154,11 @@ describe('directory synchronization', () => {
     const fakeAgent = await startFakeTcpAgent({
       initialProcesses: [
         {
+          createdAt: '2026-06-25T00:00:00.000Z',
           exitCode: null,
           id: 4001,
           name: 'muon.exe',
+          parentProcessId: null,
           path: 'C:/sync/muon.exe',
           running: true,
         },

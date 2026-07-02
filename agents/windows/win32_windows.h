@@ -30,6 +30,8 @@ struct WindowProcess {
   uint32_t id;
   /** Process executable name when available. */
   std::string name;
+  /** Full executable path when available. */
+  std::string path;
 };
 
 /** Window snapshot returned to the driver. */
