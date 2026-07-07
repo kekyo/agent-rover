@@ -426,6 +426,7 @@ await process.releaseAsync();
 | API | Description |
 | :-- | :-- |
 | `RemoteAgent.mouse.move(point)` | Moves the mouse cursor. |
+| `RemoteAgent.mouse.down(options?)` / `RemoteAgent.mouse.up(options?)` | Presses only, or releases only, a mouse button. |
 | `RemoteAgent.mouse.click(point, options?)` | Performs a mouse click at the specified position. |
 | `RemoteAgent.mouse.drag(from, to, options?)` | Performs a drag operation. |
 | `RemoteAgent.mouse.wheel(options)` | Performs a mouse wheel operation. |
@@ -433,6 +434,8 @@ await process.releaseAsync();
 | `RemoteAgent.keyboard.down(key)` / `RemoteAgent.keyboard.up(key)` | Presses only, or releases only, a key. |
 | `RemoteAgent.keyboard.type(text)` | Inputs text by simulating keyboard typing. |
 | `RemoteAgent.keyboard.pasteText(text, options?)` | Pastes text through the clipboard. |
+| `RemoteAgent.interaction.start(options?)` | Starts a releaseable keyboard and mouse interaction session. |
+| `RemoteAgent.interaction.with(operation, options?)` | Runs `operation` in an interaction session and releases session-owned input state afterward. |
 | `RemoteAgent.clipboard.readText()` / `RemoteAgent.clipboard.writeText(text)` | Reads and writes clipboard text. |
 | `RemoteAgent.clipboard.clear()` | Clears the clipboard. |
 | `RemoteAgent.clipboard.withText(text, operation)` | Temporarily replaces the clipboard text while running `operation`, then restores the original text afterward. |
@@ -499,6 +502,19 @@ await agent.mouse.drag(
 await agent.mouse.wheel({
   deltaY: -120,
   point: inputPoint,
+});
+
+// Hold keyboard and mouse state in a releaseable interaction session.
+await agent.interaction.with(async (session) => {
+  await session.keyboard.down('Shift');
+  await session.mouse.down({
+    button: 'left',
+    point: inputPoint,
+  });
+  await session.mouse.move({
+    x: inputPoint.x + 240,
+    y: inputPoint.y,
+  });
 });
 
 // Read and write the clipboard, then clear it.

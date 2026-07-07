@@ -415,6 +415,7 @@ await process.releaseAsync();
 | API | 内容 |
 | :-- | :-- |
 | `RemoteAgent.mouse.move(point)` | マウスカーソルを移動します。 |
+| `RemoteAgent.mouse.down(options?)` / `RemoteAgent.mouse.up(options?)` | マウスボタンの押下、または解放だけを行います。 |
 | `RemoteAgent.mouse.click(point, options?)` | 指定位置でマウスクリックを発生させます。 |
 | `RemoteAgent.mouse.drag(from, to, options?)` | ドラッグ操作を発生させます。 |
 | `RemoteAgent.mouse.wheel(options)` | マウスホイール操作を発生させます。 |
@@ -422,6 +423,8 @@ await process.releaseAsync();
 | `RemoteAgent.keyboard.down(key)` / `RemoteAgent.keyboard.up(key)` | キーの押下、または解放だけを行います。 |
 | `RemoteAgent.keyboard.type(text)` | キーボードタイプをシミュレートして文字列を入力します。 |
 | `RemoteAgent.keyboard.pasteText(text, options?)` | クリップボードを利用して文字列を貼り付けます。 |
+| `RemoteAgent.interaction.start(options?)` | 解放可能なキーボードとマウスのインタラクションセッションを開始します。 |
+| `RemoteAgent.interaction.with(operation, options?)` | インタラクションセッション内で`operation`を実行し、終了後にセッションが所有する入力状態を解放します。 |
 | `RemoteAgent.clipboard.readText()` / `RemoteAgent.clipboard.writeText(text)` | クリップボード文字列を読み書きします。 |
 | `RemoteAgent.clipboard.clear()` | クリップボードをクリアします。 |
 | `RemoteAgent.clipboard.withText(text, operation)` | 一時的にクリップボード文字列を差し替えて処理を実行し、終了後に元へ戻します。 |
@@ -488,6 +491,19 @@ await agent.mouse.drag(
 await agent.mouse.wheel({
   deltaY: -120,
   point: inputPoint,
+});
+
+// 解放可能なインタラクションセッションでキーとマウスボタンを保持
+await agent.interaction.with(async (session) => {
+  await session.keyboard.down('Shift');
+  await session.mouse.down({
+    button: 'left',
+    point: inputPoint,
+  });
+  await session.mouse.move({
+    x: inputPoint.x + 240,
+    y: inputPoint.y,
+  });
 });
 
 // クリップボードを読み書きし、最後にクリア
