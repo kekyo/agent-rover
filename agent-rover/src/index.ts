@@ -144,6 +144,71 @@ export interface RemoteKeyboard {
   ) => Promise<void>;
 }
 
+/** Options for starting a remote interaction session. */
+export interface RemoteInteractionSessionOptions {
+  /** Whether to restore the cursor position captured at session start. */
+  readonly restoreCursor?: boolean;
+}
+
+/** Remote keyboard controller scoped to one interaction session. */
+export interface RemoteInteractionKeyboard {
+  /** Presses one key without releasing it. */
+  readonly down: (key: string) => Promise<void>;
+  /** Presses and releases one key. */
+  readonly press: (
+    key: string,
+    options?: RemoteKeyboardPressOptions
+  ) => Promise<void>;
+  /** Releases one key pressed by this session. */
+  readonly up: (key: string) => Promise<void>;
+}
+
+/** Remote mouse controller scoped to one interaction session. */
+export interface RemoteInteractionMouse {
+  /** Moves the mouse cursor. */
+  readonly move: (point: ScreenPoint) => Promise<void>;
+  /** Presses a mouse button without releasing it. */
+  readonly down: (options?: RemoteMouseButtonOptions) => Promise<void>;
+  /** Releases a mouse button pressed by this session. */
+  readonly up: (options?: RemoteMouseButtonOptions) => Promise<void>;
+  /** Clicks a mouse button. */
+  readonly click: (
+    point: ScreenPoint,
+    options?: RemoteMouseClickOptions
+  ) => Promise<void>;
+  /** Drags from one point to another. */
+  readonly drag: (
+    from: ScreenPoint,
+    to: ScreenPoint,
+    options?: RemoteMouseDragOptions
+  ) => Promise<void>;
+  /** Sends a mouse wheel operation. */
+  readonly wheel: (options: RemoteMouseWheelOptions) => Promise<void>;
+}
+
+/** Releaseable remote keyboard and mouse interaction session. */
+export interface RemoteInteractionSession extends AsyncReleaseable {
+  /** Keyboard operations owned by this session. */
+  readonly keyboard: RemoteInteractionKeyboard;
+  /** Mouse operations owned by this session. */
+  readonly mouse: RemoteInteractionMouse;
+  /** Waits without changing the current interaction state. */
+  readonly pause: (durationMs: number) => Promise<void>;
+}
+
+/** Remote interaction session factory. */
+export interface RemoteInteractions {
+  /** Starts a releaseable keyboard and mouse interaction session. */
+  readonly start: (
+    options?: RemoteInteractionSessionOptions
+  ) => Promise<RemoteInteractionSession>;
+  /** Runs an operation in a releaseable keyboard and mouse session. */
+  readonly with: <T>(
+    operation: (session: RemoteInteractionSession) => Promise<T>,
+    options?: RemoteInteractionSessionOptions
+  ) => Promise<T>;
+}
+
 /** Remote clipboard text API. */
 export interface RemoteClipboard {
   /** Reads CF_UNICODETEXT clipboard text, or an empty string when unavailable. */
@@ -972,6 +1037,8 @@ export interface RemoteAgent extends Releaseable {
   readonly files: RemoteFileSystem;
   /** Remote event log API. */
   readonly eventLogs: RemoteEventLogs;
+  /** Releaseable keyboard and mouse interaction session API. */
+  readonly interaction: RemoteInteractions;
   /** Remote keyboard input controller. */
   readonly keyboard: RemoteKeyboard;
   /** Remote mouse input controller. */

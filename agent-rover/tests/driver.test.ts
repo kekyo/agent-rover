@@ -685,6 +685,173 @@ describe.concurrent('remote agent connection api', () => {
     }
   });
 
+  it('releases interaction session input state in reverse order', async () => {
+    const operations: RemoteInputOperation[] = [];
+    const fakeAgent = await startFakeTcpAgent({
+      inputOperations: operations,
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const session = await agent.interaction.start();
+      await session.keyboard.down('Shift');
+      await session.mouse.down({
+        button: 'left',
+        point: { x: 10, y: 20 },
+      });
+      await session.keyboard.down('Shift');
+      await session.mouse.down({
+        button: 'left',
+        point: { x: 99, y: 99 },
+      });
+      await session.keyboard.down('Control');
+      await session.mouse.down({
+        button: 'right',
+      });
+      await session.mouse.up({
+        button: 'left',
+      });
+      await session.keyboard.up('Control');
+      await session.releaseAsync();
+
+      expect(operations).toEqual([
+        {
+          key: 'Shift',
+          kind: 'keyboard.down',
+        },
+        {
+          button: 'left',
+          kind: 'mouse.down',
+          point: { x: 10, y: 20 },
+        },
+        {
+          key: 'Control',
+          kind: 'keyboard.down',
+        },
+        {
+          button: 'right',
+          kind: 'mouse.down',
+          point: null,
+        },
+        {
+          button: 'left',
+          kind: 'mouse.up',
+          point: null,
+        },
+        {
+          key: 'Control',
+          kind: 'keyboard.up',
+        },
+        {
+          button: 'right',
+          kind: 'mouse.up',
+          point: null,
+        },
+        {
+          key: 'Shift',
+          kind: 'keyboard.up',
+        },
+        {
+          kind: 'mouse.move',
+          point: { x: 12, y: 34 },
+        },
+      ]);
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('releases interaction sessions when scoped operations fail', async () => {
+    const operations: RemoteInputOperation[] = [];
+    const fakeAgent = await startFakeTcpAgent({
+      inputOperations: operations,
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      await expect(
+        agent.interaction.with(async (session) => {
+          await session.keyboard.down('Alt');
+          await session.mouse.down({
+            button: 'middle',
+          });
+          throw new Error('expected interaction failure');
+        })
+      ).rejects.toThrow('expected interaction failure');
+
+      expect(operations).toEqual([
+        {
+          key: 'Alt',
+          kind: 'keyboard.down',
+        },
+        {
+          button: 'middle',
+          kind: 'mouse.down',
+          point: null,
+        },
+        {
+          button: 'middle',
+          kind: 'mouse.up',
+          point: null,
+        },
+        {
+          key: 'Alt',
+          kind: 'keyboard.up',
+        },
+        {
+          kind: 'mouse.move',
+          point: { x: 12, y: 34 },
+        },
+      ]);
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('makes interaction session release idempotent and rejects later operations', async () => {
+    const operations: RemoteInputOperation[] = [];
+    const fakeAgent = await startFakeTcpAgent({
+      inputOperations: operations,
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const session = await agent.interaction.start({
+        restoreCursor: false,
+      });
+      await session.mouse.down();
+      await session.releaseAsync();
+      await session[Symbol.asyncDispose]();
+
+      expect(operations).toEqual([
+        {
+          button: 'left',
+          kind: 'mouse.down',
+          point: null,
+        },
+        {
+          button: 'left',
+          kind: 'mouse.up',
+          point: null,
+        },
+      ]);
+      await expect(session.mouse.move({ x: 1, y: 2 })).rejects.toMatchObject({
+        code: 'INVALID_ARGUMENT',
+      });
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
   it('manages clipboard text and pastes through the keyboard helper', async () => {
     const operations: RemoteInputOperation[] = [];
     const fakeAgent = await startFakeTcpAgent({

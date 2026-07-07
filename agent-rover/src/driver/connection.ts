@@ -51,6 +51,8 @@ import type {
   RemoteDirectorySyncResult,
   RemoteFileStat,
   RemoteFileType,
+  RemoteInteractionSession,
+  RemoteInteractionSessionOptions,
   RemoteStableBoundsWaitOptions,
   RemoteInputOperation,
   RemoteKeyboardPressOptions,
@@ -97,6 +99,11 @@ interface BinaryTransferReference {
   readonly contentType: string;
   readonly totalBytes: number;
   readonly sha256: string;
+}
+
+interface HeldInteractionInput {
+  readonly id: string;
+  readonly release: RemoteInputOperation;
 }
 
 interface WaitingBinaryTransfer {
@@ -1895,6 +1902,227 @@ export const connectRemoteAgent = async (
     await requestJson('input.perform', inputOperationToJson(operation));
   };
 
+  const createInteractionSession = async (
+    options: RemoteInteractionSessionOptions | undefined
+  ): Promise<RemoteInteractionSession> => {
+    const restoreCursor = options?.restoreCursor ?? true;
+    const initialCursor = restoreCursor
+      ? parseCursor(await requestJson('agent.cursor', undefined))
+      : undefined;
+    const heldIds = new Set<string>();
+    const heldInputs: HeldInteractionInput[] = [];
+    let released = false;
+    let releasePromise: Promise<void> | undefined = undefined;
+
+    const assertActive = (): void => {
+      if (released) {
+        throw createRemoteAgentError(
+          'INVALID_ARGUMENT',
+          'Interaction session has already been released.'
+        );
+      }
+    };
+
+    const removeHeldInput = (id: string): void => {
+      const index = heldInputs.findIndex((entry) => entry.id === id);
+      if (index >= 0) {
+        heldInputs.splice(index, 1);
+      }
+    };
+
+    const releaseOwnedInputs = async (): Promise<void> => {
+      let firstError: unknown = undefined;
+      for (const input of [...heldInputs].reverse()) {
+        if (!heldIds.has(input.id)) {
+          continue;
+        }
+        try {
+          await performInput(input.release);
+          heldIds.delete(input.id);
+          removeHeldInput(input.id);
+        } catch (error) {
+          firstError ??= error;
+        }
+      }
+      if (initialCursor !== undefined) {
+        try {
+          await performInput({
+            kind: 'mouse.move',
+            point: initialCursor.point,
+          });
+        } catch (error) {
+          firstError ??= error;
+        }
+      }
+      if (firstError !== undefined) {
+        throw firstError;
+      }
+    };
+
+    const releaseAsync = async (): Promise<void> => {
+      if (releasePromise !== undefined) {
+        await releasePromise;
+        return;
+      }
+      if (released) {
+        return;
+      }
+      released = true;
+      releasePromise = releaseOwnedInputs();
+      await releasePromise;
+    };
+
+    return {
+      [Symbol.asyncDispose]: releaseAsync,
+      keyboard: {
+        down: async (key): Promise<void> => {
+          assertActive();
+          const id = `keyboard:${key}`;
+          if (heldIds.has(id)) {
+            return;
+          }
+          await performInput({
+            key,
+            kind: 'keyboard.down',
+          });
+          heldIds.add(id);
+          heldInputs.push({
+            id,
+            release: {
+              key,
+              kind: 'keyboard.up',
+            },
+          });
+        },
+        press: async (key, pressOptions): Promise<void> => {
+          assertActive();
+          await performInput({
+            key,
+            kind: 'keyboard.press',
+            modifiers: modifiersFromOptions(pressOptions),
+          });
+        },
+        up: async (key): Promise<void> => {
+          assertActive();
+          const id = `keyboard:${key}`;
+          if (!heldIds.has(id)) {
+            return;
+          }
+          await performInput({
+            key,
+            kind: 'keyboard.up',
+          });
+          heldIds.delete(id);
+          removeHeldInput(id);
+        },
+      },
+      mouse: {
+        click: async (point, clickOptions): Promise<void> => {
+          assertActive();
+          await performInput({
+            button: buttonFromOptions(clickOptions),
+            kind: 'mouse.click',
+            modifiers: modifiersFromOptions(clickOptions),
+            point,
+          });
+        },
+        down: async (buttonOptions): Promise<void> => {
+          assertActive();
+          const button = buttonFromOptions(buttonOptions);
+          const id = `mouse:${button}`;
+          if (heldIds.has(id)) {
+            return;
+          }
+          await performInput({
+            button,
+            kind: 'mouse.down',
+            point: buttonOptions?.point ?? null,
+          });
+          heldIds.add(id);
+          heldInputs.push({
+            id,
+            release: {
+              button,
+              kind: 'mouse.up',
+              point: null,
+            },
+          });
+        },
+        drag: async (from, to, dragOptions): Promise<void> => {
+          assertActive();
+          await performInput({
+            button: buttonFromOptions(dragOptions),
+            from,
+            kind: 'mouse.drag',
+            modifiers: modifiersFromOptions(dragOptions),
+            to,
+          });
+        },
+        move: async (point): Promise<void> => {
+          assertActive();
+          await performInput({
+            kind: 'mouse.move',
+            point,
+          });
+        },
+        up: async (buttonOptions): Promise<void> => {
+          assertActive();
+          const button = buttonFromOptions(buttonOptions);
+          const id = `mouse:${button}`;
+          if (!heldIds.has(id)) {
+            return;
+          }
+          await performInput({
+            button,
+            kind: 'mouse.up',
+            point: buttonOptions?.point ?? null,
+          });
+          heldIds.delete(id);
+          removeHeldInput(id);
+        },
+        wheel: async (wheelOptions): Promise<void> => {
+          assertActive();
+          await performInput({
+            deltaX: wheelOptions.deltaX ?? 0,
+            deltaY: wheelOptions.deltaY ?? 0,
+            kind: 'mouse.wheel',
+            point: wheelOptions.point ?? null,
+          });
+        },
+      },
+      pause: async (durationMs): Promise<void> => {
+        assertActive();
+        if (!Number.isFinite(durationMs) || durationMs < 0) {
+          throw createRemoteAgentError(
+            'INVALID_ARGUMENT',
+            'durationMs must be a non-negative finite number.'
+          );
+        }
+        await waitForDelay(durationMs);
+      },
+      releaseAsync,
+    };
+  };
+
+  const withInteractionSession = async <T>(
+    operation: (session: RemoteInteractionSession) => Promise<T>,
+    options: RemoteInteractionSessionOptions | undefined
+  ): Promise<T> => {
+    const session = await createInteractionSession(options);
+    try {
+      const result = await operation(session);
+      await session.releaseAsync();
+      return result;
+    } catch (error) {
+      try {
+        await session.releaseAsync();
+      } catch {
+        // Preserve the operation error. Successful operations still surface release errors.
+      }
+      throw error;
+    }
+  };
+
   const readClipboardText = async (): Promise<string> =>
     parseClipboardText(await requestJson('clipboard.readText', undefined));
 
@@ -3053,6 +3281,16 @@ export const connectRemoteAgent = async (
       writeFile: async (path, data): Promise<void> => {
         await writeRemoteFile(path, data);
       },
+    },
+    interaction: {
+      start: async (
+        options?: RemoteInteractionSessionOptions
+      ): Promise<RemoteInteractionSession> =>
+        await createInteractionSession(options),
+      with: async <T>(
+        operation: (session: RemoteInteractionSession) => Promise<T>,
+        options?: RemoteInteractionSessionOptions
+      ): Promise<T> => await withInteractionSession(operation, options),
     },
     keyboard: {
       down: async (key): Promise<void> => {
