@@ -109,7 +109,9 @@ The agent is very small and avoids runtime dependencies on other libraries as mu
 After extracting the archive, you can run it as-is. No installation is required.
 
 For example, you can start the Windows agent as follows.
-When it starts, it prints the listening address and access token:
+When it starts, it prints the listening address and access token.
+As clients connect and drive applications, it also prints low-frequency
+lifecycle events:
 
 ```cmd
 C:\> agent-rover-agent.exe
@@ -121,9 +123,19 @@ Licence: Under MIT.
 
 agent-rover native agent listening on 0.0.0.0:39397
 agent-rover agent token: <access-token>
+agent-rover agent event: 2026-07-07T12:34:56Z connection #1 accepted from 192.0.2.10:50123
+agent-rover agent event: 2026-07-07T12:34:57Z connection #1 authenticated
+agent-rover agent event: 2026-07-07T12:34:57Z connection #1 ready
+agent-rover agent event: 2026-07-07T12:35:10Z application launched pid=4321 name=notepad.exe path=notepad.exe
+agent-rover agent event: 2026-07-07T12:35:20Z managed process released managedId=1
+agent-rover agent event: 2026-07-07T12:35:21Z connection #1 disconnected: peer requested close
 ```
 
 - When the agent starts, it prints an access token. Make a note of it.
+- The lifecycle log reports connection, authentication, application launch,
+  managed process kill/release, process kill, and disconnect events. It does not
+  print request payloads, access tokens, environment variables, or clipboard
+  contents.
 - The default TCP port is 39397. You need to open it in the OS firewall.
 - The Windows agent must be started from the user's interactive desktop so it can operate the desktop environment.
   This is a subtle issue, but launching a process from a Windows service restricts the desktop environment, so running the Windows agent as a service is not recommended.
