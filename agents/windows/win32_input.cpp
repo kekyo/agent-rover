@@ -310,6 +310,12 @@ bool PerformInput(const InputOperation& operation, std::string* error) {
     }
     return SendModifiers(operation.modifiers, false, error);
   }
+  if (operation.kind == "mouse.down") {
+    if (operation.has_point && !MoveMouse(operation.point, error)) {
+      return false;
+    }
+    return SendMouseButton(operation.button, true, error);
+  }
   if (operation.kind == "mouse.wheel") {
     if (operation.has_point && !MoveMouse(operation.point, error)) {
       return false;
@@ -323,6 +329,12 @@ bool PerformInput(const InputOperation& operation, std::string* error) {
       return false;
     }
     return true;
+  }
+  if (operation.kind == "mouse.up") {
+    if (operation.has_point && !MoveMouse(operation.point, error)) {
+      return false;
+    }
+    return SendMouseButton(operation.button, false, error);
   }
   *error = "Unsupported input operation: " + operation.kind + ".";
   return false;

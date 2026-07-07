@@ -634,6 +634,57 @@ describe.concurrent('remote agent connection api', () => {
     }
   });
 
+  it('sends low-level mouse button state operations', async () => {
+    const operations: RemoteInputOperation[] = [];
+    const fakeAgent = await startFakeTcpAgent({
+      inputOperations: operations,
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      await agent.mouse.down();
+      await agent.mouse.up({
+        button: 'right',
+        point: { x: 12, y: 34 },
+      });
+      await agent.mouse.down({
+        button: 'middle',
+        point: { x: 56, y: 78 },
+      });
+      await agent.mouse.up({
+        button: 'middle',
+      });
+
+      expect(operations).toEqual([
+        {
+          button: 'left',
+          kind: 'mouse.down',
+          point: null,
+        },
+        {
+          button: 'right',
+          kind: 'mouse.up',
+          point: { x: 12, y: 34 },
+        },
+        {
+          button: 'middle',
+          kind: 'mouse.down',
+          point: { x: 56, y: 78 },
+        },
+        {
+          button: 'middle',
+          kind: 'mouse.up',
+          point: null,
+        },
+      ]);
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
   it('manages clipboard text and pastes through the keyboard helper', async () => {
     const operations: RemoteInputOperation[] = [];
     const fakeAgent = await startFakeTcpAgent({

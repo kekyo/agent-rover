@@ -66,6 +66,14 @@ export interface RemoteMouseClickOptions {
   readonly modifiers?: readonly KeyboardModifier[];
 }
 
+/** Mouse button state options. */
+export interface RemoteMouseButtonOptions {
+  /** Mouse button to press or release. */
+  readonly button?: MouseButton;
+  /** Optional point to move to before changing the button state. */
+  readonly point?: ScreenPoint;
+}
+
 /** Mouse drag options. */
 export interface RemoteMouseDragOptions extends RemoteMouseClickOptions {}
 
@@ -97,6 +105,10 @@ export interface RemoteKeyboardPasteTextOptions {
 export interface RemoteMouse {
   /** Moves the mouse cursor. */
   readonly move: (point: ScreenPoint) => Promise<void>;
+  /** Presses a mouse button without releasing it. */
+  readonly down: (options?: RemoteMouseButtonOptions) => Promise<void>;
+  /** Releases a mouse button. */
+  readonly up: (options?: RemoteMouseButtonOptions) => Promise<void>;
   /** Clicks a mouse button. */
   readonly click: (
     point: ScreenPoint,
@@ -203,9 +215,25 @@ export type RemoteInputOperation =
     }
   | {
       /** Operation discriminator. */
+      readonly kind: 'mouse.down';
+      /** Button to press. */
+      readonly button: MouseButton;
+      /** Point to move to before pressing, or null to keep current position. */
+      readonly point: ScreenPoint | null;
+    }
+  | {
+      /** Operation discriminator. */
       readonly kind: 'mouse.move';
       /** Target point. */
       readonly point: ScreenPoint;
+    }
+  | {
+      /** Operation discriminator. */
+      readonly kind: 'mouse.up';
+      /** Button to release. */
+      readonly button: MouseButton;
+      /** Point to move to before releasing, or null to keep current position. */
+      readonly point: ScreenPoint | null;
     }
   | {
       /** Operation discriminator. */

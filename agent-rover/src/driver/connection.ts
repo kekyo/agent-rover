@@ -55,6 +55,7 @@ import type {
   RemoteInputOperation,
   RemoteKeyboardPressOptions,
   RemoteMonitor,
+  RemoteMouseButtonOptions,
   RemoteMouseClickOptions,
   RemoteMouseDragOptions,
   RemoteMouseWheelOptions,
@@ -1039,7 +1040,11 @@ const modifiersFromOptions = (
 ): readonly KeyboardModifier[] => [...(options?.modifiers ?? [])];
 
 const buttonFromOptions = (
-  options: RemoteMouseClickOptions | RemoteMouseDragOptions | undefined
+  options:
+    | RemoteMouseButtonOptions
+    | RemoteMouseClickOptions
+    | RemoteMouseDragOptions
+    | undefined
 ): MouseButton => options?.button ?? 'left';
 
 const pointToJson = (point: {
@@ -1160,10 +1165,22 @@ const inputOperationToJson = (operation: RemoteInputOperation): JsonValue => {
         modifiers: [...operation.modifiers],
         to: pointToJson(operation.to),
       };
+    case 'mouse.down':
+      return {
+        button: operation.button,
+        kind: operation.kind,
+        point: operation.point === null ? null : pointToJson(operation.point),
+      };
     case 'mouse.move':
       return {
         kind: operation.kind,
         point: pointToJson(operation.point),
+      };
+    case 'mouse.up':
+      return {
+        button: operation.button,
+        kind: operation.kind,
+        point: operation.point === null ? null : pointToJson(operation.point),
       };
     case 'mouse.wheel':
       return {
@@ -3082,6 +3099,13 @@ export const connectRemoteAgent = async (
     monitors: async (): Promise<readonly RemoteMonitor[]> =>
       parseMonitorArray(await requestJson('agent.monitors', undefined)),
     mouse: {
+      down: async (options): Promise<void> => {
+        await performInput({
+          button: buttonFromOptions(options),
+          kind: 'mouse.down',
+          point: options?.point ?? null,
+        });
+      },
       click: async (point, options): Promise<void> => {
         await performInput({
           button: buttonFromOptions(options),
@@ -3103,6 +3127,13 @@ export const connectRemoteAgent = async (
         await performInput({
           kind: 'mouse.move',
           point,
+        });
+      },
+      up: async (options): Promise<void> => {
+        await performInput({
+          button: buttonFromOptions(options),
+          kind: 'mouse.up',
+          point: options?.point ?? null,
         });
       },
       wheel: async (options: RemoteMouseWheelOptions): Promise<void> => {
