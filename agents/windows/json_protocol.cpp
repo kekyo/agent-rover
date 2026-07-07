@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "agent_log.h"
 #include "binary_codec.h"
 #include "win32_capture.h"
 #include "win32_clipboard.h"
@@ -1075,8 +1076,12 @@ std::string HandleJsonRequest(
     ApplicationProcess process = {};
     std::string error;
     if (!LaunchApplication(options, &process, &error)) {
+      PrintAgentLogEvent(CreateAgentApplicationLaunchFailedLogEvent(
+          options.path, error));
       return FailureResponseJson(id, error);
     }
+    PrintAgentLogEvent(CreateAgentApplicationLaunchedLogEvent(
+        process.id, process.name, options.path));
     return SuccessResponseJson(id, ApplicationProcessJson(process));
   }
   if (method == "process.launchManaged") {
@@ -1091,8 +1096,13 @@ std::string HandleJsonRequest(
     ManagedProcess process = {};
     std::string error;
     if (!LaunchManagedProcess(options, &process, &error)) {
+      PrintAgentLogEvent(CreateAgentManagedProcessLaunchFailedLogEvent(
+          options.launch.path, error));
       return FailureResponseJson(id, error);
     }
+    PrintAgentLogEvent(CreateAgentManagedProcessLaunchedLogEvent(
+        process.managed_id, process.process.id, process.process.name,
+        options.launch.path));
     return SuccessResponseJson(id, ManagedProcessJson(process));
   }
   if (method == "process.managedSnapshot") {
@@ -1117,10 +1127,15 @@ std::string HandleJsonRequest(
       return FailureResponseJson(
           id, "process.killManaged requires managedProcessId.");
     }
+    const uint32_t managed_id = static_cast<uint32_t>(managed_process_id);
     std::string error;
-    if (!KillManagedProcess(static_cast<uint32_t>(managed_process_id), &error)) {
+    if (!KillManagedProcess(managed_id, &error)) {
+      PrintAgentLogEvent(CreateAgentManagedProcessOperationFailedLogEvent(
+          "kill", managed_id, error));
       return FailureResponseJson(id, error);
     }
+    PrintAgentLogEvent(
+        CreateAgentManagedProcessOperationLogEvent("killed", managed_id));
     return SuccessResponseJson(id, "null");
   }
   if (method == "process.releaseManaged") {
@@ -1130,11 +1145,15 @@ std::string HandleJsonRequest(
       return FailureResponseJson(
           id, "process.releaseManaged requires managedProcessId.");
     }
+    const uint32_t managed_id = static_cast<uint32_t>(managed_process_id);
     std::string error;
-    if (!ReleaseManagedProcess(
-            static_cast<uint32_t>(managed_process_id), &error)) {
+    if (!ReleaseManagedProcess(managed_id, &error)) {
+      PrintAgentLogEvent(CreateAgentManagedProcessOperationFailedLogEvent(
+          "release", managed_id, error));
       return FailureResponseJson(id, error);
     }
+    PrintAgentLogEvent(
+        CreateAgentManagedProcessOperationLogEvent("released", managed_id));
     return SuccessResponseJson(id, "null");
   }
   if (method == "process.snapshot") {
@@ -1167,10 +1186,14 @@ std::string HandleJsonRequest(
         process_id < 0) {
       return FailureResponseJson(id, "process.kill requires processId.");
     }
+    const uint32_t target_process_id = static_cast<uint32_t>(process_id);
     std::string error;
-    if (!KillProcess(static_cast<uint32_t>(process_id), &error)) {
+    if (!KillProcess(target_process_id, &error)) {
+      PrintAgentLogEvent(CreateAgentProcessKillFailedLogEvent(
+          target_process_id, error));
       return FailureResponseJson(id, error);
     }
+    PrintAgentLogEvent(CreateAgentProcessKilledLogEvent(target_process_id));
     return SuccessResponseJson(id, "null");
   }
   if (method == "window.snapshot") {
