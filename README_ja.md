@@ -59,13 +59,12 @@ const agent = await connectRemoteAgent({
 await agent.files.writeFile(`C:\test.txt`, Buffer.from('test text file'));
 
 // アプリケーションを起動
-const launchedProcess = await agent.applications.launch({
+const process = await agent.processes.launchManaged({
   path: 'notepad.exe',
 });
 
 // アプリケーションのウインドウを取得
-const notepadWindow = await agent.waitForWindow({
-  processId: launchedProcess.id,
+const notepadWindow = await process.waitForWindow({
   visible: true,
 });
 
@@ -78,6 +77,8 @@ await agent.keyboard.pasteText('Here is a remote message');
 // ウインドウの画像キャプチャを取得して保存
 const screenshot = await notepadWindow.screenshot();
 await writeFile('capture.png', screenshot.image);
+
+await process.releaseAsync();
 ```
 
 agent-roverは、GUIアプリケーション自体の監視や操作以外にも、
@@ -101,7 +102,8 @@ agent-roverは、GUIアプリケーション自体の監視や操作以外にも
 エージェントは非常に小さく、そして他のライブラリへの実行時依存を可能な限り取り除いてあります。アーカイブを展開後、そのまま実行できます。インストールも不要です。
 
 例えば、Windowsエージェントの場合、以下のように起動できます。
-起動すると、以下のように待ち受けアドレスとアクセストークンが表示されます:
+起動すると、以下のように待ち受けアドレスとアクセストークンが表示されます。
+クライアントが接続してアプリケーションを操作すると、低頻度のライフサイクルイベントも表示されます:
 
 ```cmd
 C:\> agent-rover-agent.exe
@@ -113,9 +115,17 @@ Licence: Under MIT.
 
 agent-rover native agent listening on 0.0.0.0:39397
 agent-rover agent token: <access-token>
+agent-rover agent event: 2026-07-07T12:34:56Z connection #1 accepted from 192.0.2.10:50123
+agent-rover agent event: 2026-07-07T12:34:57Z connection #1 authenticated
+agent-rover agent event: 2026-07-07T12:34:57Z connection #1 ready
+agent-rover agent event: 2026-07-07T12:35:10Z application launched pid=4321 name=notepad.exe path=notepad.exe
+agent-rover agent event: 2026-07-07T12:35:20Z managed process released managedId=1
+agent-rover agent event: 2026-07-07T12:35:21Z connection #1 disconnected: peer requested close
 ```
 
 - エージェントを実行するとアクセストークンが表示されるので、これをメモして下さい。
+- ライフサイクルログには、接続、認証、アプリケーション起動、マネージドプロセスのkill/release、
+  プロセスkill、切断が表示されます。リクエストpayload、アクセストークン、環境変数、クリップボード内容は表示されません。
 - デフォルトのTCPポート番号は39397です。OSファイアーウォールは開ける必要があります。
 - Windowsエージェントは、デスクトップ環境を操作するために、ユーザーのインタラクティブデスクトップから起動する必要があります。
   わかりにくい問題ですが、Windowsサービスからプロセスを起動するとデスクトップ環境が制限されるため、Windowsエージェントをサービス化することはお勧めしません。
@@ -261,15 +271,14 @@ try {
 コード例:
 
 ```typescript
-// アプリケーションを起動
-const launchedProcess = await agent.applications.launch({
+// マネージドライフサイクル付きでアプリケーションを起動
+const process = await agent.processes.launchManaged({
   path: 'notepad.exe',
 });
 
 // 起動したプロセスのウインドウが表示されるまで待機
-const notepadWindow = await agent.waitForWindow(
+const notepadWindow = await process.waitForWindow(
   {
-    processId: launchedProcess.id,
     visible: true,
   },
   {
@@ -313,14 +322,16 @@ expect(windowCapture.visibleBounds.width).toBeGreaterThan(0);
 
 // ウインドウを閉じ、閉じ終わるまで待機
 await stableWindow.close();
-await agent.waitForNoWindow(
+await process.waitForNoWindow(
   {
-    processId: launchedProcess.id,
+    visible: true,
   },
   {
     timeoutMs: 5000,
   }
 );
+
+await process.releaseAsync();
 ```
 
 ### アプリケーションとプロセス
@@ -328,6 +339,7 @@ await agent.waitForNoWindow(
 | API | 内容 |
 | :-- | :-- |
 | `RemoteAgent.applications.launch(options)` | 接続先セッションでアプリケーションを起動し、プロセス情報を返します。 |
+| `RemoteAgent.processes.launchManaged(options)` | プロセスを起動し、追跡付きのマネージドライフサイクルハンドルを返します。 |
 | `RemoteAgent.processes.snapshot(processId)` | プロセスの現在状態を取得します。 |
 | `RemoteAgent.processes.exists(processId)` | プロセスが実行中かどうかを取得します。 |
 | `RemoteAgent.processes.list(options?)` | 実行中プロセスの一覧を取得します。 |
@@ -335,7 +347,10 @@ await agent.waitForNoWindow(
 | `RemoteAgent.processes.waitForExit(processId, options?)` | プロセス終了まで待機します。 |
 
 - `applications.launch()`には、`path`、`arguments`、`workingDirectory`、`environment`、`stdoutPath`、
-- `stderrPath`、`createNoWindow`を指定できます。
+  `stderrPath`、`createNoWindow`を指定できます。
+- `processes.launchManaged()`には、`path`、`arguments`、`workingDirectory`、`environment`、
+  `captureStdout`、`captureStderr`、`createNoWindow`、`killTreeOnRelease`を指定できます。
+  `killTreeOnRelease`のデフォルトは`true`です。
 
 コード例:
 
@@ -372,11 +387,35 @@ const exitedProcess = await agent.processes.waitForExit(
 expect(exitedProcess.running).toBe(false);
 ```
 
+managed process の例:
+
+```typescript
+const process = await agent.processes.launchManaged({
+  arguments: ['--run-tests'],
+  captureStderr: true,
+  captureStdout: true,
+  path: String.raw`C:\tools\app-under-test.exe`,
+  workingDirectory: String.raw`C:\tools`,
+});
+
+const result = await process.waitForExit({
+  timeoutMs: 30000,
+});
+expect(result.root.exitCode).toBe(0);
+expect(await process.stdoutText()).toContain('completed');
+expect(await process.stderrText()).toBe('');
+
+await process.releaseAsync();
+// explicit resource managementを使う場合:
+// await process[Symbol.asyncDispose]();
+```
+
 ### 入力とクリップボード
 
 | API | 内容 |
 | :-- | :-- |
 | `RemoteAgent.mouse.move(point)` | マウスカーソルを移動します。 |
+| `RemoteAgent.mouse.down(options?)` / `RemoteAgent.mouse.up(options?)` | マウスボタンの押下、または解放だけを行います。 |
 | `RemoteAgent.mouse.click(point, options?)` | 指定位置でマウスクリックを発生させます。 |
 | `RemoteAgent.mouse.drag(from, to, options?)` | ドラッグ操作を発生させます。 |
 | `RemoteAgent.mouse.wheel(options)` | マウスホイール操作を発生させます。 |
@@ -384,6 +423,8 @@ expect(exitedProcess.running).toBe(false);
 | `RemoteAgent.keyboard.down(key)` / `RemoteAgent.keyboard.up(key)` | キーの押下、または解放だけを行います。 |
 | `RemoteAgent.keyboard.type(text)` | キーボードタイプをシミュレートして文字列を入力します。 |
 | `RemoteAgent.keyboard.pasteText(text, options?)` | クリップボードを利用して文字列を貼り付けます。 |
+| `RemoteAgent.interaction.start(options?)` | 解放可能なキーボードとマウスのインタラクションセッションを開始します。 |
+| `RemoteAgent.interaction.with(operation, options?)` | インタラクションセッション内で`operation`を実行し、終了後にセッションが所有する入力状態を解放します。 |
 | `RemoteAgent.clipboard.readText()` / `RemoteAgent.clipboard.writeText(text)` | クリップボード文字列を読み書きします。 |
 | `RemoteAgent.clipboard.clear()` | クリップボードをクリアします。 |
 | `RemoteAgent.clipboard.withText(text, operation)` | 一時的にクリップボード文字列を差し替えて処理を実行し、終了後に元へ戻します。 |
@@ -452,6 +493,19 @@ await agent.mouse.wheel({
   point: inputPoint,
 });
 
+// 解放可能なインタラクションセッションでキーとマウスボタンを保持
+await agent.interaction.with(async (session) => {
+  await session.keyboard.down('Shift');
+  await session.mouse.down({
+    button: 'left',
+    point: inputPoint,
+  });
+  await session.mouse.move({
+    x: inputPoint.x + 240,
+    y: inputPoint.y,
+  });
+});
+
 // クリップボードを読み書きし、最後にクリア
 const clipboardText = await agent.clipboard.readText();
 expect(typeof clipboardText).toBe('string');
@@ -471,6 +525,8 @@ await agent.clipboard.clear();
 | `RemoteAgent.files.remove(path, options?)` | ファイル、またはディレクトリを削除します。 |
 | `RemoteAgent.files.rename(from, to)` | ファイル、またはディレクトリをリネーム・移動します。 |
 | `RemoteAgent.files.mkdtemp(prefix)` | 一時ディレクトリを作成します。 |
+| `RemoteAgent.files.syncDirectory(options)` | ローカルディレクトリをチェックサム差分で接続先マシンへ同期します。 |
+| `RemoteAgent.files.downloadDirectory(options)` | 接続先マシンのディレクトリをローカルディレクトリへ一括取得します。 |
 | `RemoteAgent.eventLogs.read(query?)` | 接続先マシンのイベントログを取得します。 |
 | `RemoteAgent.diagnostics.capture(options?)` | 画面画像、ウインドウ一覧、イベントログ、最近の操作履歴をメモリ上に収集します。 |
 | `saveDiagnostics(directory, options)` | 診断情報をローカルディレクトリに保存します。 |
@@ -507,6 +563,18 @@ await agent.files.rename(remoteFilePath, movedFilePath);
 const received = await agent.files.readFile(movedFilePath);
 expect(received.toString('utf8')).toBe('hello');
 
+// ローカル runtime ディレクトリを同期し、リモート artifact を回収
+await agent.files.syncDirectory({
+  localPath: 'fixtures/runtime',
+  remotePath: `${remoteDirectory}\\runtime`,
+  mode: 'mirror',
+  onLockedFile: 'killRelatedProcessesAndRetry',
+});
+await agent.files.downloadDirectory({
+  remotePath: `${remoteDirectory}\\runtime`,
+  localPath: 'test-results/runtime-copy',
+});
+
 // イベントログを取得
 const recentLogs = await agent.eventLogs.read({
   maxEntries: 20,
@@ -523,6 +591,19 @@ const capture = await agent.diagnostics.capture({
 });
 const saved = await saveDiagnostics('test-results/diagnostics', {
   capture,
+  agent,
+  attachments: [
+    {
+      kind: 'remoteFile',
+      name: 'moved-input',
+      path: movedFilePath,
+    },
+    {
+      kind: 'remoteDirectory',
+      name: 'runtime',
+      path: `${remoteDirectory}\\runtime`,
+    },
+  ],
 });
 expect(saved.artifacts.length).toBeGreaterThan(0);
 
@@ -568,7 +649,7 @@ await agent.files.remove(remoteDirectory, {
 - 成果物出力を有効にすると、`actual.png`、失敗時の`expected.png`/`diff.png`、`metadata.json`、OCR時の`ocr-input.png`を保存します。
 - 既定の成果物出力先は`AGENT_ROVER_VISUAL_OUTPUT_RESULT_PATH`、variantは`AGENT_ROVER_VISUAL_VARIANT`で指定できます。オプションの`outputResultPath`と`variant`が優先されます。
 - OCRは既定で同梱の英語データ`@tesseract.js-data/eng`を使います。他言語を使う場合はTesseract.js用の言語データを依存関係に追加し、`createCaptureExpect({ ocr: { languages, langPath, gzip } })`で指定してください。
-- OCR workerは既定で読み取りごとに作成/解放されます。`workerMode: 'shared'`を指定した場合は、最後に`await captureExpect.release()`または`await captureExpect[Symbol.asyncDispose]()`で解放してください。
+- OCR workerは既定で読み取りごとに作成/解放されます。`workerMode: 'shared'`を指定した場合は、最後に`await captureExpect.releaseAsync()`または`await captureExpect[Symbol.asyncDispose]()`で解放してください。
 - GUIの描画、ウインドウ生成、ファイル保存など、結果が非同期に安定する処理の待機に使用できます。
 
 コード例:

@@ -20,6 +20,7 @@ import type {
   RemoteCursor,
   RemoteAgentCapabilities,
   RemoteInputOperation,
+  RemoteManagedProcessLaunchOptions,
   RemoteMonitor,
   RemoteProcessSnapshot,
 } from '../../src/index';
@@ -54,9 +55,17 @@ export interface FakeTcpAgentOptions {
   >;
   readonly closedWindowIds?: string[];
   readonly eventLogs?: readonly EventLogEntry[];
+  readonly launchedStderr?: string;
+  readonly launchedStdout?: string;
   readonly inputOperations?: RemoteInputOperation[];
+  readonly initialProcesses?: readonly RemoteProcessSnapshot[];
+  readonly killedProcessIds?: number[];
   readonly launchResult?: RemoteApplicationProcess;
   readonly launches?: RemoteApplicationLaunchOptions[];
+  readonly lockedRenameFailures?: Readonly<Record<string, number>>;
+  readonly killedManagedProcessIds?: number[];
+  readonly managedLaunches?: FakeManagedProcessLaunchOptions[];
+  readonly releasedManagedProcessIds?: number[];
   readonly protocolVersionOverride?: string;
   readonly screenshotImage?: Buffer;
   readonly windows?: readonly AppWindowSnapshot[];
@@ -67,6 +76,7 @@ export interface FakeTcpAgent {
   readonly host: string;
   readonly port: number;
   readonly requestUsedBase64: () => boolean;
+  readonly setProcesses: (processes: readonly RemoteProcessSnapshot[]) => void;
   readonly setWindows: (windows: readonly AppWindowSnapshot[]) => void;
 }
 
@@ -94,6 +104,7 @@ export const defaultFakeCapabilities: RemoteAgentCapabilities = {
     'file.exists',
     'file.mkdir',
     'file.mkdtemp',
+    'file.manifest',
     'file.read',
     'file.readdir',
     'file.remove',
@@ -101,7 +112,11 @@ export const defaultFakeCapabilities: RemoteAgentCapabilities = {
     'file.stat',
     'file.write',
     'process.kill',
+    'process.killManaged',
     'process.list',
+    'process.launchManaged',
+    'process.managedSnapshot',
+    'process.releaseManaged',
     'process.snapshot',
     'eventLogs.read',
     tcpFrameCapabilityId,
@@ -129,6 +144,7 @@ export const defaultFakeWindow: AppWindowSnapshot = {
   process: {
     id: 1001,
     name: 'notepad.exe',
+    path: 'C:/Windows/System32/notepad.exe',
   },
   title: 'Notepad',
   visible: true,
@@ -152,6 +168,7 @@ export const defaultFakeChildWindow: AppWindowSnapshot = {
   process: {
     id: 1001,
     name: 'notepad.exe',
+    path: 'C:/Windows/System32/notepad.exe',
   },
   title: 'OK',
   visible: true,
@@ -199,13 +216,21 @@ const defaultLaunchResult: RemoteApplicationProcess = {
   name: 'fake-launched-app',
 };
 
+export type FakeManagedProcessLaunchOptions =
+  RemoteManagedProcessLaunchOptions & {
+    readonly stderrPath?: string;
+    readonly stdoutPath?: string;
+  };
+
 const createFakeProcessSnapshot = (
   process: RemoteApplicationProcess,
   path: string
 ): RemoteProcessSnapshot => ({
+  createdAt: fakeTimestamp,
   exitCode: null,
   id: process.id,
   name: process.name,
+  parentProcessId: null,
   path,
   running: true,
 });
@@ -369,11 +394,28 @@ export const startFakeTcpAgent = async (
   const directories = new Set<string>(['C:/']);
   const files = new Map<string, Buffer>();
   const processes = new Map<number, RemoteProcessSnapshot>();
+  const managedProcesses = new Map<number, number>();
+  const managedProcessOptions = new Map<
+    number,
+    FakeManagedProcessLaunchOptions
+  >();
   const receivedTransferParts = new Map<string, Buffer[]>();
   const receivedTransfers = new Map<string, Buffer>();
   const sockets = new Set<Socket>();
   let clipboardText = '';
+  let nextManagedProcessId = 1;
   let sawBase64Write = false;
+
+  for (const process of options.initialProcesses ?? []) {
+    processes.set(process.id, process);
+  }
+
+  const lockedRenameFailures = new Map(
+    Object.entries(options.lockedRenameFailures ?? {}).map(([path, count]) => [
+      normalizePath(path),
+      count,
+    ])
+  );
 
   const ensureDirectory = (path: string): void => {
     const normalized = normalizePath(path);
@@ -407,6 +449,59 @@ export const startFakeTcpAgent = async (
       };
     }
     return undefined;
+  };
+
+  const writeLaunchedOutputFiles = (params: Record<string, unknown>): void => {
+    if (typeof params.stdoutPath === 'string') {
+      ensureDirectory(parentPath(params.stdoutPath));
+      files.set(
+        normalizePath(params.stdoutPath),
+        Buffer.from(options.launchedStdout ?? 'managed stdout', 'utf8')
+      );
+    }
+    if (typeof params.stderrPath === 'string') {
+      ensureDirectory(parentPath(params.stderrPath));
+      files.set(
+        normalizePath(params.stderrPath),
+        Buffer.from(options.launchedStderr ?? 'managed stderr', 'utf8')
+      );
+    }
+  };
+
+  const relativePath = (root: string, path: string): string => {
+    const normalizedRoot = normalizePath(root);
+    const normalizedPath = normalizePath(path);
+    if (normalizedPath === normalizedRoot) {
+      return '';
+    }
+    return normalizedPath.slice(normalizedRoot.length + 1);
+  };
+
+  const manifestEntries = (root: string): readonly JsonValue[] => {
+    const normalizedRoot = normalizePath(root);
+    const entries = [
+      ...[...directories]
+        .filter((entry) => entry.startsWith(`${normalizedRoot}/`))
+        .map((entry) => ({
+          modifiedAt: fakeTimestamp,
+          path: relativePath(normalizedRoot, entry),
+          size: 0,
+          type: 'directory',
+        })),
+      ...[...files.entries()]
+        .filter(([entry]) => entry.startsWith(`${normalizedRoot}/`))
+        .map(([entry, data]) => ({
+          modifiedAt: fakeTimestamp,
+          path: relativePath(normalizedRoot, entry),
+          sha256: sha256Hex(data),
+          size: data.byteLength,
+          type: 'file',
+        })),
+    ];
+    return entries
+      .filter((entry) => entry.path !== '')
+      .sort((left, right) => left.path.localeCompare(right.path))
+      .map((entry) => toJson(entry));
   };
 
   const server: Server = createServer((socket) => {
@@ -671,10 +766,133 @@ export const startFakeTcpAgent = async (
             const process = options.launchResult ?? defaultLaunchResult;
             const path =
               typeof recordParams.path === 'string' ? recordParams.path : '';
+            writeLaunchedOutputFiles(recordParams);
             processes.set(process.id, createFakeProcessSnapshot(process, path));
             sendSuccess(id, toJson(process));
           }
           return;
+        case 'process.launchManaged':
+          options.managedLaunches?.push(
+            recordParams as unknown as FakeManagedProcessLaunchOptions
+          );
+          {
+            const process = options.launchResult ?? defaultLaunchResult;
+            const managedProcessId = nextManagedProcessId;
+            nextManagedProcessId += 1;
+            const path =
+              typeof recordParams.path === 'string' ? recordParams.path : '';
+            const launchOptions =
+              recordParams as unknown as FakeManagedProcessLaunchOptions;
+            writeLaunchedOutputFiles(recordParams);
+            processes.set(process.id, createFakeProcessSnapshot(process, path));
+            managedProcesses.set(managedProcessId, process.id);
+            managedProcessOptions.set(managedProcessId, launchOptions);
+            sendSuccess(id, {
+              id: process.id,
+              managedProcessId,
+              name: process.name,
+              stderrPath:
+                typeof recordParams.stderrPath === 'string'
+                  ? recordParams.stderrPath
+                  : null,
+              stdoutPath:
+                typeof recordParams.stdoutPath === 'string'
+                  ? recordParams.stdoutPath
+                  : null,
+            });
+          }
+          return;
+        case 'process.managedSnapshot': {
+          const managedProcessId = recordParams.managedProcessId;
+          if (typeof managedProcessId !== 'number') {
+            sendFailure(
+              id,
+              'process.managedSnapshot requires managedProcessId.'
+            );
+            return;
+          }
+          const processId = managedProcesses.get(managedProcessId);
+          if (processId === undefined) {
+            sendFailure(
+              id,
+              'process.managedSnapshot requires a known process.'
+            );
+            return;
+          }
+          sendSuccess(
+            id,
+            toJson(
+              processes.get(processId) ?? {
+                createdAt: null,
+                exitCode: null,
+                id: processId,
+                name: '',
+                parentProcessId: null,
+                path: '',
+                running: false,
+              }
+            )
+          );
+          return;
+        }
+        case 'process.killManaged': {
+          const managedProcessId = recordParams.managedProcessId;
+          if (typeof managedProcessId !== 'number') {
+            sendFailure(id, 'process.killManaged requires managedProcessId.');
+            return;
+          }
+          const processId = managedProcesses.get(managedProcessId);
+          if (processId === undefined) {
+            sendFailure(id, 'process.killManaged requires a known process.');
+            return;
+          }
+          options.killedManagedProcessIds?.push(managedProcessId);
+          const current = processes.get(processId);
+          processes.set(processId, {
+            createdAt: current?.createdAt ?? null,
+            exitCode: 1,
+            id: processId,
+            name: current?.name ?? '',
+            parentProcessId: current?.parentProcessId ?? null,
+            path: current?.path ?? '',
+            running: false,
+          });
+          sendSuccess(id, null);
+          return;
+        }
+        case 'process.releaseManaged': {
+          const managedProcessId = recordParams.managedProcessId;
+          if (typeof managedProcessId !== 'number') {
+            sendFailure(
+              id,
+              'process.releaseManaged requires managedProcessId.'
+            );
+            return;
+          }
+          const processId = managedProcesses.get(managedProcessId);
+          if (processId === undefined) {
+            sendSuccess(id, null);
+            return;
+          }
+          options.releasedManagedProcessIds?.push(managedProcessId);
+          const launchOptions = managedProcessOptions.get(managedProcessId);
+          const current = processes.get(processId);
+          if (launchOptions?.killTreeOnRelease === true) {
+            processes.set(processId, {
+              createdAt: current?.createdAt ?? null,
+              exitCode: 1,
+              id: processId,
+              name: current?.name ?? '',
+              parentProcessId: current?.parentProcessId ?? null,
+              path: current?.path ?? '',
+              running: false,
+            });
+          }
+          managedProcesses.delete(managedProcessId);
+          managedProcessOptions.delete(managedProcessId);
+          sendSuccess(id, null);
+          return;
+        }
         case 'process.snapshot': {
           const processId = recordParams.processId;
           if (typeof processId !== 'number') {
@@ -685,9 +903,11 @@ export const startFakeTcpAgent = async (
             id,
             toJson(
               processes.get(processId) ?? {
+                createdAt: null,
                 exitCode: null,
                 id: processId,
                 name: '',
+                parentProcessId: null,
                 path: '',
                 running: false,
               }
@@ -712,10 +932,13 @@ export const startFakeTcpAgent = async (
             return;
           }
           const current = processes.get(processId);
+          options.killedProcessIds?.push(processId);
           processes.set(processId, {
+            createdAt: current?.createdAt ?? null,
             exitCode: 1,
             id: processId,
             name: current?.name ?? '',
+            parentProcessId: current?.parentProcessId ?? null,
             path: current?.path ?? '',
             running: false,
           });
@@ -836,6 +1059,20 @@ export const startFakeTcpAgent = async (
           sendSuccess(id, toJson(entries));
           return;
         }
+        case 'file.manifest': {
+          const path = recordParams.path;
+          if (
+            typeof path !== 'string' ||
+            !directories.has(normalizePath(path))
+          ) {
+            sendFailure(id, 'file.manifest requires directory path.');
+            return;
+          }
+          sendSuccess(id, {
+            entries: toJson(manifestEntries(path)),
+          });
+          return;
+        }
         case 'file.rename': {
           const from = recordParams.from;
           const to = recordParams.to;
@@ -845,6 +1082,16 @@ export const startFakeTcpAgent = async (
           }
           const normalizedFrom = normalizePath(from);
           const normalizedTo = normalizePath(to);
+          const remainingLockedFailures =
+            lockedRenameFailures.get(normalizedTo) ?? 0;
+          if (remainingLockedFailures > 0) {
+            lockedRenameFailures.set(normalizedTo, remainingLockedFailures - 1);
+            sendFailure(
+              id,
+              `MoveFileExW failed. path=${normalizedTo} win32Error=32`
+            );
+            return;
+          }
           const file = files.get(normalizedFrom);
           if (file !== undefined) {
             ensureDirectory(parentPath(normalizedTo));
@@ -1079,6 +1326,12 @@ export const startFakeTcpAgent = async (
     host: '127.0.0.1',
     port: address.port,
     requestUsedBase64: (): boolean => sawBase64Write,
+    setProcesses: (nextProcesses): void => {
+      processes.clear();
+      for (const process of nextProcesses) {
+        processes.set(process.id, process);
+      }
+    },
     setWindows: (nextWindows): void => {
       windows.splice(0, windows.length, ...nextWindows);
     },

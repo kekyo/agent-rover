@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "agent_log.h"
 #include "binary_codec.h"
 #include "win32_capture.h"
 #include "win32_clipboard.h"
@@ -466,11 +467,16 @@ static std::string CapabilitiesJson() {
       "\"file.stat\","
       "\"file.mkdir\","
       "\"file.readdir\","
+      "\"file.manifest\","
       "\"file.remove\","
       "\"file.rename\","
       "\"file.mkdtemp\","
       "\"process.kill\","
+      "\"process.killManaged\","
       "\"process.list\","
+      "\"process.releaseManaged\","
+      "\"process.launchManaged\","
+      "\"process.managedSnapshot\","
       "\"process.snapshot\","
       "\"eventLogs.read\","
       "\"";
@@ -554,6 +560,8 @@ static std::string WindowJson(const WindowInfo& window) {
   output += std::to_string(window.process.id);
   output += ",\"name\":";
   AppendJsonString(&output, window.process.name);
+  output += ",\"path\":";
+  AppendJsonString(&output, window.process.path);
   output += "}}";
   return output;
 }
@@ -627,11 +635,65 @@ static std::string DirectoryEntryArrayJson(
   return output;
 }
 
+static std::string DirectoryManifestEntryJson(
+    const DirectoryManifestEntry& entry) {
+  std::string output = "{\"path\":";
+  AppendJsonString(&output, entry.path);
+  output += ",\"type\":";
+  AppendJsonString(&output, entry.type);
+  output += ",\"size\":";
+  output += std::to_string(entry.size);
+  output += ",\"modifiedAt\":";
+  AppendJsonString(&output, entry.modified_at);
+  if (entry.has_sha256) {
+    output += ",\"sha256\":";
+    AppendJsonString(&output, entry.sha256);
+  }
+  output += "}";
+  return output;
+}
+
+static std::string DirectoryManifestJson(
+    const std::vector<DirectoryManifestEntry>& entries) {
+  std::string output = "{\"entries\":[";
+  for (size_t index = 0; index < entries.size(); index += 1) {
+    if (index != 0) {
+      output += ",";
+    }
+    output += DirectoryManifestEntryJson(entries[index]);
+  }
+  output += "]}";
+  return output;
+}
+
 static std::string ApplicationProcessJson(const ApplicationProcess& process) {
   std::string output = "{\"id\":";
   output += std::to_string(process.id);
   output += ",\"name\":";
   AppendJsonString(&output, process.name);
+  output += "}";
+  return output;
+}
+
+static std::string ManagedProcessJson(const ManagedProcess& process) {
+  std::string output = "{\"managedProcessId\":";
+  output += std::to_string(process.managed_id);
+  output += ",\"id\":";
+  output += std::to_string(process.process.id);
+  output += ",\"name\":";
+  AppendJsonString(&output, process.process.name);
+  output += ",\"stdoutPath\":";
+  if (process.stdout_path.empty()) {
+    output += "null";
+  } else {
+    AppendJsonString(&output, process.stdout_path);
+  }
+  output += ",\"stderrPath\":";
+  if (process.stderr_path.empty()) {
+    output += "null";
+  } else {
+    AppendJsonString(&output, process.stderr_path);
+  }
   output += "}";
   return output;
 }
@@ -643,6 +705,18 @@ static std::string ProcessSnapshotJson(const ProcessSnapshot& process) {
   AppendJsonString(&output, process.name);
   output += ",\"path\":";
   AppendJsonString(&output, process.path);
+  output += ",\"parentProcessId\":";
+  if (process.has_parent_process_id) {
+    output += std::to_string(process.parent_process_id);
+  } else {
+    output += "null";
+  }
+  output += ",\"createdAt\":";
+  if (process.created_at.empty()) {
+    output += "null";
+  } else {
+    AppendJsonString(&output, process.created_at);
+  }
   output += ",\"running\":";
   output += process.running ? "true" : "false";
   output += ",\"exitCode\":";
@@ -814,6 +888,31 @@ static bool ReadRectField(
          FindJsonNumberField(object, "height", &rect->height);
 }
 
+static bool ReadApplicationLaunchOptions(
+    const std::string& payload,
+    const std::string& method,
+    ApplicationLaunchOptions* options,
+    std::string* error) {
+  *options = {};
+  if (!FindJsonStringField(payload, "path", &options->path)) {
+    *error = method + " requires path.";
+    return false;
+  }
+  std::vector<std::string> arguments;
+  if (FindJsonStringArrayField(payload, "arguments", &arguments)) {
+    options->arguments = arguments;
+  }
+  std::string working_directory;
+  if (FindJsonStringField(payload, "workingDirectory", &working_directory)) {
+    options->working_directory = working_directory;
+  }
+  FindJsonStringObjectField(payload, "environment", &options->environment);
+  FindJsonStringField(payload, "stdoutPath", &options->stdout_path);
+  FindJsonStringField(payload, "stderrPath", &options->stderr_path);
+  FindJsonBoolField(payload, "createNoWindow", &options->create_no_window);
+  return true;
+}
+
 static bool ParseInputOperation(
     const std::string& payload,
     InputOperation* operation,
@@ -969,27 +1068,93 @@ std::string HandleJsonRequest(
   }
   if (method == "applications.launch") {
     ApplicationLaunchOptions options;
-    if (!FindJsonStringField(payload, "path", &options.path)) {
-      return FailureResponseJson(id, "applications.launch requires path.");
+    std::string parse_error;
+    if (!ReadApplicationLaunchOptions(
+            payload, "applications.launch", &options, &parse_error)) {
+      return FailureResponseJson(id, parse_error);
     }
-    std::vector<std::string> arguments;
-    if (FindJsonStringArrayField(payload, "arguments", &arguments)) {
-      options.arguments = arguments;
-    }
-    std::string working_directory;
-    if (FindJsonStringField(payload, "workingDirectory", &working_directory)) {
-      options.working_directory = working_directory;
-    }
-    FindJsonStringObjectField(payload, "environment", &options.environment);
-    FindJsonStringField(payload, "stdoutPath", &options.stdout_path);
-    FindJsonStringField(payload, "stderrPath", &options.stderr_path);
-    FindJsonBoolField(payload, "createNoWindow", &options.create_no_window);
     ApplicationProcess process = {};
     std::string error;
     if (!LaunchApplication(options, &process, &error)) {
+      PrintAgentLogEvent(CreateAgentApplicationLaunchFailedLogEvent(
+          options.path, error));
       return FailureResponseJson(id, error);
     }
+    PrintAgentLogEvent(CreateAgentApplicationLaunchedLogEvent(
+        process.id, process.name, options.path));
     return SuccessResponseJson(id, ApplicationProcessJson(process));
+  }
+  if (method == "process.launchManaged") {
+    ManagedProcessLaunchOptions options = {};
+    std::string parse_error;
+    if (!ReadApplicationLaunchOptions(
+            payload, "process.launchManaged", &options.launch, &parse_error)) {
+      return FailureResponseJson(id, parse_error);
+    }
+    FindJsonBoolField(
+        payload, "killTreeOnRelease", &options.kill_tree_on_release);
+    ManagedProcess process = {};
+    std::string error;
+    if (!LaunchManagedProcess(options, &process, &error)) {
+      PrintAgentLogEvent(CreateAgentManagedProcessLaunchFailedLogEvent(
+          options.launch.path, error));
+      return FailureResponseJson(id, error);
+    }
+    PrintAgentLogEvent(CreateAgentManagedProcessLaunchedLogEvent(
+        process.managed_id, process.process.id, process.process.name,
+        options.launch.path));
+    return SuccessResponseJson(id, ManagedProcessJson(process));
+  }
+  if (method == "process.managedSnapshot") {
+    int managed_process_id = 0;
+    if (!FindJsonNumberField(payload, "managedProcessId", &managed_process_id) ||
+        managed_process_id < 0) {
+      return FailureResponseJson(
+          id, "process.managedSnapshot requires managedProcessId.");
+    }
+    ProcessSnapshot process = {};
+    std::string error;
+    if (!SnapshotManagedProcess(
+            static_cast<uint32_t>(managed_process_id), &process, &error)) {
+      return FailureResponseJson(id, error);
+    }
+    return SuccessResponseJson(id, ProcessSnapshotJson(process));
+  }
+  if (method == "process.killManaged") {
+    int managed_process_id = 0;
+    if (!FindJsonNumberField(payload, "managedProcessId", &managed_process_id) ||
+        managed_process_id < 0) {
+      return FailureResponseJson(
+          id, "process.killManaged requires managedProcessId.");
+    }
+    const uint32_t managed_id = static_cast<uint32_t>(managed_process_id);
+    std::string error;
+    if (!KillManagedProcess(managed_id, &error)) {
+      PrintAgentLogEvent(CreateAgentManagedProcessOperationFailedLogEvent(
+          "kill", managed_id, error));
+      return FailureResponseJson(id, error);
+    }
+    PrintAgentLogEvent(
+        CreateAgentManagedProcessOperationLogEvent("killed", managed_id));
+    return SuccessResponseJson(id, "null");
+  }
+  if (method == "process.releaseManaged") {
+    int managed_process_id = 0;
+    if (!FindJsonNumberField(payload, "managedProcessId", &managed_process_id) ||
+        managed_process_id < 0) {
+      return FailureResponseJson(
+          id, "process.releaseManaged requires managedProcessId.");
+    }
+    const uint32_t managed_id = static_cast<uint32_t>(managed_process_id);
+    std::string error;
+    if (!ReleaseManagedProcess(managed_id, &error)) {
+      PrintAgentLogEvent(CreateAgentManagedProcessOperationFailedLogEvent(
+          "release", managed_id, error));
+      return FailureResponseJson(id, error);
+    }
+    PrintAgentLogEvent(
+        CreateAgentManagedProcessOperationLogEvent("released", managed_id));
+    return SuccessResponseJson(id, "null");
   }
   if (method == "process.snapshot") {
     int process_id = 0;
@@ -1021,10 +1186,14 @@ std::string HandleJsonRequest(
         process_id < 0) {
       return FailureResponseJson(id, "process.kill requires processId.");
     }
+    const uint32_t target_process_id = static_cast<uint32_t>(process_id);
     std::string error;
-    if (!KillProcess(static_cast<uint32_t>(process_id), &error)) {
+    if (!KillProcess(target_process_id, &error)) {
+      PrintAgentLogEvent(CreateAgentProcessKillFailedLogEvent(
+          target_process_id, error));
       return FailureResponseJson(id, error);
     }
+    PrintAgentLogEvent(CreateAgentProcessKilledLogEvent(target_process_id));
     return SuccessResponseJson(id, "null");
   }
   if (method == "window.snapshot") {
@@ -1174,6 +1343,18 @@ std::string HandleJsonRequest(
       return FailureResponseJson(id, error);
     }
     return SuccessResponseJson(id, DirectoryEntryArrayJson(entries));
+  }
+  if (method == "file.manifest") {
+    std::string path;
+    if (!FindJsonStringField(payload, "path", &path)) {
+      return FailureResponseJson(id, "file.manifest requires path.");
+    }
+    std::vector<DirectoryManifestEntry> entries;
+    std::string error;
+    if (!ReadDirectoryManifest(path, &entries, &error)) {
+      return FailureResponseJson(id, error);
+    }
+    return SuccessResponseJson(id, DirectoryManifestJson(entries));
   }
   if (method == "file.remove") {
     std::string path;

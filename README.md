@@ -65,13 +65,12 @@ await agent.files.writeFile(
 );
 
 // Launch the application.
-const launchedProcess = await agent.applications.launch({
+const process = await agent.processes.launchManaged({
   path: 'notepad.exe',
 });
 
 // Get the application window.
-const notepadWindow = await agent.waitForWindow({
-  processId: launchedProcess.id,
+const notepadWindow = await process.waitForWindow({
   visible: true,
 });
 
@@ -84,6 +83,8 @@ await agent.keyboard.pasteText('Here is a remote message');
 // Capture the window image and save it.
 const screenshot = await notepadWindow.screenshot();
 await writeFile('capture.png', screenshot.image);
+
+await process.releaseAsync();
 ```
 
 In addition to observing and operating GUI applications themselves, agent-rover also includes APIs for operating the target GUI session.
@@ -108,7 +109,9 @@ The agent is very small and avoids runtime dependencies on other libraries as mu
 After extracting the archive, you can run it as-is. No installation is required.
 
 For example, you can start the Windows agent as follows.
-When it starts, it prints the listening address and access token:
+When it starts, it prints the listening address and access token.
+As clients connect and drive applications, it also prints low-frequency
+lifecycle events:
 
 ```cmd
 C:\> agent-rover-agent.exe
@@ -120,9 +123,19 @@ Licence: Under MIT.
 
 agent-rover native agent listening on 0.0.0.0:39397
 agent-rover agent token: <access-token>
+agent-rover agent event: 2026-07-07T12:34:56Z connection #1 accepted from 192.0.2.10:50123
+agent-rover agent event: 2026-07-07T12:34:57Z connection #1 authenticated
+agent-rover agent event: 2026-07-07T12:34:57Z connection #1 ready
+agent-rover agent event: 2026-07-07T12:35:10Z application launched pid=4321 name=notepad.exe path=notepad.exe
+agent-rover agent event: 2026-07-07T12:35:20Z managed process released managedId=1
+agent-rover agent event: 2026-07-07T12:35:21Z connection #1 disconnected: peer requested close
 ```
 
 - When the agent starts, it prints an access token. Make a note of it.
+- The lifecycle log reports connection, authentication, application launch,
+  managed process kill/release, process kill, and disconnect events. It does not
+  print request payloads, access tokens, environment variables, or clipboard
+  contents.
 - The default TCP port is 39397. You need to open it in the OS firewall.
 - The Windows agent must be started from the user's interactive desktop so it can operate the desktop environment.
   This is a subtle issue, but launching a process from a Windows service restricts the desktop environment, so running the Windows agent as a service is not recommended.
@@ -269,15 +282,14 @@ try {
 Code example:
 
 ```typescript
-// Launch the application.
-const launchedProcess = await agent.applications.launch({
+// Launch the application with a managed lifecycle handle.
+const process = await agent.processes.launchManaged({
   path: 'notepad.exe',
 });
 
 // Wait until the launched process shows a window.
-const notepadWindow = await agent.waitForWindow(
+const notepadWindow = await process.waitForWindow(
   {
-    processId: launchedProcess.id,
     visible: true,
   },
   {
@@ -321,14 +333,16 @@ expect(windowCapture.visibleBounds.width).toBeGreaterThan(0);
 
 // Close the window and wait until it is closed.
 await stableWindow.close();
-await agent.waitForNoWindow(
+await process.waitForNoWindow(
   {
-    processId: launchedProcess.id,
+    visible: true,
   },
   {
     timeoutMs: 5000,
   }
 );
+
+await process.releaseAsync();
 ```
 
 ### Applications And Processes
@@ -336,6 +350,7 @@ await agent.waitForNoWindow(
 | API | Description |
 | :-- | :-- |
 | `RemoteAgent.applications.launch(options)` | Launches an application in the connected session and returns process information. |
+| `RemoteAgent.processes.launchManaged(options)` | Launches a process and returns a tracked managed lifecycle handle. |
 | `RemoteAgent.processes.snapshot(processId)` | Gets the current state of a process. |
 | `RemoteAgent.processes.exists(processId)` | Gets whether a process is running. |
 | `RemoteAgent.processes.list(options?)` | Gets the list of running processes. |
@@ -344,6 +359,9 @@ await agent.waitForNoWindow(
 
 - `applications.launch()` accepts `path`, `arguments`, `workingDirectory`, `environment`, `stdoutPath`,
   `stderrPath`, and `createNoWindow`.
+- `processes.launchManaged()` accepts `path`, `arguments`, `workingDirectory`, `environment`,
+  `captureStdout`, `captureStderr`, `createNoWindow`, and `killTreeOnRelease`.
+  `killTreeOnRelease` defaults to `true`.
 
 Code example:
 
@@ -380,11 +398,35 @@ const exitedProcess = await agent.processes.waitForExit(
 expect(exitedProcess.running).toBe(false);
 ```
 
+Managed process example:
+
+```typescript
+const process = await agent.processes.launchManaged({
+  arguments: ['--run-tests'],
+  captureStderr: true,
+  captureStdout: true,
+  path: String.raw`C:\tools\app-under-test.exe`,
+  workingDirectory: String.raw`C:\tools`,
+});
+
+const result = await process.waitForExit({
+  timeoutMs: 30000,
+});
+expect(result.root.exitCode).toBe(0);
+expect(await process.stdoutText()).toContain('completed');
+expect(await process.stderrText()).toBe('');
+
+await process.releaseAsync();
+// Or use explicit resource management:
+// await process[Symbol.asyncDispose]();
+```
+
 ### Input And Clipboard
 
 | API | Description |
 | :-- | :-- |
 | `RemoteAgent.mouse.move(point)` | Moves the mouse cursor. |
+| `RemoteAgent.mouse.down(options?)` / `RemoteAgent.mouse.up(options?)` | Presses only, or releases only, a mouse button. |
 | `RemoteAgent.mouse.click(point, options?)` | Performs a mouse click at the specified position. |
 | `RemoteAgent.mouse.drag(from, to, options?)` | Performs a drag operation. |
 | `RemoteAgent.mouse.wheel(options)` | Performs a mouse wheel operation. |
@@ -392,6 +434,8 @@ expect(exitedProcess.running).toBe(false);
 | `RemoteAgent.keyboard.down(key)` / `RemoteAgent.keyboard.up(key)` | Presses only, or releases only, a key. |
 | `RemoteAgent.keyboard.type(text)` | Inputs text by simulating keyboard typing. |
 | `RemoteAgent.keyboard.pasteText(text, options?)` | Pastes text through the clipboard. |
+| `RemoteAgent.interaction.start(options?)` | Starts a releaseable keyboard and mouse interaction session. |
+| `RemoteAgent.interaction.with(operation, options?)` | Runs `operation` in an interaction session and releases session-owned input state afterward. |
 | `RemoteAgent.clipboard.readText()` / `RemoteAgent.clipboard.writeText(text)` | Reads and writes clipboard text. |
 | `RemoteAgent.clipboard.clear()` | Clears the clipboard. |
 | `RemoteAgent.clipboard.withText(text, operation)` | Temporarily replaces the clipboard text while running `operation`, then restores the original text afterward. |
@@ -460,6 +504,19 @@ await agent.mouse.wheel({
   point: inputPoint,
 });
 
+// Hold keyboard and mouse state in a releaseable interaction session.
+await agent.interaction.with(async (session) => {
+  await session.keyboard.down('Shift');
+  await session.mouse.down({
+    button: 'left',
+    point: inputPoint,
+  });
+  await session.mouse.move({
+    x: inputPoint.x + 240,
+    y: inputPoint.y,
+  });
+});
+
 // Read and write the clipboard, then clear it.
 const clipboardText = await agent.clipboard.readText();
 expect(typeof clipboardText).toBe('string');
@@ -479,6 +536,8 @@ await agent.clipboard.clear();
 | `RemoteAgent.files.remove(path, options?)` | Removes a file or directory. |
 | `RemoteAgent.files.rename(from, to)` | Renames or moves a file or directory. |
 | `RemoteAgent.files.mkdtemp(prefix)` | Creates a temporary directory. |
+| `RemoteAgent.files.syncDirectory(options)` | Synchronizes a local directory to the connected machine with checksum-based diffing. |
+| `RemoteAgent.files.downloadDirectory(options)` | Downloads a remote directory to a local directory. |
 | `RemoteAgent.eventLogs.read(query?)` | Gets event logs from the connected machine. |
 | `RemoteAgent.diagnostics.capture(options?)` | Collects screen images, window lists, event logs, and recent operation history in memory. |
 | `saveDiagnostics(directory, options)` | Saves diagnostics to a local directory. |
@@ -515,6 +574,18 @@ await agent.files.rename(remoteFilePath, movedFilePath);
 const received = await agent.files.readFile(movedFilePath);
 expect(received.toString('utf8')).toBe('hello');
 
+// Synchronize a local runtime directory and collect remote artifacts.
+await agent.files.syncDirectory({
+  localPath: 'fixtures/runtime',
+  remotePath: `${remoteDirectory}\\runtime`,
+  mode: 'mirror',
+  onLockedFile: 'killRelatedProcessesAndRetry',
+});
+await agent.files.downloadDirectory({
+  remotePath: `${remoteDirectory}\\runtime`,
+  localPath: 'test-results/runtime-copy',
+});
+
 // Get event logs.
 const recentLogs = await agent.eventLogs.read({
   maxEntries: 20,
@@ -531,6 +602,19 @@ const capture = await agent.diagnostics.capture({
 });
 const saved = await saveDiagnostics('test-results/diagnostics', {
   capture,
+  agent,
+  attachments: [
+    {
+      kind: 'remoteFile',
+      name: 'moved-input',
+      path: movedFilePath,
+    },
+    {
+      kind: 'remoteDirectory',
+      name: 'runtime',
+      path: `${remoteDirectory}\\runtime`,
+    },
+  ],
 });
 expect(saved.artifacts.length).toBeGreaterThan(0);
 
@@ -580,7 +664,7 @@ await agent.files.remove(remoteDirectory, {
 - OCR uses the bundled English data `@tesseract.js-data/eng` by default.
   To use another language, add language data for Tesseract.js as a dependency and specify it with `createCaptureExpect({ ocr: { languages, langPath, gzip } })`.
 - OCR workers are created and released for each read by default.
-  If you specify `workerMode: 'shared'`, release it at the end with `await captureExpect.release()` or `await captureExpect[Symbol.asyncDispose]()`.
+  If you specify `workerMode: 'shared'`, release it at the end with `await captureExpect.releaseAsync()` or `await captureExpect[Symbol.asyncDispose]()`.
 - These helpers can be used to wait for results that stabilize asynchronously, such as GUI rendering, window creation, and file saving.
 
 Code example:

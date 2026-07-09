@@ -4,6 +4,18 @@
 // https://github.com/kekyo/agent-rover
 
 import { createHash } from 'node:crypto';
+import {
+  mkdir as makeLocalDirectory,
+  readdir as readLocalDirectory,
+  readFile as readLocalFile,
+  stat as statLocalPath,
+  writeFile as writeLocalFile,
+} from 'node:fs/promises';
+import {
+  dirname as localDirname,
+  join as joinLocalPath,
+  relative as relativeLocalPath,
+} from 'node:path';
 
 import type {
   AppWindow,
@@ -31,15 +43,27 @@ import type {
   RemoteDiagnosticsCapture,
   RemoteDiagnosticsCaptureOptions,
   RemoteDiagnosticsWindow,
+  RemoteDirectoryDownloadOptions,
+  RemoteDirectoryDownloadResult,
   RemoteDirectoryEntry,
+  RemoteDirectoryManifestEntry,
+  RemoteDirectorySyncOptions,
+  RemoteDirectorySyncResult,
   RemoteFileStat,
+  RemoteFileType,
+  RemoteInteractionSession,
+  RemoteInteractionSessionOptions,
   RemoteStableBoundsWaitOptions,
   RemoteInputOperation,
   RemoteKeyboardPressOptions,
   RemoteMonitor,
+  RemoteMouseButtonOptions,
   RemoteMouseClickOptions,
   RemoteMouseDragOptions,
   RemoteMouseWheelOptions,
+  RemoteManagedProcess,
+  RemoteManagedProcessLaunchOptions,
+  RemoteManagedProcessSnapshot,
   RemoteProtocolTraceEntry,
   RemoteProcessListOptions,
   RemoteProcessSnapshot,
@@ -77,6 +101,11 @@ interface BinaryTransferReference {
   readonly sha256: string;
 }
 
+interface HeldInteractionInput {
+  readonly id: string;
+  readonly release: RemoteInputOperation;
+}
+
 interface WaitingBinaryTransfer {
   readonly reference: BinaryTransferReference;
   readonly reject: (error: RemoteAgentError) => void;
@@ -84,10 +113,48 @@ interface WaitingBinaryTransfer {
   readonly timer: ReturnType<typeof setTimeout>;
 }
 
+interface ManagedProcessLaunchResult {
+  readonly managedProcessId: number;
+  readonly process: RemoteApplicationProcess;
+  readonly stdoutPath: string | undefined;
+  readonly stderrPath: string | undefined;
+}
+
+interface LocalDirectoryManifestEntry extends RemoteDirectoryManifestEntry {
+  readonly absolutePath: string;
+}
+
+interface DirectoryFilter {
+  readonly included: (path: string, type: RemoteFileType) => boolean;
+  readonly excluded: (path: string, type: RemoteFileType) => boolean;
+}
+
+interface DirectorySyncCounters {
+  uploadedFiles: number;
+  skippedFiles: number;
+  createdDirectories: number;
+  deletedFiles: number;
+  deletedDirectories: number;
+  bytesUploaded: number;
+}
+
+interface DirectoryDownloadCounters {
+  downloadedFiles: number;
+  createdDirectories: number;
+  bytesDownloaded: number;
+}
+
+interface LockedFileRetryOptions {
+  readonly policy: 'fail' | 'retry' | 'killRelatedProcessesAndRetry';
+  readonly relatedProcessPaths: readonly string[];
+}
+
 const defaultTimeoutMs = 30000;
 const defaultPasteRestoreDelayMs = 500;
 const binaryTransferChunkSize = 64 * 1024;
 const maxRecentDiagnosticsOperations = 100;
+const lockedFileRetryAttempts = 5;
+const lockedFileRetryDelayMs = 100;
 
 const sha256Hex = (data: Buffer): string =>
   createHash('sha256').update(data).digest('hex');
@@ -146,6 +213,155 @@ const cloneInputOperation = (
   operation: RemoteInputOperation
 ): RemoteInputOperation =>
   JSON.parse(JSON.stringify(operation)) as RemoteInputOperation;
+
+const normalizeDirectoryRelativePath = (path: string): string =>
+  path.replace(/\\/gu, '/').replace(/^\/+/u, '').replace(/\/+$/u, '');
+
+const normalizeRemotePath = (path: string): string => {
+  const normalized = path.replace(/\\/gu, '/').replace(/\/+$/u, '');
+  return /^[A-Za-z]:$/u.test(normalized) ? `${normalized}/` : normalized;
+};
+
+const joinRemotePath = (root: string, relativePath: string): string => {
+  const normalizedRoot = normalizeRemotePath(root);
+  const normalizedRelative = normalizeDirectoryRelativePath(relativePath);
+  if (normalizedRelative === '') {
+    return normalizedRoot;
+  }
+  if (normalizedRoot.endsWith('/')) {
+    return `${normalizedRoot}${normalizedRelative}`;
+  }
+  return `${normalizedRoot}/${normalizedRelative}`;
+};
+
+const normalizeLocalRelativePath = (root: string, path: string): string =>
+  normalizeDirectoryRelativePath(relativeLocalPath(root, path));
+
+const escapeRegExpCharacter = (character: string): string =>
+  character.replace(/[\\^$.*+?()[\]{}|]/gu, '\\$&');
+
+const globToRegExp = (pattern: string): RegExp => {
+  const normalized = normalizeDirectoryRelativePath(pattern);
+  let source = '^';
+  for (let index = 0; index < normalized.length; index += 1) {
+    const character = normalized[index];
+    if (character === '*') {
+      if (normalized[index + 1] === '*') {
+        source += '.*';
+        index += 1;
+      } else {
+        source += '[^/]*';
+      }
+    } else if (character === '?') {
+      source += '[^/]';
+    } else if (character !== undefined) {
+      source += escapeRegExpCharacter(character);
+    }
+  }
+  source += '$';
+  return new RegExp(source, 'u');
+};
+
+const pathMatchesAnyPattern = (
+  path: string,
+  type: RemoteFileType,
+  patterns: readonly RegExp[]
+): boolean => {
+  const normalized = normalizeDirectoryRelativePath(path);
+  const candidates =
+    type === 'directory' ? [normalized, `${normalized}/`] : [normalized];
+  return patterns.some((pattern) =>
+    candidates.some((candidate) => pattern.test(candidate))
+  );
+};
+
+const createDirectoryFilter = (
+  include: readonly string[] | undefined,
+  exclude: readonly string[] | undefined
+): DirectoryFilter => {
+  const includePatterns = (include ?? []).map((pattern) =>
+    globToRegExp(pattern)
+  );
+  const excludePatterns = (exclude ?? []).map((pattern) =>
+    globToRegExp(pattern)
+  );
+  return {
+    excluded: (path, type): boolean =>
+      pathMatchesAnyPattern(path, type, excludePatterns),
+    included: (path, type): boolean =>
+      (includePatterns.length === 0 ||
+        pathMatchesAnyPattern(path, type, includePatterns)) &&
+      !pathMatchesAnyPattern(path, type, excludePatterns),
+  };
+};
+
+const buildLocalDirectoryManifest = async (
+  root: string,
+  filter: DirectoryFilter
+): Promise<readonly LocalDirectoryManifestEntry[]> => {
+  const entries: LocalDirectoryManifestEntry[] = [];
+  const visit = async (directory: string): Promise<void> => {
+    for (const name of await readLocalDirectory(directory)) {
+      const absolutePath = joinLocalPath(directory, name);
+      const stat = await statLocalPath(absolutePath);
+      const relativePath = normalizeLocalRelativePath(root, absolutePath);
+      if (stat.isDirectory()) {
+        if (filter.excluded(relativePath, 'directory')) {
+          continue;
+        }
+        if (filter.included(relativePath, 'directory')) {
+          entries.push({
+            absolutePath,
+            modifiedAt: stat.mtime.toISOString(),
+            path: relativePath,
+            size: 0,
+            type: 'directory',
+          });
+        }
+        await visit(absolutePath);
+      } else if (stat.isFile() && filter.included(relativePath, 'file')) {
+        const data = await readLocalFile(absolutePath);
+        entries.push({
+          absolutePath,
+          modifiedAt: stat.mtime.toISOString(),
+          path: relativePath,
+          sha256: sha256Hex(data),
+          size: data.byteLength,
+          type: 'file',
+        });
+      }
+    }
+  };
+  await visit(root);
+  return entries.sort((left, right) => left.path.localeCompare(right.path));
+};
+
+const isLockedFileError = (error: unknown): boolean => {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const message = error.message.toLowerCase();
+  return (
+    message.includes('win32error=32') ||
+    message.includes('win32error=33') ||
+    message.includes('win32error=5') ||
+    message.includes('sharing violation') ||
+    message.includes('lock violation') ||
+    message.includes('access is denied') ||
+    message.includes('access denied')
+  );
+};
+
+const pathIsUnderRemotePrefix = (path: string, prefix: string): boolean => {
+  const normalizedPath = normalizeRemotePath(path).toLowerCase();
+  const normalizedPrefix = normalizeRemotePath(prefix).toLowerCase();
+  return (
+    normalizedPath === normalizedPrefix ||
+    normalizedPath.startsWith(
+      normalizedPrefix.endsWith('/') ? normalizedPrefix : `${normalizedPrefix}/`
+    )
+  );
+};
 
 const copyWindowSnapshot = (window: AppWindowSnapshot): AppWindowSnapshot => ({
   active: window.active,
@@ -259,9 +475,17 @@ const parseProcess = (value: unknown): AppWindowProcess => {
       'Window process must be an object.'
     );
   }
+  const path = value.path;
+  if (path !== undefined && path !== null && typeof path !== 'string') {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'Window process path field must be a string or null.'
+    );
+  }
   return {
     id: readNumber(value, 'id'),
     name: readString(value, 'name'),
+    path: typeof path === 'string' ? path : '',
   };
 };
 
@@ -522,6 +746,44 @@ const parseDirectoryEntries = (
   return value.map((entry) => parseDirectoryEntry(entry));
 };
 
+const parseDirectoryManifestEntry = (
+  value: unknown
+): RemoteDirectoryManifestEntry => {
+  if (!isRecord(value)) {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'file.manifest entry must be an object.'
+    );
+  }
+  const type = value.type;
+  if (type !== 'file' && type !== 'directory' && type !== 'other') {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'file.manifest entry type is invalid.'
+    );
+  }
+  const sha256 = readOptionalString(value, 'sha256');
+  return {
+    ...(sha256 === undefined ? {} : { sha256 }),
+    modifiedAt: readString(value, 'modifiedAt'),
+    path: normalizeDirectoryRelativePath(readString(value, 'path')),
+    size: readNumber(value, 'size'),
+    type,
+  };
+};
+
+const parseDirectoryManifest = (
+  value: JsonValue | undefined
+): readonly RemoteDirectoryManifestEntry[] => {
+  if (!isRecord(value) || !Array.isArray(value.entries)) {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'file.manifest result must include entries.'
+    );
+  }
+  return value.entries.map((entry) => parseDirectoryManifestEntry(entry));
+};
+
 const parseExists = (value: JsonValue | undefined): boolean => {
   if (!isRecord(value) || typeof value.exists !== 'boolean') {
     throw createRemoteAgentError(
@@ -557,6 +819,43 @@ const parseApplicationProcess = (
   };
 };
 
+const readOptionalString = (
+  record: Record<string, unknown>,
+  key: string
+): string | undefined => {
+  const value = record[key];
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'string') {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      `${key} must be a string or null.`
+    );
+  }
+  return value;
+};
+
+const parseManagedProcessLaunchResult = (
+  value: JsonValue | undefined
+): ManagedProcessLaunchResult => {
+  if (!isRecord(value)) {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'process.launchManaged result must be an object.'
+    );
+  }
+  return {
+    managedProcessId: readNumber(value, 'managedProcessId'),
+    process: {
+      id: readNumber(value, 'id'),
+      name: readString(value, 'name'),
+    },
+    stderrPath: readOptionalString(value, 'stderrPath'),
+    stdoutPath: readOptionalString(value, 'stdoutPath'),
+  };
+};
+
 const parseProcessSnapshot = (
   value: JsonValue | undefined
 ): RemoteProcessSnapshot => {
@@ -568,6 +867,8 @@ const parseProcessSnapshot = (
   }
   const running = value.running;
   const exitCode = value.exitCode;
+  const parentProcessId = value.parentProcessId;
+  const createdAt = value.createdAt;
   if (typeof running !== 'boolean') {
     throw createRemoteAgentError(
       'PROTOCOL_ERROR',
@@ -583,10 +884,33 @@ const parseProcessSnapshot = (
       'process snapshot exitCode field must be null or a finite number.'
     );
   }
+  if (
+    parentProcessId !== undefined &&
+    parentProcessId !== null &&
+    (typeof parentProcessId !== 'number' || !Number.isFinite(parentProcessId))
+  ) {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'process snapshot parentProcessId field must be null or a finite number.'
+    );
+  }
+  if (
+    createdAt !== undefined &&
+    createdAt !== null &&
+    typeof createdAt !== 'string'
+  ) {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'process snapshot createdAt field must be null or a string.'
+    );
+  }
   return {
+    createdAt: typeof createdAt === 'string' ? createdAt : null,
     exitCode,
     id: readNumber(value, 'id'),
     name: readString(value, 'name'),
+    parentProcessId:
+      typeof parentProcessId === 'number' ? parentProcessId : null,
     path: readString(value, 'path'),
     running,
   };
@@ -679,6 +1003,35 @@ const applicationLaunchOptionsToJson = (
     : { workingDirectory: options.workingDirectory }),
 });
 
+const managedProcessLaunchOptionsToJson = (
+  options: RemoteManagedProcessLaunchOptions,
+  stdoutPath: string | undefined,
+  stderrPath: string | undefined
+): JsonValue => ({
+  ...(options.arguments === undefined
+    ? {}
+    : { arguments: [...options.arguments] }),
+  ...(options.captureStderr === undefined
+    ? {}
+    : { captureStderr: options.captureStderr }),
+  ...(options.captureStdout === undefined
+    ? {}
+    : { captureStdout: options.captureStdout }),
+  ...(options.createNoWindow === undefined
+    ? {}
+    : { createNoWindow: options.createNoWindow }),
+  ...(options.environment === undefined
+    ? {}
+    : { environment: { ...options.environment } }),
+  killTreeOnRelease: options.killTreeOnRelease ?? true,
+  path: options.path,
+  ...(stderrPath === undefined ? {} : { stderrPath }),
+  ...(stdoutPath === undefined ? {} : { stdoutPath }),
+  ...(options.workingDirectory === undefined
+    ? {}
+    : { workingDirectory: options.workingDirectory }),
+});
+
 const processListOptionsToJson = (
   options: RemoteProcessListOptions | undefined
 ): JsonValue => ({
@@ -694,7 +1047,11 @@ const modifiersFromOptions = (
 ): readonly KeyboardModifier[] => [...(options?.modifiers ?? [])];
 
 const buttonFromOptions = (
-  options: RemoteMouseClickOptions | RemoteMouseDragOptions | undefined
+  options:
+    | RemoteMouseButtonOptions
+    | RemoteMouseClickOptions
+    | RemoteMouseDragOptions
+    | undefined
 ): MouseButton => options?.button ?? 'left';
 
 const pointToJson = (point: {
@@ -815,10 +1172,22 @@ const inputOperationToJson = (operation: RemoteInputOperation): JsonValue => {
         modifiers: [...operation.modifiers],
         to: pointToJson(operation.to),
       };
+    case 'mouse.down':
+      return {
+        button: operation.button,
+        kind: operation.kind,
+        point: operation.point === null ? null : pointToJson(operation.point),
+      };
     case 'mouse.move':
       return {
         kind: operation.kind,
         point: pointToJson(operation.point),
+      };
+    case 'mouse.up':
+      return {
+        button: operation.button,
+        kind: operation.kind,
+        point: operation.point === null ? null : pointToJson(operation.point),
       };
     case 'mouse.wheel':
       return {
@@ -1123,8 +1492,9 @@ export const connectRemoteAgent = async (
     },
   });
 
-  await ready;
+  const connectedCapabilities = await ready;
   const activeTransport = transport;
+  const connectedFeatures = new Set(connectedCapabilities.features);
 
   const assertConnected = (): void => {
     if (disconnected || !activeTransport.isOpen()) {
@@ -1532,6 +1902,227 @@ export const connectRemoteAgent = async (
     await requestJson('input.perform', inputOperationToJson(operation));
   };
 
+  const createInteractionSession = async (
+    options: RemoteInteractionSessionOptions | undefined
+  ): Promise<RemoteInteractionSession> => {
+    const restoreCursor = options?.restoreCursor ?? true;
+    const initialCursor = restoreCursor
+      ? parseCursor(await requestJson('agent.cursor', undefined))
+      : undefined;
+    const heldIds = new Set<string>();
+    const heldInputs: HeldInteractionInput[] = [];
+    let released = false;
+    let releasePromise: Promise<void> | undefined = undefined;
+
+    const assertActive = (): void => {
+      if (released) {
+        throw createRemoteAgentError(
+          'INVALID_ARGUMENT',
+          'Interaction session has already been released.'
+        );
+      }
+    };
+
+    const removeHeldInput = (id: string): void => {
+      const index = heldInputs.findIndex((entry) => entry.id === id);
+      if (index >= 0) {
+        heldInputs.splice(index, 1);
+      }
+    };
+
+    const releaseOwnedInputs = async (): Promise<void> => {
+      let firstError: unknown = undefined;
+      for (const input of [...heldInputs].reverse()) {
+        if (!heldIds.has(input.id)) {
+          continue;
+        }
+        try {
+          await performInput(input.release);
+          heldIds.delete(input.id);
+          removeHeldInput(input.id);
+        } catch (error) {
+          firstError ??= error;
+        }
+      }
+      if (initialCursor !== undefined) {
+        try {
+          await performInput({
+            kind: 'mouse.move',
+            point: initialCursor.point,
+          });
+        } catch (error) {
+          firstError ??= error;
+        }
+      }
+      if (firstError !== undefined) {
+        throw firstError;
+      }
+    };
+
+    const releaseAsync = async (): Promise<void> => {
+      if (releasePromise !== undefined) {
+        await releasePromise;
+        return;
+      }
+      if (released) {
+        return;
+      }
+      released = true;
+      releasePromise = releaseOwnedInputs();
+      await releasePromise;
+    };
+
+    return {
+      [Symbol.asyncDispose]: releaseAsync,
+      keyboard: {
+        down: async (key): Promise<void> => {
+          assertActive();
+          const id = `keyboard:${key}`;
+          if (heldIds.has(id)) {
+            return;
+          }
+          await performInput({
+            key,
+            kind: 'keyboard.down',
+          });
+          heldIds.add(id);
+          heldInputs.push({
+            id,
+            release: {
+              key,
+              kind: 'keyboard.up',
+            },
+          });
+        },
+        press: async (key, pressOptions): Promise<void> => {
+          assertActive();
+          await performInput({
+            key,
+            kind: 'keyboard.press',
+            modifiers: modifiersFromOptions(pressOptions),
+          });
+        },
+        up: async (key): Promise<void> => {
+          assertActive();
+          const id = `keyboard:${key}`;
+          if (!heldIds.has(id)) {
+            return;
+          }
+          await performInput({
+            key,
+            kind: 'keyboard.up',
+          });
+          heldIds.delete(id);
+          removeHeldInput(id);
+        },
+      },
+      mouse: {
+        click: async (point, clickOptions): Promise<void> => {
+          assertActive();
+          await performInput({
+            button: buttonFromOptions(clickOptions),
+            kind: 'mouse.click',
+            modifiers: modifiersFromOptions(clickOptions),
+            point,
+          });
+        },
+        down: async (buttonOptions): Promise<void> => {
+          assertActive();
+          const button = buttonFromOptions(buttonOptions);
+          const id = `mouse:${button}`;
+          if (heldIds.has(id)) {
+            return;
+          }
+          await performInput({
+            button,
+            kind: 'mouse.down',
+            point: buttonOptions?.point ?? null,
+          });
+          heldIds.add(id);
+          heldInputs.push({
+            id,
+            release: {
+              button,
+              kind: 'mouse.up',
+              point: null,
+            },
+          });
+        },
+        drag: async (from, to, dragOptions): Promise<void> => {
+          assertActive();
+          await performInput({
+            button: buttonFromOptions(dragOptions),
+            from,
+            kind: 'mouse.drag',
+            modifiers: modifiersFromOptions(dragOptions),
+            to,
+          });
+        },
+        move: async (point): Promise<void> => {
+          assertActive();
+          await performInput({
+            kind: 'mouse.move',
+            point,
+          });
+        },
+        up: async (buttonOptions): Promise<void> => {
+          assertActive();
+          const button = buttonFromOptions(buttonOptions);
+          const id = `mouse:${button}`;
+          if (!heldIds.has(id)) {
+            return;
+          }
+          await performInput({
+            button,
+            kind: 'mouse.up',
+            point: buttonOptions?.point ?? null,
+          });
+          heldIds.delete(id);
+          removeHeldInput(id);
+        },
+        wheel: async (wheelOptions): Promise<void> => {
+          assertActive();
+          await performInput({
+            deltaX: wheelOptions.deltaX ?? 0,
+            deltaY: wheelOptions.deltaY ?? 0,
+            kind: 'mouse.wheel',
+            point: wheelOptions.point ?? null,
+          });
+        },
+      },
+      pause: async (durationMs): Promise<void> => {
+        assertActive();
+        if (!Number.isFinite(durationMs) || durationMs < 0) {
+          throw createRemoteAgentError(
+            'INVALID_ARGUMENT',
+            'durationMs must be a non-negative finite number.'
+          );
+        }
+        await waitForDelay(durationMs);
+      },
+      releaseAsync,
+    };
+  };
+
+  const withInteractionSession = async <T>(
+    operation: (session: RemoteInteractionSession) => Promise<T>,
+    options: RemoteInteractionSessionOptions | undefined
+  ): Promise<T> => {
+    const session = await createInteractionSession(options);
+    try {
+      const result = await operation(session);
+      await session.releaseAsync();
+      return result;
+    } catch (error) {
+      try {
+        await session.releaseAsync();
+      } catch {
+        // Preserve the operation error. Successful operations still surface release errors.
+      }
+      throw error;
+    }
+  };
+
   const readClipboardText = async (): Promise<string> =>
     parseClipboardText(await requestJson('clipboard.readText', undefined));
 
@@ -1627,6 +2218,860 @@ export const connectRemoteAgent = async (
       }
       throw new Error(`Process is still running: ${String(processId)}.`);
     }, options);
+
+  const makeRemoteTempDirectory = async (prefix: string): Promise<string> =>
+    parseTempDirectory(
+      await requestJson('file.mkdtemp', {
+        prefix,
+      })
+    );
+
+  const readRemoteFile = async (path: string): Promise<Buffer> =>
+    await parseFileReadResult(
+      await requestJson('file.read', {
+        path,
+      }),
+      readBinaryTransfer
+    );
+
+  const remotePathExists = async (path: string): Promise<boolean> =>
+    parseExists(
+      await requestJson('file.exists', {
+        path,
+      })
+    );
+
+  const makeRemoteDirectory = async (path: string): Promise<void> => {
+    await requestJson('file.mkdir', {
+      path,
+      recursive: true,
+    });
+  };
+
+  const readRemoteDirectoryManifest = async (
+    path: string
+  ): Promise<readonly RemoteDirectoryManifestEntry[]> =>
+    parseDirectoryManifest(
+      await requestJson('file.manifest', {
+        path,
+      })
+    );
+
+  const writeRemoteFile = async (path: string, data: Buffer): Promise<void> => {
+    const transfer = await sendBinaryTransfer('application/octet-stream', data);
+    await requestJson('file.write', {
+      contentType: transfer.contentType,
+      path,
+      sha256: transfer.sha256,
+      totalBytes: transfer.totalBytes,
+      transferId: transfer.transferId,
+    });
+  };
+
+  const removeRemotePath = async (
+    path: string,
+    recursive: boolean
+  ): Promise<void> => {
+    await requestJson('file.remove', {
+      path,
+      recursive,
+    });
+  };
+
+  const renameRemotePath = async (from: string, to: string): Promise<void> => {
+    await requestJson('file.rename', {
+      from,
+      to,
+    });
+  };
+
+  const killRelatedProcesses = async (
+    relatedProcessPaths: readonly string[]
+  ): Promise<void> => {
+    const processes = parseProcessSnapshotArray(
+      await requestJson('process.list', {})
+    );
+    const related = processes.filter(
+      (process) =>
+        process.running &&
+        process.path !== '' &&
+        relatedProcessPaths.some((path) =>
+          pathIsUnderRemotePrefix(process.path, path)
+        )
+    );
+    for (const process of related) {
+      await requestJson('process.kill', {
+        processId: process.id,
+      });
+      await waitForProcessExit(process.id, {
+        intervalMs: 50,
+        timeoutMs: 5000,
+      });
+    }
+  };
+
+  const withLockedFileRetry = async <T>(
+    retryOptions: LockedFileRetryOptions,
+    operation: () => Promise<T>
+  ): Promise<T> => {
+    let killedProcesses = false;
+    for (let attempt = 0; attempt < lockedFileRetryAttempts; attempt += 1) {
+      try {
+        return await operation();
+      } catch (error) {
+        if (
+          retryOptions.policy === 'fail' ||
+          !isLockedFileError(error) ||
+          attempt === lockedFileRetryAttempts - 1
+        ) {
+          throw error;
+        }
+        if (
+          retryOptions.policy === 'killRelatedProcessesAndRetry' &&
+          !killedProcesses
+        ) {
+          await killRelatedProcesses(retryOptions.relatedProcessPaths);
+          killedProcesses = true;
+        }
+        await waitForDelay(lockedFileRetryDelayMs);
+      }
+    }
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'Locked file retry exhausted.'
+    );
+  };
+
+  const createRemoteManifestMap = (
+    entries: readonly RemoteDirectoryManifestEntry[]
+  ): Map<string, RemoteDirectoryManifestEntry> =>
+    new Map(
+      entries.map((entry) => [
+        normalizeDirectoryRelativePath(entry.path),
+        {
+          ...entry,
+          path: normalizeDirectoryRelativePath(entry.path),
+        },
+      ])
+    );
+
+  const createLocalManifestMap = (
+    entries: readonly LocalDirectoryManifestEntry[]
+  ): Map<string, LocalDirectoryManifestEntry> =>
+    new Map(entries.map((entry) => [entry.path, entry]));
+
+  const directoryDepth = (path: string): number =>
+    path === '' ? 0 : path.split('/').length;
+
+  const removeRemoteManifestEntry = async (
+    remoteRoot: string,
+    entry: RemoteDirectoryManifestEntry,
+    retryOptions: LockedFileRetryOptions
+  ): Promise<void> => {
+    await withLockedFileRetry(retryOptions, async () => {
+      await removeRemotePath(
+        joinRemotePath(remoteRoot, entry.path),
+        entry.type === 'directory'
+      );
+    });
+  };
+
+  const syncDirectory = async (
+    options: RemoteDirectorySyncOptions
+  ): Promise<RemoteDirectorySyncResult> => {
+    const mode = options.mode ?? 'mirror';
+    if (mode !== 'mirror' && mode !== 'update') {
+      throw createRemoteAgentError(
+        'INVALID_ARGUMENT',
+        'syncDirectory mode must be mirror or update.'
+      );
+    }
+    const checksum = options.checksum ?? 'sha256';
+    if (checksum !== 'sha256') {
+      throw createRemoteAgentError(
+        'INVALID_ARGUMENT',
+        'syncDirectory checksum must be sha256.'
+      );
+    }
+    const policy = options.onLockedFile ?? 'retry';
+    const retryOptions: LockedFileRetryOptions = {
+      policy,
+      relatedProcessPaths:
+        options.relatedProcessPaths ??
+        (policy === 'killRelatedProcessesAndRetry' ? [options.remotePath] : []),
+    };
+    const deleteExtraneous = options.deleteExtraneous ?? mode === 'mirror';
+    const filter = createDirectoryFilter(options.include, options.exclude);
+    const localManifest = await buildLocalDirectoryManifest(
+      options.localPath,
+      filter
+    );
+    const counters: DirectorySyncCounters = {
+      bytesUploaded: 0,
+      createdDirectories: 0,
+      deletedDirectories: 0,
+      deletedFiles: 0,
+      skippedFiles: 0,
+      uploadedFiles: 0,
+    };
+
+    if (!(await remotePathExists(options.remotePath))) {
+      await makeRemoteDirectory(options.remotePath);
+      counters.createdDirectories += 1;
+    }
+
+    const remoteManifest = await readRemoteDirectoryManifest(
+      options.remotePath
+    );
+    const remoteEntries = remoteManifest.map((entry) => ({
+      ...entry,
+      path: normalizeDirectoryRelativePath(entry.path),
+    }));
+    const includedRemoteEntries = remoteEntries.filter((entry) =>
+      filter.included(entry.path, entry.type)
+    );
+    const excludedRemoteEntries = remoteEntries.filter((entry) =>
+      filter.excluded(entry.path, entry.type)
+    );
+    const remoteMap = createRemoteManifestMap(includedRemoteEntries);
+    const localMap = createLocalManifestMap(localManifest);
+
+    for (const directory of localManifest
+      .filter((entry) => entry.type === 'directory')
+      .sort(
+        (left, right) => directoryDepth(left.path) - directoryDepth(right.path)
+      )) {
+      const remoteEntry = remoteMap.get(directory.path);
+      if (remoteEntry?.type === 'directory') {
+        continue;
+      }
+      if (remoteEntry !== undefined) {
+        await removeRemoteManifestEntry(
+          options.remotePath,
+          remoteEntry,
+          retryOptions
+        );
+      }
+      await withLockedFileRetry(retryOptions, async () => {
+        await makeRemoteDirectory(
+          joinRemotePath(options.remotePath, directory.path)
+        );
+      });
+      counters.createdDirectories += 1;
+    }
+
+    let uploadIndex = 0;
+    for (const file of localManifest.filter((entry) => entry.type === 'file')) {
+      const remoteEntry = remoteMap.get(file.path);
+      if (
+        remoteEntry?.type === 'file' &&
+        remoteEntry.size === file.size &&
+        remoteEntry.sha256 === file.sha256
+      ) {
+        counters.skippedFiles += 1;
+        continue;
+      }
+      if (remoteEntry !== undefined && remoteEntry.type === 'directory') {
+        await removeRemoteManifestEntry(
+          options.remotePath,
+          remoteEntry,
+          retryOptions
+        );
+      }
+      const remoteFilePath = joinRemotePath(options.remotePath, file.path);
+      const remoteTempPath = `${remoteFilePath}.agent-rover-${String(
+        Date.now()
+      )}-${String(uploadIndex)}.tmp`;
+      uploadIndex += 1;
+      const data = await readLocalFile(file.absolutePath);
+      await withLockedFileRetry(retryOptions, async () => {
+        await writeRemoteFile(remoteTempPath, data);
+        await renameRemotePath(remoteTempPath, remoteFilePath);
+      });
+      counters.uploadedFiles += 1;
+      counters.bytesUploaded += data.byteLength;
+    }
+
+    if (deleteExtraneous) {
+      const hasExcludedDescendant = (
+        entry: RemoteDirectoryManifestEntry
+      ): boolean =>
+        excludedRemoteEntries.some((excluded) =>
+          excluded.path.startsWith(`${entry.path}/`)
+        );
+      for (const entry of includedRemoteEntries.filter(
+        (candidate) =>
+          candidate.type !== 'directory' && !localMap.has(candidate.path)
+      )) {
+        await removeRemoteManifestEntry(
+          options.remotePath,
+          entry,
+          retryOptions
+        );
+        counters.deletedFiles += 1;
+      }
+      for (const entry of includedRemoteEntries
+        .filter(
+          (candidate) =>
+            candidate.type === 'directory' &&
+            !localMap.has(candidate.path) &&
+            !hasExcludedDescendant(candidate)
+        )
+        .sort(
+          (left, right) =>
+            directoryDepth(right.path) - directoryDepth(left.path)
+        )) {
+        await removeRemoteManifestEntry(
+          options.remotePath,
+          entry,
+          retryOptions
+        );
+        counters.deletedDirectories += 1;
+      }
+    }
+
+    return counters;
+  };
+
+  const downloadDirectory = async (
+    options: RemoteDirectoryDownloadOptions
+  ): Promise<RemoteDirectoryDownloadResult> => {
+    const counters: DirectoryDownloadCounters = {
+      bytesDownloaded: 0,
+      createdDirectories: 0,
+      downloadedFiles: 0,
+    };
+    if (!(await remotePathExists(options.remotePath))) {
+      if (options.ignoreMissing === true) {
+        return counters;
+      }
+      await readRemoteDirectoryManifest(options.remotePath);
+    }
+
+    const filter = createDirectoryFilter(options.include, options.exclude);
+    const remoteManifest = (
+      await readRemoteDirectoryManifest(options.remotePath)
+    )
+      .map((entry) => ({
+        ...entry,
+        path: normalizeDirectoryRelativePath(entry.path),
+      }))
+      .filter((entry) => filter.included(entry.path, entry.type));
+
+    await makeLocalDirectory(options.localPath, {
+      recursive: true,
+    });
+    counters.createdDirectories += 1;
+
+    for (const directory of remoteManifest
+      .filter((entry) => entry.type === 'directory')
+      .sort(
+        (left, right) => directoryDepth(left.path) - directoryDepth(right.path)
+      )) {
+      await makeLocalDirectory(
+        joinLocalPath(options.localPath, ...directory.path.split('/')),
+        {
+          recursive: true,
+        }
+      );
+      counters.createdDirectories += 1;
+    }
+
+    for (const file of remoteManifest.filter(
+      (entry) => entry.type === 'file'
+    )) {
+      const localFilePath = joinLocalPath(
+        options.localPath,
+        ...file.path.split('/')
+      );
+      await makeLocalDirectory(localDirname(localFilePath), {
+        recursive: true,
+      });
+      const data = await readRemoteFile(
+        joinRemotePath(options.remotePath, file.path)
+      );
+      await writeLocalFile(localFilePath, data);
+      counters.downloadedFiles += 1;
+      counters.bytesDownloaded += data.byteLength;
+    }
+
+    return counters;
+  };
+
+  const createManagedProcessCapturePaths = async (
+    options: RemoteManagedProcessLaunchOptions
+  ): Promise<{
+    readonly stderrPath: string | undefined;
+    readonly stdoutPath: string | undefined;
+    readonly tempDirectory: string | undefined;
+  }> => {
+    const captureStdout = options.captureStdout === true;
+    const captureStderr = options.captureStderr === true;
+    if (!captureStdout && !captureStderr) {
+      return {
+        stderrPath: undefined,
+        stdoutPath: undefined,
+        tempDirectory: undefined,
+      };
+    }
+
+    const tempDirectory = await makeRemoteTempDirectory(
+      'C:/agent-rover-managed-process-'
+    );
+    const normalizedDirectory = tempDirectory.replace(/[\\/]+$/u, '');
+    return {
+      stderrPath: captureStderr
+        ? `${normalizedDirectory}/stderr.log`
+        : undefined,
+      stdoutPath: captureStdout
+        ? `${normalizedDirectory}/stdout.log`
+        : undefined,
+      tempDirectory,
+    };
+  };
+
+  const managedLaunchOptionsToApplicationOptions = (
+    options: RemoteManagedProcessLaunchOptions,
+    stdoutPath: string | undefined,
+    stderrPath: string | undefined
+  ): RemoteApplicationLaunchOptions => ({
+    ...(options.arguments === undefined
+      ? {}
+      : { arguments: options.arguments }),
+    ...(options.createNoWindow === undefined
+      ? {}
+      : { createNoWindow: options.createNoWindow }),
+    ...(options.environment === undefined
+      ? {}
+      : { environment: options.environment }),
+    path: options.path,
+    ...(stderrPath === undefined ? {} : { stderrPath }),
+    ...(stdoutPath === undefined ? {} : { stdoutPath }),
+    ...(options.workingDirectory === undefined
+      ? {}
+      : { workingDirectory: options.workingDirectory }),
+  });
+
+  const createManagedProcessProxy = (options: {
+    readonly baselineWindowIds: ReadonlySet<string>;
+    readonly killTreeOnRelease: boolean;
+    readonly managedProcessId: number | undefined;
+    readonly nativeManaged: boolean;
+    readonly process: RemoteApplicationProcess;
+    readonly stderrPath: string | undefined;
+    readonly stdoutPath: string | undefined;
+    readonly tempDirectory: string | undefined;
+  }): RemoteManagedProcess => {
+    let released = false;
+    const knownProcessIds = new Set<number>([options.process.id]);
+
+    const assertNotReleased = (): void => {
+      if (released) {
+        throw createRemoteAgentError(
+          'INVALID_ARGUMENT',
+          'Managed process has already been released.'
+        );
+      }
+    };
+
+    const nativeManagedProcessId = (): number => {
+      const managedProcessId = options.managedProcessId;
+      if (managedProcessId === undefined) {
+        throw createRemoteAgentError(
+          'PROTOCOL_ERROR',
+          'Managed process id is unavailable.'
+        );
+      }
+      return managedProcessId;
+    };
+
+    const capturedPath = (
+      label: 'stderr' | 'stdout',
+      path: string | undefined
+    ): string => {
+      if (path === undefined) {
+        throw createRemoteAgentError(
+          'INVALID_ARGUMENT',
+          `Managed process ${label} was not captured.`
+        );
+      }
+      return path;
+    };
+
+    const rootSnapshot = async (): Promise<RemoteProcessSnapshot> => {
+      assertNotReleased();
+      if (!options.nativeManaged) {
+        return await snapshotProcess(options.process.id);
+      }
+      return parseProcessSnapshot(
+        await requestJson('process.managedSnapshot', {
+          managedProcessId: nativeManagedProcessId(),
+        })
+      );
+    };
+
+    const processCreationMs = (
+      process: RemoteProcessSnapshot
+    ): number | undefined => {
+      if (process.createdAt === null) {
+        return undefined;
+      }
+      const parsed = Date.parse(process.createdAt);
+      return Number.isFinite(parsed) ? parsed : undefined;
+    };
+
+    const processBelongsToRootEra = (
+      root: RemoteProcessSnapshot,
+      process: RemoteProcessSnapshot
+    ): boolean => {
+      const rootCreatedAtMs = processCreationMs(root);
+      const processCreatedAtMs = processCreationMs(process);
+      return (
+        rootCreatedAtMs === undefined ||
+        processCreatedAtMs === undefined ||
+        processCreatedAtMs >= rootCreatedAtMs
+      );
+    };
+
+    const listRunningProcesses = async (): Promise<
+      readonly RemoteProcessSnapshot[]
+    > =>
+      parseProcessSnapshotArray(
+        await requestJson('process.list', processListOptionsToJson(undefined))
+      ).filter((process) => process.running);
+
+    const collectTrackedProcesses = async (
+      root: RemoteProcessSnapshot
+    ): Promise<readonly RemoteProcessSnapshot[]> => {
+      const runningProcesses = await listRunningProcesses();
+      const trackedIds = new Set(knownProcessIds);
+      trackedIds.add(root.id);
+      const trackedProcesses = new Map<number, RemoteProcessSnapshot>();
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const process of runningProcesses) {
+          if (process.id === root.id || process.parentProcessId === null) {
+            continue;
+          }
+          if (!trackedIds.has(process.parentProcessId)) {
+            continue;
+          }
+          if (!processBelongsToRootEra(root, process)) {
+            continue;
+          }
+          trackedProcesses.set(process.id, process);
+          if (!trackedIds.has(process.id)) {
+            trackedIds.add(process.id);
+            changed = true;
+          }
+        }
+      }
+      for (const processId of trackedIds) {
+        knownProcessIds.add(processId);
+      }
+      return [...trackedProcesses.values()].sort(
+        (left, right) => left.id - right.id
+      );
+    };
+
+    const snapshot = async (): Promise<RemoteManagedProcessSnapshot> => {
+      const root = await rootSnapshot();
+      const trackedProcesses = await collectTrackedProcesses(root);
+      return {
+        processes: trackedProcesses,
+        root,
+        running:
+          root.running || trackedProcesses.some((process) => process.running),
+      };
+    };
+
+    const processTreeDepth = (
+      process: RemoteProcessSnapshot,
+      processes: ReadonlyMap<number, RemoteProcessSnapshot>
+    ): number => {
+      let depth = 0;
+      let parentProcessId = process.parentProcessId;
+      const visited = new Set<number>();
+      while (
+        parentProcessId !== null &&
+        processes.has(parentProcessId) &&
+        !visited.has(parentProcessId)
+      ) {
+        visited.add(parentProcessId);
+        depth += 1;
+        parentProcessId =
+          processes.get(parentProcessId)?.parentProcessId ?? null;
+      }
+      return depth;
+    };
+
+    const killProcessIfRunning = async (
+      process: RemoteProcessSnapshot
+    ): Promise<void> => {
+      try {
+        await requestJson('process.kill', {
+          processId: process.id,
+        });
+      } catch (error) {
+        const current = await snapshotProcess(process.id);
+        if (current.running) {
+          throw error;
+        }
+      }
+    };
+
+    const killTrackedProcessTree = async (): Promise<void> => {
+      const current = await snapshot();
+      const targets = [...current.processes, current.root].filter(
+        (process) => process.running
+      );
+      const processMap = new Map(
+        targets.map((process) => [process.id, process])
+      );
+      for (const process of targets.sort(
+        (left, right) =>
+          processTreeDepth(right, processMap) -
+          processTreeDepth(left, processMap)
+      )) {
+        await killProcessIfRunning(process);
+      }
+    };
+
+    const kill = async (): Promise<void> => {
+      assertNotReleased();
+      await killTrackedProcessTree();
+    };
+
+    const waitForExit = async (
+      waitOptions?: RemoteWaitOptions
+    ): Promise<RemoteManagedProcessSnapshot> =>
+      await waitForResult(async () => {
+        const current = await snapshot();
+        if (!current.running) {
+          return current;
+        }
+        throw new Error(
+          `Managed process is still running: ${String(options.process.id)}.`
+        );
+      }, waitOptions);
+
+    const readCapturedText = async (
+      label: 'stderr' | 'stdout',
+      path: string | undefined
+    ): Promise<string> => {
+      assertNotReleased();
+      return (await readRemoteFile(capturedPath(label, path))).toString('utf8');
+    };
+
+    const releaseNative = async (): Promise<void> => {
+      await requestJson('process.releaseManaged', {
+        managedProcessId: nativeManagedProcessId(),
+      });
+    };
+
+    const hasFallbackWindowSelector = (
+      query: RemoteWindowQuery | undefined
+    ): boolean =>
+      query !== undefined &&
+      (query.title !== undefined ||
+        query.titleRegex !== undefined ||
+        query.processId !== undefined ||
+        query.processName !== undefined ||
+        query.className !== undefined ||
+        query.controlId !== undefined);
+
+    const managedWindows = async (
+      query: RemoteWindowQuery | undefined
+    ): Promise<readonly AppWindow[]> => {
+      assertNotReleased();
+      const current = await snapshot();
+      const topLevelWindows = await listTopLevelWindows();
+      const candidates = await collectWindows(
+        topLevelWindows,
+        query?.includeDescendants ?? false
+      );
+      const effectiveQuery = query ?? {};
+      const trackedProcessIds = new Set([
+        current.root.id,
+        ...current.processes.map((process) => process.id),
+      ]);
+      const trackedMatches = candidates.filter(
+        (window) =>
+          trackedProcessIds.has(window.process.id) &&
+          windowMatchesQuery(window, effectiveQuery)
+      );
+      const matches =
+        trackedMatches.length > 0 || !hasFallbackWindowSelector(query)
+          ? trackedMatches
+          : candidates.filter(
+              (window) =>
+                !trackedProcessIds.has(window.process.id) &&
+                !options.baselineWindowIds.has(window.id) &&
+                windowMatchesQuery(window, effectiveQuery)
+            );
+      if (query?.strict === true && matches.length !== 1) {
+        throw createRemoteAgentError(
+          'INVALID_ARGUMENT',
+          `Strict window query matched ${String(matches.length)} windows: ${queryLabel(
+            query
+          )}. Candidates: ${candidates.map(formatWindowCandidate).join(', ')}.`
+        );
+      }
+      return matches;
+    };
+
+    const waitForWindow = async (
+      query: RemoteWindowQuery,
+      waitOptions?: RemoteWaitOptions
+    ): Promise<AppWindow> =>
+      await waitForResult(async () => {
+        const matches = await managedWindows(query);
+        if (
+          matches.length === 1 ||
+          (matches.length > 0 && query.strict !== true)
+        ) {
+          const match = matches[0];
+          if (match === undefined) {
+            throw new Error('Managed window query matched no usable window.');
+          }
+          return match;
+        }
+        throw new Error(
+          `No matching managed window for ${queryLabel(
+            query
+          )}. Candidates: ${matches.map(formatWindowCandidate).join(', ')}.`
+        );
+      }, waitOptions);
+
+    const waitForNoWindow = async (
+      query?: RemoteWindowQuery,
+      waitOptions?: RemoteWaitOptions
+    ): Promise<void> => {
+      await waitForResult(async () => {
+        const matches = await managedWindows({
+          ...(query ?? {}),
+          strict: false,
+        });
+        if (matches.length === 0) {
+          return;
+        }
+        throw new Error(
+          `Managed window query still matched ${String(matches.length)} windows: ${queryLabel(
+            query ?? {}
+          )}.`
+        );
+      }, waitOptions);
+    };
+
+    const releaseAsync = async (): Promise<void> => {
+      if (released) {
+        return;
+      }
+
+      let firstError: unknown = undefined;
+      try {
+        if (options.killTreeOnRelease) {
+          await killTrackedProcessTree();
+        }
+        if (options.nativeManaged) {
+          await releaseNative();
+        }
+      } catch (error) {
+        firstError = error;
+      }
+
+      try {
+        if (options.tempDirectory !== undefined) {
+          await removeRemotePath(options.tempDirectory, true);
+        }
+      } catch (error) {
+        firstError = firstError ?? error;
+      } finally {
+        released = true;
+      }
+
+      if (firstError !== undefined) {
+        throw firstError;
+      }
+    };
+
+    return {
+      id: options.process.id,
+      kill,
+      name: options.process.name,
+      processes: async (): Promise<readonly RemoteProcessSnapshot[]> =>
+        (await snapshot()).processes,
+      releaseAsync,
+      rootSnapshot,
+      snapshot,
+      stderrText: async (): Promise<string> =>
+        await readCapturedText('stderr', options.stderrPath),
+      stdoutText: async (): Promise<string> =>
+        await readCapturedText('stdout', options.stdoutPath),
+      waitForNoWindow,
+      waitForWindow,
+      waitForExit,
+      windows: managedWindows,
+      [Symbol.asyncDispose]: releaseAsync,
+    };
+  };
+
+  const launchManagedProcess = async (
+    options: RemoteManagedProcessLaunchOptions
+  ): Promise<RemoteManagedProcess> => {
+    const capturePaths = await createManagedProcessCapturePaths(options);
+    const baselineWindowIds = new Set(
+      (await listTopLevelWindows()).map((window) => window.id)
+    );
+    const killTreeOnRelease = options.killTreeOnRelease ?? true;
+    const nativeManaged = connectedFeatures.has('process.launchManaged');
+    if (nativeManaged) {
+      const launched = parseManagedProcessLaunchResult(
+        await requestJson(
+          'process.launchManaged',
+          managedProcessLaunchOptionsToJson(
+            options,
+            capturePaths.stdoutPath,
+            capturePaths.stderrPath
+          )
+        )
+      );
+      return createManagedProcessProxy({
+        baselineWindowIds,
+        killTreeOnRelease,
+        managedProcessId: launched.managedProcessId,
+        nativeManaged: true,
+        process: launched.process,
+        stderrPath: launched.stderrPath ?? capturePaths.stderrPath,
+        stdoutPath: launched.stdoutPath ?? capturePaths.stdoutPath,
+        tempDirectory: capturePaths.tempDirectory,
+      });
+    }
+
+    const process = parseApplicationProcess(
+      await requestJson(
+        'applications.launch',
+        applicationLaunchOptionsToJson(
+          managedLaunchOptionsToApplicationOptions(
+            options,
+            capturePaths.stdoutPath,
+            capturePaths.stderrPath
+          )
+        )
+      )
+    );
+    return createManagedProcessProxy({
+      baselineWindowIds,
+      killTreeOnRelease,
+      managedProcessId: undefined,
+      nativeManaged: false,
+      process,
+      stderrPath: capturePaths.stderrPath,
+      stdoutPath: capturePaths.stdoutPath,
+      tempDirectory: capturePaths.tempDirectory,
+    });
+  };
 
   const captureDiagnosticsWindow = async (
     window: AppWindow,
@@ -1799,12 +3244,11 @@ export const connectRemoteAgent = async (
     findWindows: async (query): Promise<readonly AppWindow[]> =>
       await findWindowsByQuery(query),
     files: {
-      exists: async (path): Promise<boolean> =>
-        parseExists(
-          await requestJson('file.exists', {
-            path,
-          })
-        ),
+      downloadDirectory: async (
+        options
+      ): Promise<RemoteDirectoryDownloadResult> =>
+        await downloadDirectory(options),
+      exists: async (path): Promise<boolean> => await remotePathExists(path),
       mkdir: async (path, options): Promise<void> => {
         await requestJson('file.mkdir', {
           path,
@@ -1812,18 +3256,8 @@ export const connectRemoteAgent = async (
         });
       },
       mkdtemp: async (prefix): Promise<string> =>
-        parseTempDirectory(
-          await requestJson('file.mkdtemp', {
-            prefix,
-          })
-        ),
-      readFile: async (path): Promise<Buffer> =>
-        await parseFileReadResult(
-          await requestJson('file.read', {
-            path,
-          }),
-          readBinaryTransfer
-        ),
+        await makeRemoteTempDirectory(prefix),
+      readFile: async (path): Promise<Buffer> => await readRemoteFile(path),
       readdir: async (path): Promise<readonly RemoteDirectoryEntry[]> =>
         parseDirectoryEntries(
           await requestJson('file.readdir', {
@@ -1831,16 +3265,10 @@ export const connectRemoteAgent = async (
           })
         ),
       remove: async (path, options): Promise<void> => {
-        await requestJson('file.remove', {
-          path,
-          recursive: options?.recursive ?? false,
-        });
+        await removeRemotePath(path, options?.recursive ?? false);
       },
       rename: async (from, to): Promise<void> => {
-        await requestJson('file.rename', {
-          from,
-          to,
-        });
+        await renameRemotePath(from, to);
       },
       stat: async (path): Promise<RemoteFileStat> =>
         parseFileStat(
@@ -1848,19 +3276,21 @@ export const connectRemoteAgent = async (
             path,
           })
         ),
+      syncDirectory: async (options): Promise<RemoteDirectorySyncResult> =>
+        await syncDirectory(options),
       writeFile: async (path, data): Promise<void> => {
-        const transfer = await sendBinaryTransfer(
-          'application/octet-stream',
-          data
-        );
-        await requestJson('file.write', {
-          contentType: transfer.contentType,
-          path,
-          sha256: transfer.sha256,
-          totalBytes: transfer.totalBytes,
-          transferId: transfer.transferId,
-        });
+        await writeRemoteFile(path, data);
       },
+    },
+    interaction: {
+      start: async (
+        options?: RemoteInteractionSessionOptions
+      ): Promise<RemoteInteractionSession> =>
+        await createInteractionSession(options),
+      with: async <T>(
+        operation: (session: RemoteInteractionSession) => Promise<T>,
+        options?: RemoteInteractionSessionOptions
+      ): Promise<T> => await withInteractionSession(operation, options),
     },
     keyboard: {
       down: async (key): Promise<void> => {
@@ -1907,6 +3337,13 @@ export const connectRemoteAgent = async (
     monitors: async (): Promise<readonly RemoteMonitor[]> =>
       parseMonitorArray(await requestJson('agent.monitors', undefined)),
     mouse: {
+      down: async (options): Promise<void> => {
+        await performInput({
+          button: buttonFromOptions(options),
+          kind: 'mouse.down',
+          point: options?.point ?? null,
+        });
+      },
       click: async (point, options): Promise<void> => {
         await performInput({
           button: buttonFromOptions(options),
@@ -1930,6 +3367,13 @@ export const connectRemoteAgent = async (
           point,
         });
       },
+      up: async (options): Promise<void> => {
+        await performInput({
+          button: buttonFromOptions(options),
+          kind: 'mouse.up',
+          point: options?.point ?? null,
+        });
+      },
       wheel: async (options: RemoteMouseWheelOptions): Promise<void> => {
         await performInput({
           deltaX: options.deltaX ?? 0,
@@ -1940,6 +3384,8 @@ export const connectRemoteAgent = async (
       },
     },
     processes: {
+      launchManaged: async (options): Promise<RemoteManagedProcess> =>
+        await launchManagedProcess(options),
       exists: async (processId): Promise<boolean> =>
         (await snapshotProcess(processId)).running,
       kill: async (processId): Promise<void> => {

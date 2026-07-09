@@ -39,6 +39,26 @@ struct ApplicationProcess {
   std::string name;
 };
 
+/** Managed process launch request. */
+struct ManagedProcessLaunchOptions {
+  /** Application launch options. */
+  ApplicationLaunchOptions launch;
+  /** Whether release or kill should terminate the process tree. */
+  bool kill_tree_on_release;
+};
+
+/** Managed process metadata returned after launch. */
+struct ManagedProcess {
+  /** Agent-side managed process id. */
+  uint32_t managed_id;
+  /** Operating system process metadata. */
+  ApplicationProcess process;
+  /** Captured stdout path, or empty when stdout is not captured. */
+  std::string stdout_path;
+  /** Captured stderr path, or empty when stderr is not captured. */
+  std::string stderr_path;
+};
+
 /** Process snapshot returned to the driver. */
 struct ProcessSnapshot {
   /** Operating system process id. */
@@ -47,6 +67,12 @@ struct ProcessSnapshot {
   std::string name;
   /** Full executable path when available. */
   std::string path;
+  /** Whether parent_process_id is available. */
+  bool has_parent_process_id;
+  /** Parent operating system process id when available. */
+  uint32_t parent_process_id;
+  /** Process creation timestamp as an ISO string when available. */
+  std::string created_at;
   /** Whether the process is still running. */
   bool running;
   /** Whether exit_code is available. */
@@ -75,6 +101,19 @@ bool LaunchApplication(
     std::string* error);
 
 /**
+ * Launches a managed application and keeps its process handle.
+ *
+ * @param options Launch options.
+ * @param process Receives managed process metadata.
+ * @param error Receives a human-readable error on failure.
+ * @return true on success.
+ */
+bool LaunchManagedProcess(
+    const ManagedProcessLaunchOptions& options,
+    ManagedProcess* process,
+    std::string* error);
+
+/**
  * Reads one process snapshot.
  *
  * @param process_id Operating system process id.
@@ -84,6 +123,19 @@ bool LaunchApplication(
  */
 bool SnapshotProcess(
     uint32_t process_id,
+    ProcessSnapshot* snapshot,
+    std::string* error);
+
+/**
+ * Reads one managed process snapshot from its retained handle.
+ *
+ * @param managed_id Agent-side managed process id.
+ * @param snapshot Receives process snapshot.
+ * @param error Receives a human-readable error on failure.
+ * @return true on success.
+ */
+bool SnapshotManagedProcess(
+    uint32_t managed_id,
     ProcessSnapshot* snapshot,
     std::string* error);
 
@@ -108,6 +160,24 @@ bool ListProcesses(
  * @return true on success.
  */
 bool KillProcess(uint32_t process_id, std::string* error);
+
+/**
+ * Terminates a managed process.
+ *
+ * @param managed_id Agent-side managed process id.
+ * @param error Receives a human-readable error on failure.
+ * @return true on success.
+ */
+bool KillManagedProcess(uint32_t managed_id, std::string* error);
+
+/**
+ * Releases a managed process and closes retained handles.
+ *
+ * @param managed_id Agent-side managed process id.
+ * @param error Receives a human-readable error on failure.
+ * @return true on success.
+ */
+bool ReleaseManagedProcess(uint32_t managed_id, std::string* error);
 
 }  // namespace agent_rover
 

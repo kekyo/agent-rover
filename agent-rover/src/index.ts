@@ -17,6 +17,17 @@ export interface Releaseable extends Disposable {
   readonly release: () => void;
 }
 
+/** Object that owns an external resource and can be released asynchronously. */
+export interface AsyncReleaseable extends AsyncDisposable {
+  /**
+   * Asynchronously releases the owned resource.
+   *
+   * @remarks Implementations must be idempotent and expose the same operation
+   * through `Symbol.asyncDispose`.
+   */
+  readonly releaseAsync: () => Promise<void>;
+}
+
 /**
  * Screen-relative rectangle in physical screen pixels.
  * @remarks The origin is the virtual screen origin, so multi-monitor setups may
@@ -55,6 +66,14 @@ export interface RemoteMouseClickOptions {
   readonly modifiers?: readonly KeyboardModifier[];
 }
 
+/** Mouse button state options. */
+export interface RemoteMouseButtonOptions {
+  /** Mouse button to press or release. */
+  readonly button?: MouseButton;
+  /** Optional point to move to before changing the button state. */
+  readonly point?: ScreenPoint;
+}
+
 /** Mouse drag options. */
 export interface RemoteMouseDragOptions extends RemoteMouseClickOptions {}
 
@@ -86,6 +105,10 @@ export interface RemoteKeyboardPasteTextOptions {
 export interface RemoteMouse {
   /** Moves the mouse cursor. */
   readonly move: (point: ScreenPoint) => Promise<void>;
+  /** Presses a mouse button without releasing it. */
+  readonly down: (options?: RemoteMouseButtonOptions) => Promise<void>;
+  /** Releases a mouse button. */
+  readonly up: (options?: RemoteMouseButtonOptions) => Promise<void>;
   /** Clicks a mouse button. */
   readonly click: (
     point: ScreenPoint,
@@ -119,6 +142,71 @@ export interface RemoteKeyboard {
     text: string,
     options?: RemoteKeyboardPasteTextOptions
   ) => Promise<void>;
+}
+
+/** Options for starting a remote interaction session. */
+export interface RemoteInteractionSessionOptions {
+  /** Whether to restore the cursor position captured at session start. */
+  readonly restoreCursor?: boolean;
+}
+
+/** Remote keyboard controller scoped to one interaction session. */
+export interface RemoteInteractionKeyboard {
+  /** Presses one key without releasing it. */
+  readonly down: (key: string) => Promise<void>;
+  /** Presses and releases one key. */
+  readonly press: (
+    key: string,
+    options?: RemoteKeyboardPressOptions
+  ) => Promise<void>;
+  /** Releases one key pressed by this session. */
+  readonly up: (key: string) => Promise<void>;
+}
+
+/** Remote mouse controller scoped to one interaction session. */
+export interface RemoteInteractionMouse {
+  /** Moves the mouse cursor. */
+  readonly move: (point: ScreenPoint) => Promise<void>;
+  /** Presses a mouse button without releasing it. */
+  readonly down: (options?: RemoteMouseButtonOptions) => Promise<void>;
+  /** Releases a mouse button pressed by this session. */
+  readonly up: (options?: RemoteMouseButtonOptions) => Promise<void>;
+  /** Clicks a mouse button. */
+  readonly click: (
+    point: ScreenPoint,
+    options?: RemoteMouseClickOptions
+  ) => Promise<void>;
+  /** Drags from one point to another. */
+  readonly drag: (
+    from: ScreenPoint,
+    to: ScreenPoint,
+    options?: RemoteMouseDragOptions
+  ) => Promise<void>;
+  /** Sends a mouse wheel operation. */
+  readonly wheel: (options: RemoteMouseWheelOptions) => Promise<void>;
+}
+
+/** Releaseable remote keyboard and mouse interaction session. */
+export interface RemoteInteractionSession extends AsyncReleaseable {
+  /** Keyboard operations owned by this session. */
+  readonly keyboard: RemoteInteractionKeyboard;
+  /** Mouse operations owned by this session. */
+  readonly mouse: RemoteInteractionMouse;
+  /** Waits without changing the current interaction state. */
+  readonly pause: (durationMs: number) => Promise<void>;
+}
+
+/** Remote interaction session factory. */
+export interface RemoteInteractions {
+  /** Starts a releaseable keyboard and mouse interaction session. */
+  readonly start: (
+    options?: RemoteInteractionSessionOptions
+  ) => Promise<RemoteInteractionSession>;
+  /** Runs an operation in a releaseable keyboard and mouse session. */
+  readonly with: <T>(
+    operation: (session: RemoteInteractionSession) => Promise<T>,
+    options?: RemoteInteractionSessionOptions
+  ) => Promise<T>;
 }
 
 /** Remote clipboard text API. */
@@ -192,9 +280,25 @@ export type RemoteInputOperation =
     }
   | {
       /** Operation discriminator. */
+      readonly kind: 'mouse.down';
+      /** Button to press. */
+      readonly button: MouseButton;
+      /** Point to move to before pressing, or null to keep current position. */
+      readonly point: ScreenPoint | null;
+    }
+  | {
+      /** Operation discriminator. */
       readonly kind: 'mouse.move';
       /** Target point. */
       readonly point: ScreenPoint;
+    }
+  | {
+      /** Operation discriminator. */
+      readonly kind: 'mouse.up';
+      /** Button to release. */
+      readonly button: MouseButton;
+      /** Point to move to before releasing, or null to keep current position. */
+      readonly point: ScreenPoint | null;
     }
   | {
       /** Operation discriminator. */
@@ -251,6 +355,8 @@ export interface AppWindowProcess {
   readonly id: number;
   /** Process executable name when the platform can resolve it. */
   readonly name: string;
+  /** Full executable path when the platform can resolve it. */
+  readonly path: string;
 }
 
 /** Options used to launch an application on the remote agent. */
@@ -279,6 +385,75 @@ export interface RemoteApplicationProcess {
   readonly name: string;
 }
 
+/** Options used to launch a managed remote process. */
+export interface RemoteManagedProcessLaunchOptions {
+  /** Executable, script, or document path resolved on the agent machine. */
+  readonly path: string;
+  /** Command-line arguments passed to the process. */
+  readonly arguments?: readonly string[];
+  /** Working directory used for the launched process. */
+  readonly workingDirectory?: string;
+  /** Environment variables added or overridden for the launched process. */
+  readonly environment?: Readonly<Record<string, string>>;
+  /** Whether standard output should be captured for `stdoutText()`. */
+  readonly captureStdout?: boolean;
+  /** Whether standard error should be captured for `stderrText()`. */
+  readonly captureStderr?: boolean;
+  /** Whether the process should be created without a console window. */
+  readonly createNoWindow?: boolean;
+  /**
+   * Whether asynchronous release should terminate the tracked process tree.
+   *
+   * @remarks Default is true. `kill()` always terminates the tracked process tree.
+   */
+  readonly killTreeOnRelease?: boolean;
+}
+
+/** Logical managed application snapshot. */
+export interface RemoteManagedProcessSnapshot {
+  /** Current root process state. */
+  readonly root: RemoteProcessSnapshot;
+  /** Running descendant processes tracked for this managed process. */
+  readonly processes: readonly RemoteProcessSnapshot[];
+  /** Whether the root or any tracked descendant process is still running. */
+  readonly running: boolean;
+}
+
+/** Managed remote process handle. */
+export interface RemoteManagedProcess
+  extends RemoteApplicationProcess, AsyncReleaseable {
+  /** Reads the current root process state. */
+  readonly rootSnapshot: () => Promise<RemoteProcessSnapshot>;
+  /** Reads the current logical application state. */
+  readonly snapshot: () => Promise<RemoteManagedProcessSnapshot>;
+  /** Lists running descendant processes tracked for this managed process. */
+  readonly processes: () => Promise<readonly RemoteProcessSnapshot[]>;
+  /** Finds top-level windows related to this managed process. */
+  readonly windows: (
+    query?: RemoteWindowQuery
+  ) => Promise<readonly AppWindow[]>;
+  /** Waits until a related window matching the query is available. */
+  readonly waitForWindow: (
+    query: RemoteWindowQuery,
+    options?: RemoteWaitOptions
+  ) => Promise<AppWindow>;
+  /** Waits until no related windows match the query. */
+  readonly waitForNoWindow: (
+    query?: RemoteWindowQuery,
+    options?: RemoteWaitOptions
+  ) => Promise<void>;
+  /** Terminates the tracked process tree. */
+  readonly kill: () => Promise<void>;
+  /** Waits until the root and tracked descendants exit. */
+  readonly waitForExit: (
+    options?: RemoteWaitOptions
+  ) => Promise<RemoteManagedProcessSnapshot>;
+  /** Reads captured standard output as UTF-8 text. */
+  readonly stdoutText: () => Promise<string>;
+  /** Reads captured standard error as UTF-8 text. */
+  readonly stderrText: () => Promise<string>;
+}
+
 /** Remote process snapshot. */
 export interface RemoteProcessSnapshot {
   /** Operating system process id. */
@@ -287,6 +462,10 @@ export interface RemoteProcessSnapshot {
   readonly name: string;
   /** Full executable path when available. */
   readonly path: string;
+  /** Parent operating system process id when available. */
+  readonly parentProcessId: number | null;
+  /** Process creation timestamp as an ISO string when available. */
+  readonly createdAt: string | null;
   /** Whether the process is still running. */
   readonly running: boolean;
   /** Exit code when known and the process has exited. */
@@ -369,6 +548,10 @@ export interface RemoteApplications {
 
 /** Remote process control API. */
 export interface RemoteProcesses {
+  /** Launches a process and returns a managed lifecycle handle. */
+  readonly launchManaged: (
+    options: RemoteManagedProcessLaunchOptions
+  ) => Promise<RemoteManagedProcess>;
   /** Reads a process snapshot. */
   readonly snapshot: (processId: number) => Promise<RemoteProcessSnapshot>;
   /** Tests whether a process is running. */
@@ -527,6 +710,14 @@ export interface RemoteFileSystem {
   readonly rename: (from: string, to: string) => Promise<void>;
   /** Creates a temporary directory from a prefix and returns its path. */
   readonly mkdtemp: (prefix: string) => Promise<string>;
+  /** Synchronizes a local directory to the agent machine. */
+  readonly syncDirectory: (
+    options: RemoteDirectorySyncOptions
+  ) => Promise<RemoteDirectorySyncResult>;
+  /** Downloads a remote directory from the agent machine. */
+  readonly downloadDirectory: (
+    options: RemoteDirectoryDownloadOptions
+  ) => Promise<RemoteDirectoryDownloadResult>;
 }
 
 /** Remote file type. */
@@ -548,6 +739,94 @@ export interface RemoteFileStat {
 export interface RemoteDirectoryEntry extends RemoteFileStat {
   /** Entry name. */
   readonly name: string;
+}
+
+/** Directory synchronization mode. */
+export type RemoteDirectorySyncMode = 'mirror' | 'update';
+
+/** Directory synchronization checksum algorithm. */
+export type RemoteDirectoryChecksum = 'sha256';
+
+/** Policy used when a remote file operation fails because a file is locked. */
+export type RemoteLockedFilePolicy =
+  | 'fail'
+  | 'retry'
+  | 'killRelatedProcessesAndRetry';
+
+/** Recursive directory manifest entry. */
+export interface RemoteDirectoryManifestEntry {
+  /** Relative path using forward slashes. */
+  readonly path: string;
+  /** Entry type. */
+  readonly type: RemoteFileType;
+  /** Size in bytes. */
+  readonly size: number;
+  /** Last modification timestamp as an ISO string. */
+  readonly modifiedAt: string;
+  /** SHA-256 digest for file entries when requested and available. */
+  readonly sha256?: string;
+}
+
+/** Options for synchronizing a local directory to the agent machine. */
+export interface RemoteDirectorySyncOptions {
+  /** Local source directory. */
+  readonly localPath: string;
+  /** Remote destination directory. */
+  readonly remotePath: string;
+  /** Synchronization mode. */
+  readonly mode?: RemoteDirectorySyncMode;
+  /** Checksum algorithm used for file comparison. */
+  readonly checksum?: RemoteDirectoryChecksum;
+  /** Whether remote entries missing from the local source should be deleted. */
+  readonly deleteExtraneous?: boolean;
+  /** Include glob patterns matched against forward-slash relative paths. */
+  readonly include?: readonly string[];
+  /** Exclude glob patterns matched against forward-slash relative paths. */
+  readonly exclude?: readonly string[];
+  /** Policy used when remote files are locked. */
+  readonly onLockedFile?: RemoteLockedFilePolicy;
+  /** Remote process executable path prefixes related to locked files. */
+  readonly relatedProcessPaths?: readonly string[];
+}
+
+/** Result returned after synchronizing a directory to the agent machine. */
+export interface RemoteDirectorySyncResult {
+  /** Number of files uploaded or replaced. */
+  readonly uploadedFiles: number;
+  /** Number of unchanged files skipped. */
+  readonly skippedFiles: number;
+  /** Number of directories created on the agent machine. */
+  readonly createdDirectories: number;
+  /** Number of extraneous remote files deleted. */
+  readonly deletedFiles: number;
+  /** Number of extraneous remote directories deleted. */
+  readonly deletedDirectories: number;
+  /** Number of uploaded bytes. */
+  readonly bytesUploaded: number;
+}
+
+/** Options for downloading a remote directory from the agent machine. */
+export interface RemoteDirectoryDownloadOptions {
+  /** Remote source directory. */
+  readonly remotePath: string;
+  /** Local destination directory. */
+  readonly localPath: string;
+  /** Whether a missing remote source should be ignored. */
+  readonly ignoreMissing?: boolean;
+  /** Include glob patterns matched against forward-slash relative paths. */
+  readonly include?: readonly string[];
+  /** Exclude glob patterns matched against forward-slash relative paths. */
+  readonly exclude?: readonly string[];
+}
+
+/** Result returned after downloading a remote directory. */
+export interface RemoteDirectoryDownloadResult {
+  /** Number of files downloaded. */
+  readonly downloadedFiles: number;
+  /** Number of directories created locally. */
+  readonly createdDirectories: number;
+  /** Number of downloaded bytes. */
+  readonly bytesDownloaded: number;
 }
 
 /** Directory creation options. */
@@ -677,6 +956,41 @@ export interface RemoteDiagnosticsArtifact {
   readonly contentType: string;
 }
 
+/** Remote or process artifact to save with diagnostics. */
+export type RemoteDiagnosticsAttachment =
+  | {
+      /** Attachment kind discriminator. */
+      readonly kind: 'remoteFile';
+      /** Stable attachment name used under the attachments directory. */
+      readonly name: string;
+      /** Remote file path. */
+      readonly path: string;
+      /** Whether attachment failures should be recorded instead of thrown. */
+      readonly optional?: boolean;
+      /** Content type recorded in the diagnostics manifest. */
+      readonly contentType?: string;
+    }
+  | {
+      /** Attachment kind discriminator. */
+      readonly kind: 'remoteDirectory';
+      /** Stable attachment name used under the attachments directory. */
+      readonly name: string;
+      /** Remote directory path. */
+      readonly path: string;
+      /** Whether attachment failures should be recorded instead of thrown. */
+      readonly optional?: boolean;
+    }
+  | {
+      /** Attachment kind discriminator. */
+      readonly kind: 'managedProcess';
+      /** Stable attachment name used under the attachments directory. */
+      readonly name: string;
+      /** Managed process whose captured stdout and stderr should be saved. */
+      readonly process: RemoteManagedProcess;
+      /** Whether attachment failures should be recorded instead of thrown. */
+      readonly optional?: boolean;
+    };
+
 /** Result returned after diagnostics artifacts are saved. */
 export interface RemoteDiagnosticsSaveResult {
   /** Directory containing all diagnostics artifacts. */
@@ -697,6 +1011,8 @@ export interface SaveDiagnosticsOptions {
   readonly agent?: RemoteAgent;
   /** Capture options used when agent is supplied. */
   readonly captureOptions?: RemoteDiagnosticsCaptureOptions;
+  /** Additional remote or process artifacts saved with the diagnostics bundle. */
+  readonly attachments?: readonly RemoteDiagnosticsAttachment[];
 }
 
 /** Options for wrapping an operation with failure diagnostics. */
@@ -721,6 +1037,8 @@ export interface RemoteAgent extends Releaseable {
   readonly files: RemoteFileSystem;
   /** Remote event log API. */
   readonly eventLogs: RemoteEventLogs;
+  /** Releaseable keyboard and mouse interaction session API. */
+  readonly interaction: RemoteInteractions;
   /** Remote keyboard input controller. */
   readonly keyboard: RemoteKeyboard;
   /** Remote mouse input controller. */

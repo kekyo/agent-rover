@@ -44,7 +44,7 @@ const execFileChecked = async (
 
 describe('protocol version definitions', () => {
   it('defines TypeScript protocol wire identifiers in one module', () => {
-    expect(protocolVersion).toBe('2026-06-25');
+    expect(protocolVersion).toBe('2026-07-07');
     expect(tcpFrameVersion).toBe(2);
     expect(authChallengePrefix).toEqual(
       Buffer.from('agent-rover-auth-v1\0', 'ascii')
@@ -78,7 +78,7 @@ describe('protocol version definitions', () => {
 #include <cstring>
 
 int main() {
-  if (std::strcmp(agent_rover::kProtocolVersion, "2026-06-25") != 0) {
+  if (std::strcmp(agent_rover::kProtocolVersion, "2026-07-07") != 0) {
     std::fprintf(stderr, "unexpected JSON protocol version\n");
     return 1;
   }

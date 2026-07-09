@@ -10,8 +10,11 @@ import { describe, expect, it } from 'vitest';
 
 import {
   connectRemoteAgent,
+  type AsyncReleaseable,
+  type AppWindowSnapshot,
   type RemoteApplicationLaunchOptions,
   type RemoteInputOperation,
+  type RemoteProcessSnapshot,
 } from '../src/index';
 import {
   createTcpFrameDecoder,
@@ -29,6 +32,7 @@ import {
   defaultFakeCapabilities,
   defaultFakeChildWindow,
   defaultFakeWindow,
+  type FakeManagedProcessLaunchOptions,
   startFakeTcpAgent,
 } from './helpers/fake-tcp-agent';
 
@@ -46,6 +50,21 @@ const createAuthResponse = (token: string, challenge: Buffer): Buffer => {
   hmac.update(Buffer.concat([authChallengePrefix, challenge]));
   return hmac.digest();
 };
+
+const fakeProcessSnapshot = (
+  overrides: Partial<RemoteProcessSnapshot> & {
+    readonly id: number;
+  }
+): RemoteProcessSnapshot => ({
+  createdAt: '2026-06-25T00:00:00.000Z',
+  exitCode: null,
+  id: overrides.id,
+  name: `process-${String(overrides.id)}.exe`,
+  parentProcessId: null,
+  path: `C:/agent-rover/process-${String(overrides.id)}.exe`,
+  running: true,
+  ...overrides,
+});
 
 const readTcpFrame = async (socket: Socket): Promise<TcpFrame> =>
   await new Promise<TcpFrame>((resolve, reject) => {
@@ -615,6 +634,224 @@ describe.concurrent('remote agent connection api', () => {
     }
   });
 
+  it('sends low-level mouse button state operations', async () => {
+    const operations: RemoteInputOperation[] = [];
+    const fakeAgent = await startFakeTcpAgent({
+      inputOperations: operations,
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      await agent.mouse.down();
+      await agent.mouse.up({
+        button: 'right',
+        point: { x: 12, y: 34 },
+      });
+      await agent.mouse.down({
+        button: 'middle',
+        point: { x: 56, y: 78 },
+      });
+      await agent.mouse.up({
+        button: 'middle',
+      });
+
+      expect(operations).toEqual([
+        {
+          button: 'left',
+          kind: 'mouse.down',
+          point: null,
+        },
+        {
+          button: 'right',
+          kind: 'mouse.up',
+          point: { x: 12, y: 34 },
+        },
+        {
+          button: 'middle',
+          kind: 'mouse.down',
+          point: { x: 56, y: 78 },
+        },
+        {
+          button: 'middle',
+          kind: 'mouse.up',
+          point: null,
+        },
+      ]);
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('releases interaction session input state in reverse order', async () => {
+    const operations: RemoteInputOperation[] = [];
+    const fakeAgent = await startFakeTcpAgent({
+      inputOperations: operations,
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const session = await agent.interaction.start();
+      await session.keyboard.down('Shift');
+      await session.mouse.down({
+        button: 'left',
+        point: { x: 10, y: 20 },
+      });
+      await session.keyboard.down('Shift');
+      await session.mouse.down({
+        button: 'left',
+        point: { x: 99, y: 99 },
+      });
+      await session.keyboard.down('Control');
+      await session.mouse.down({
+        button: 'right',
+      });
+      await session.mouse.up({
+        button: 'left',
+      });
+      await session.keyboard.up('Control');
+      await session.releaseAsync();
+
+      expect(operations).toEqual([
+        {
+          key: 'Shift',
+          kind: 'keyboard.down',
+        },
+        {
+          button: 'left',
+          kind: 'mouse.down',
+          point: { x: 10, y: 20 },
+        },
+        {
+          key: 'Control',
+          kind: 'keyboard.down',
+        },
+        {
+          button: 'right',
+          kind: 'mouse.down',
+          point: null,
+        },
+        {
+          button: 'left',
+          kind: 'mouse.up',
+          point: null,
+        },
+        {
+          key: 'Control',
+          kind: 'keyboard.up',
+        },
+        {
+          button: 'right',
+          kind: 'mouse.up',
+          point: null,
+        },
+        {
+          key: 'Shift',
+          kind: 'keyboard.up',
+        },
+        {
+          kind: 'mouse.move',
+          point: { x: 12, y: 34 },
+        },
+      ]);
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('releases interaction sessions when scoped operations fail', async () => {
+    const operations: RemoteInputOperation[] = [];
+    const fakeAgent = await startFakeTcpAgent({
+      inputOperations: operations,
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      await expect(
+        agent.interaction.with(async (session) => {
+          await session.keyboard.down('Alt');
+          await session.mouse.down({
+            button: 'middle',
+          });
+          throw new Error('expected interaction failure');
+        })
+      ).rejects.toThrow('expected interaction failure');
+
+      expect(operations).toEqual([
+        {
+          key: 'Alt',
+          kind: 'keyboard.down',
+        },
+        {
+          button: 'middle',
+          kind: 'mouse.down',
+          point: null,
+        },
+        {
+          button: 'middle',
+          kind: 'mouse.up',
+          point: null,
+        },
+        {
+          key: 'Alt',
+          kind: 'keyboard.up',
+        },
+        {
+          kind: 'mouse.move',
+          point: { x: 12, y: 34 },
+        },
+      ]);
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('makes interaction session release idempotent and rejects later operations', async () => {
+    const operations: RemoteInputOperation[] = [];
+    const fakeAgent = await startFakeTcpAgent({
+      inputOperations: operations,
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const session = await agent.interaction.start({
+        restoreCursor: false,
+      });
+      await session.mouse.down();
+      await session.releaseAsync();
+      await session[Symbol.asyncDispose]();
+
+      expect(operations).toEqual([
+        {
+          button: 'left',
+          kind: 'mouse.down',
+          point: null,
+        },
+        {
+          button: 'left',
+          kind: 'mouse.up',
+          point: null,
+        },
+      ]);
+      await expect(session.mouse.move({ x: 1, y: 2 })).rejects.toMatchObject({
+        code: 'INVALID_ARGUMENT',
+      });
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
   it('manages clipboard text and pastes through the keyboard helper', async () => {
     const operations: RemoteInputOperation[] = [];
     const fakeAgent = await startFakeTcpAgent({
@@ -749,8 +986,10 @@ describe.concurrent('remote agent connection api', () => {
       await expect(agent.processes.exists(process.id)).resolves.toBe(true);
       await expect(agent.processes.snapshot(process.id)).resolves.toMatchObject(
         {
+          createdAt: '2026-06-25T00:00:00.000Z',
           id: process.id,
           name: process.name,
+          parentProcessId: null,
           running: true,
         }
       );
@@ -777,6 +1016,460 @@ describe.concurrent('remote agent connection api', () => {
         running: false,
       });
       await expect(agent.processes.exists(process.id)).resolves.toBe(false);
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('launches managed processes with captured output and cleanup', async () => {
+    const launches: RemoteApplicationLaunchOptions[] = [];
+    const fakeAgent = await startFakeTcpAgent({
+      capabilities: {
+        ...defaultFakeCapabilities,
+        features: defaultFakeCapabilities.features.filter(
+          (feature) =>
+            feature !== 'process.launchManaged' &&
+            feature !== 'process.killManaged' &&
+            feature !== 'process.releaseManaged' &&
+            !feature.startsWith('process.managed')
+        ),
+      },
+      launches,
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const process = await agent.processes.launchManaged({
+        arguments: ['--mode', 'managed'],
+        captureStderr: true,
+        captureStdout: true,
+        createNoWindow: true,
+        environment: {
+          AGENT_ROVER_MANAGED_PROCESS: 'enabled',
+        },
+        killTreeOnRelease: true,
+        path: 'fake-managed-process.exe',
+        workingDirectory: 'C:/agent-rover',
+      });
+
+      expect(process).toMatchObject({
+        id: 4321,
+        name: 'fake-launched-app',
+      });
+      expect(process).not.toHaveProperty('dispose');
+      expect(process.releaseAsync).toEqual(expect.any(Function));
+      expect(process[Symbol.asyncDispose]).toEqual(expect.any(Function));
+      expect(launches[0]).toMatchObject({
+        arguments: ['--mode', 'managed'],
+        createNoWindow: true,
+        environment: {
+          AGENT_ROVER_MANAGED_PROCESS: 'enabled',
+        },
+        path: 'fake-managed-process.exe',
+        workingDirectory: 'C:/agent-rover',
+      });
+      expect(launches[0]?.stdoutPath).toMatch(
+        /^C:\/agent-rover-managed-process-fake\/stdout\.log$/u
+      );
+      expect(launches[0]?.stderrPath).toMatch(
+        /^C:\/agent-rover-managed-process-fake\/stderr\.log$/u
+      );
+
+      await expect(process.stdoutText()).resolves.toBe('managed stdout');
+      await expect(process.stderrText()).resolves.toBe('managed stderr');
+      await expect(process.snapshot()).resolves.toMatchObject({
+        root: {
+          id: process.id,
+          running: true,
+        },
+        running: true,
+      });
+
+      await process.kill();
+      await expect(
+        process.waitForExit({
+          intervalMs: 1,
+          timeoutMs: 100,
+        })
+      ).resolves.toMatchObject({
+        root: {
+          exitCode: 1,
+          id: process.id,
+        },
+        running: false,
+      });
+      const releasable: AsyncReleaseable = process;
+      await releasable.releaseAsync();
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('uses native managed process protocol when available', async () => {
+    const killedProcessIds: number[] = [];
+    const launches: RemoteApplicationLaunchOptions[] = [];
+    const managedLaunches: FakeManagedProcessLaunchOptions[] = [];
+    const releasedManagedProcessIds: number[] = [];
+    const fakeAgent = await startFakeTcpAgent({
+      killedProcessIds,
+      launches,
+      managedLaunches,
+      releasedManagedProcessIds,
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const process = await agent.processes.launchManaged({
+        arguments: ['--native-managed'],
+        captureStderr: true,
+        captureStdout: true,
+        killTreeOnRelease: true,
+        path: 'fake-native-managed-process.exe',
+      });
+
+      expect(launches).toEqual([]);
+      expect(managedLaunches[0]).toMatchObject({
+        arguments: ['--native-managed'],
+        captureStderr: true,
+        captureStdout: true,
+        killTreeOnRelease: true,
+        path: 'fake-native-managed-process.exe',
+      });
+      expect(managedLaunches[0]?.stdoutPath).toBe(
+        'C:/agent-rover-managed-process-fake/stdout.log'
+      );
+      expect(managedLaunches[0]?.stderrPath).toBe(
+        'C:/agent-rover-managed-process-fake/stderr.log'
+      );
+
+      await expect(process.stdoutText()).resolves.toBe('managed stdout');
+      await expect(process.stderrText()).resolves.toBe('managed stderr');
+      await expect(process.snapshot()).resolves.toMatchObject({
+        root: {
+          id: 4321,
+          running: true,
+        },
+        running: true,
+      });
+
+      await process.kill();
+      expect(killedProcessIds).toEqual([4321]);
+      await expect(
+        process.waitForExit({
+          intervalMs: 1,
+          timeoutMs: 100,
+        })
+      ).resolves.toMatchObject({
+        root: {
+          exitCode: 1,
+          id: 4321,
+        },
+        running: false,
+      });
+
+      const releasable: AsyncReleaseable = process;
+      await releasable[Symbol.asyncDispose]();
+      expect(releasedManagedProcessIds).toEqual([1]);
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('defaults managed release cleanup to killing the launched process tree', async () => {
+    const killedProcessIds: number[] = [];
+    const launches: RemoteApplicationLaunchOptions[] = [];
+    const fakeAgent = await startFakeTcpAgent({
+      capabilities: {
+        ...defaultFakeCapabilities,
+        features: defaultFakeCapabilities.features.filter(
+          (feature) =>
+            feature !== 'process.launchManaged' &&
+            feature !== 'process.killManaged' &&
+            feature !== 'process.releaseManaged' &&
+            !feature.startsWith('process.managed')
+        ),
+      },
+      killedProcessIds,
+      launches,
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const process = await agent.processes.launchManaged({
+        path: 'fake-default-cleanup.exe',
+      });
+
+      await process.releaseAsync();
+
+      expect(launches[0]).toMatchObject({
+        path: 'fake-default-cleanup.exe',
+      });
+      expect(killedProcessIds).toEqual([process.id]);
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('leaves the launched process running when release tree cleanup is disabled', async () => {
+    const killedProcessIds: number[] = [];
+    const fakeAgent = await startFakeTcpAgent({
+      killedProcessIds,
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const process = await agent.processes.launchManaged({
+        killTreeOnRelease: false,
+        path: 'fake-leave-running.exe',
+      });
+
+      await process.releaseAsync();
+
+      expect(killedProcessIds).toEqual([]);
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('finds managed windows owned by descendant processes', async () => {
+    const fakeAgent = await startFakeTcpAgent({
+      windows: [],
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const process = await agent.processes.launchManaged({
+        path: 'fake-bootstrap.exe',
+      });
+      const childProcess = fakeProcessSnapshot({
+        id: 9876,
+        name: 'fake-gui.exe',
+        parentProcessId: process.id,
+        path: 'C:/agent-rover/fake-gui.exe',
+      });
+      const childWindow: AppWindowSnapshot = {
+        ...defaultFakeWindow,
+        id: '0x9876',
+        process: {
+          id: childProcess.id,
+          name: childProcess.name,
+          path: childProcess.path,
+        },
+        title: 'Child GUI',
+      };
+      fakeAgent.setProcesses([
+        fakeProcessSnapshot({
+          id: process.id,
+          name: process.name,
+          path: 'C:/agent-rover/fake-bootstrap.exe',
+        }),
+        childProcess,
+      ]);
+      fakeAgent.setWindows([childWindow]);
+
+      await expect(
+        process.waitForWindow(
+          {
+            title: 'Child GUI',
+            visible: true,
+          },
+          {
+            intervalMs: 1,
+            timeoutMs: 1000,
+          }
+        )
+      ).resolves.toMatchObject({
+        id: childWindow.id,
+        process: {
+          id: childProcess.id,
+        },
+      });
+      await expect(process.windows()).resolves.toMatchObject([
+        {
+          id: childWindow.id,
+        },
+      ]);
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('keeps managed apps running while descendants remain after the launcher exits', async () => {
+    const fakeAgent = await startFakeTcpAgent({
+      windows: [],
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const process = await agent.processes.launchManaged({
+        path: 'fake-short-launcher.exe',
+      });
+      const exitedRoot = fakeProcessSnapshot({
+        exitCode: 0,
+        id: process.id,
+        name: process.name,
+        path: 'C:/agent-rover/fake-short-launcher.exe',
+        running: false,
+      });
+      const childProcess = fakeProcessSnapshot({
+        id: 2468,
+        name: 'fake-child.exe',
+        parentProcessId: process.id,
+        path: 'C:/agent-rover/fake-child.exe',
+      });
+      fakeAgent.setProcesses([exitedRoot, childProcess]);
+
+      await expect(process.rootSnapshot()).resolves.toMatchObject({
+        id: process.id,
+        running: false,
+      });
+      await expect(process.snapshot()).resolves.toMatchObject({
+        processes: [
+          {
+            id: childProcess.id,
+            running: true,
+          },
+        ],
+        root: {
+          id: process.id,
+          running: false,
+        },
+        running: true,
+      });
+
+      fakeAgent.setProcesses([
+        exitedRoot,
+        {
+          ...childProcess,
+          exitCode: 1,
+          running: false,
+        },
+      ]);
+      await expect(
+        process.waitForExit({
+          intervalMs: 1,
+          timeoutMs: 1000,
+        })
+      ).resolves.toMatchObject({
+        running: false,
+      });
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('waits for managed windows that appear after a CLI-style launch', async () => {
+    const fakeAgent = await startFakeTcpAgent({
+      windows: [],
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const process = await agent.processes.launchManaged({
+        createNoWindow: true,
+        path: 'fake-cli-with-late-ui.exe',
+      });
+      const pendingWindow = process.waitForWindow(
+        {
+          title: 'Late UI',
+          visible: true,
+        },
+        {
+          intervalMs: 1,
+          timeoutMs: 1000,
+        }
+      );
+
+      fakeAgent.setWindows([
+        {
+          ...defaultFakeWindow,
+          id: '0x4321-late',
+          process: {
+            id: process.id,
+            name: process.name,
+            path: 'C:/agent-rover/fake-cli-with-late-ui.exe',
+          },
+          title: 'Late UI',
+        },
+      ]);
+
+      await expect(pendingWindow).resolves.toMatchObject({
+        id: '0x4321-late',
+      });
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('rejects strict managed fallback window queries with candidate diagnostics', async () => {
+    const fakeAgent = await startFakeTcpAgent({
+      windows: [],
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const process = await agent.processes.launchManaged({
+        path: 'fake-window-forwarder.exe',
+      });
+      fakeAgent.setWindows([
+        {
+          ...defaultFakeWindow,
+          id: '0x7001',
+          process: {
+            id: 7001,
+            name: 'singleton.exe',
+            path: 'C:/agent-rover/singleton.exe',
+          },
+          title: 'Forwarded UI',
+        },
+        {
+          ...defaultFakeWindow,
+          id: '0x7002',
+          process: {
+            id: 7002,
+            name: 'singleton.exe',
+            path: 'C:/agent-rover/singleton.exe',
+          },
+          title: 'Forwarded UI',
+        },
+      ]);
+
+      await expect(
+        process.waitForWindow(
+          {
+            strict: true,
+            title: 'Forwarded UI',
+          },
+          {
+            intervalMs: 1,
+            timeoutMs: 100,
+          }
+        )
+      ).rejects.toThrow(/Strict window query matched 2 windows/u);
     } finally {
       agent.release();
       await fakeAgent.close();

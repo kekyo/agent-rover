@@ -32,6 +32,22 @@ struct DirectoryEntry {
   FileStat stat;
 };
 
+/** Recursive directory manifest entry. */
+struct DirectoryManifestEntry {
+  /** Relative path using forward slashes. */
+  std::string path;
+  /** Entry type: file, directory, or other. */
+  std::string type;
+  /** Size in bytes. */
+  uint64_t size;
+  /** Modification timestamp as ISO UTC text. */
+  std::string modified_at;
+  /** SHA-256 hex digest for file entries. */
+  std::string sha256;
+  /** Whether sha256 is available. */
+  bool has_sha256;
+};
+
 /**
  * Reads a complete file.
  *
@@ -97,6 +113,18 @@ bool MakeDirectory(
 bool ReadDirectoryEntries(
     const std::string& path,
     std::vector<DirectoryEntry>* entries,
+    std::string* error);
+/**
+ * Reads a recursive directory manifest without following reparse points.
+ *
+ * @param path UTF-8 directory path on the agent machine.
+ * @param entries Receives recursive entries relative to path.
+ * @param error Receives a human-readable error on failure.
+ * @return true on success.
+ */
+bool ReadDirectoryManifest(
+    const std::string& path,
+    std::vector<DirectoryManifestEntry>* entries,
     std::string* error);
 /**
  * Removes a file or directory.

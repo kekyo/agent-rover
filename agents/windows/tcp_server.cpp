@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "agent_log.h"
 #include "auth.h"
 #include "binary_transfer.h"
 #include "frame.h"
@@ -75,42 +76,58 @@ static bool SendAuthChallenge(
   return WriteFrame(client, frame, &error);
 }
 
-static bool AuthenticateClient(SOCKET client, const ServerOptions& options) {
+static bool AuthenticateClient(
+    SOCKET client,
+    const ServerOptions& options,
+    std::string* failure_reason) {
   if (!options.auth_required) {
     return true;
   }
 
   std::vector<unsigned char> challenge;
   std::string error;
-  if (!GenerateAuthChallenge(&challenge, &error) ||
-      !SendAuthChallenge(client, challenge)) {
+  if (!GenerateAuthChallenge(&challenge, &error)) {
+    *failure_reason = error;
+    return false;
+  }
+  if (!SendAuthChallenge(client, challenge)) {
+    *failure_reason = "failed to send authentication challenge";
     return false;
   }
 
   FrameHeader header = {};
   if (!ReadFrameHeader(client, &header, &error)) {
+    *failure_reason = "failed to read authentication response: " + error;
     return false;
   }
   if (header.kind != FrameKind::AuthResponse ||
       header.payload_length != kAuthResponseBytes) {
+    *failure_reason = "invalid authentication response frame";
     return false;
   }
 
   std::vector<unsigned char> payload;
   if (!ReadFramePayload(client, header.payload_length, &payload, &error)) {
+    *failure_reason = "failed to read authentication response payload: " +
+                      error;
     return false;
   }
 
   const std::vector<unsigned char> expected =
       CreateAuthChallengeResponse(options.auth_token, challenge);
-  return AuthResponseEquals(payload, expected);
+  if (!AuthResponseEquals(payload, expected)) {
+    *failure_reason = "challenge response mismatch";
+    return false;
+  }
+  return true;
 }
 
 static void HandleFrame(
     SOCKET client,
     const Frame& frame,
     BinaryTransferStore* transfers,
-    bool* should_close) {
+    bool* should_close,
+    std::string* close_reason) {
   std::string error;
 
   switch (frame.kind) {
@@ -122,11 +139,13 @@ static void HandleFrame(
       for (const BinaryTransferChunk& chunk : outbound_chunks) {
         if (!SendBinaryChunk(client, chunk)) {
           *should_close = true;
+          *close_reason = "failed to send binary transfer chunk";
           return;
         }
       }
       if (!SendJson(client, response)) {
         *should_close = true;
+        *close_reason = "failed to send JSON response";
         return;
       }
       break;
@@ -134,6 +153,7 @@ static void HandleFrame(
     case FrameKind::Ping:
       if (!SendPong(client)) {
         *should_close = true;
+        *close_reason = "failed to send pong";
         return;
       }
       break;
@@ -141,15 +161,18 @@ static void HandleFrame(
       break;
     case FrameKind::Close:
       *should_close = true;
+      *close_reason = "peer requested close";
       return;
     case FrameKind::Binary: {
       BinaryTransferChunk chunk = {};
       if (!DecodeBinaryTransferChunkPayload(frame.payload, &chunk, &error)) {
         *should_close = true;
+        *close_reason = "invalid binary transfer chunk";
         return;
       }
       if (!AcceptBinaryTransferChunk(transfers, chunk, &error)) {
         *should_close = true;
+        *close_reason = "binary transfer rejected: " + error;
         return;
       }
       break;
@@ -157,29 +180,61 @@ static void HandleFrame(
     case FrameKind::AuthChallenge:
     case FrameKind::AuthResponse:
       *should_close = true;
+      *close_reason = "unexpected authentication frame";
       break;
   }
 }
 
-static void HandleClient(SOCKET client, const ServerOptions& options) {
-  if (!AuthenticateClient(client, options) || !SendReadyEvent(client)) {
+static void HandleClient(
+    SOCKET client,
+    const ServerOptions& options,
+    uint32_t connection_id) {
+  std::string auth_failure;
+  if (!AuthenticateClient(client, options, &auth_failure)) {
+    PrintAgentLogEvent(CreateAgentConnectionDisconnectedLogEvent(
+        connection_id, "authentication failed: " + auth_failure));
     return;
   }
+  PrintAgentLogEvent(CreateAgentConnectionStateLogEvent(
+      connection_id,
+      options.auth_required ? "authenticated" : "authentication skipped"));
+
+  if (!SendReadyEvent(client)) {
+    PrintAgentLogEvent(CreateAgentConnectionDisconnectedLogEvent(
+        connection_id, "failed to send ready event"));
+    return;
+  }
+  PrintAgentLogEvent(
+      CreateAgentConnectionStateLogEvent(connection_id, "ready"));
   BinaryTransferStore transfers = {};
 
   for (;;) {
     Frame frame = {};
     std::string error;
     if (!ReadFrame(client, kMaxJsonPayloadBytes, &frame, &error)) {
+      PrintAgentLogEvent(CreateAgentConnectionDisconnectedLogEvent(
+          connection_id, error));
       return;
     }
 
     bool should_close = false;
-    HandleFrame(client, frame, &transfers, &should_close);
+    std::string close_reason;
+    HandleFrame(client, frame, &transfers, &should_close, &close_reason);
     if (should_close) {
+      PrintAgentLogEvent(CreateAgentConnectionDisconnectedLogEvent(
+          connection_id,
+          close_reason.empty() ? "connection closed" : close_reason));
       return;
     }
   }
+}
+
+static std::string ClientEndpoint(const sockaddr_in& address) {
+  const char* host = inet_ntoa(address.sin_addr);
+  std::string output = host == nullptr ? "unknown" : host;
+  output += ":";
+  output += std::to_string(static_cast<unsigned int>(ntohs(address.sin_port)));
+  return output;
 }
 
 static bool BindListener(
@@ -230,15 +285,29 @@ int RunTcpServer(const ServerOptions& options, std::string* error) {
     return 1;
   }
 
+  uint32_t next_connection_id = 1;
   for (;;) {
-    SOCKET client = accept(listener, nullptr, nullptr);
+    sockaddr_in client_address = {};
+    int client_address_length = sizeof(client_address);
+    SOCKET client = accept(
+        listener,
+        reinterpret_cast<sockaddr*>(&client_address),
+        &client_address_length);
     if (client == INVALID_SOCKET) {
       closesocket(listener);
       WSACleanup();
       *error = "accept failed.";
       return 1;
     }
-    HandleClient(client, options);
+
+    const uint32_t connection_id = next_connection_id;
+    next_connection_id += 1;
+    if (next_connection_id == 0) {
+      next_connection_id = 1;
+    }
+    PrintAgentLogEvent(CreateAgentConnectionAcceptedLogEvent(
+        connection_id, ClientEndpoint(client_address)));
+    HandleClient(client, options, connection_id);
     closesocket(client);
   }
 }
