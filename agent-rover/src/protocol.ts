@@ -77,8 +77,7 @@ export interface ProtocolFailureResponseMessage {
 
 /** Response message sent over the control channel. */
 export type ProtocolResponseMessage =
-  | ProtocolSuccessResponseMessage
-  | ProtocolFailureResponseMessage;
+  ProtocolSuccessResponseMessage | ProtocolFailureResponseMessage;
 
 /** Event message sent over the control channel. */
 export interface ProtocolEventMessage {
