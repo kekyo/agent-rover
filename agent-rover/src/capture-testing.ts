@@ -710,8 +710,7 @@ let tesseractModulePromise: Promise<LoadedTesseractModule> | undefined;
 
 const importTesseractModule = async (): Promise<LoadedTesseractModule> => {
   const loaded = (await import('tesseract.js')) as unknown as
-    | LoadedTesseractModule
-    | { readonly default: LoadedTesseractModule };
+    LoadedTesseractModule | { readonly default: LoadedTesseractModule };
   return 'default' in loaded ? loaded.default : loaded;
 };
 

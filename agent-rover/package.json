@@ -40,6 +40,7 @@
     "prettier-max": ">=1.16.0",
     "screw-up": ">=1.33.0",
     "typescript": ">=5.0.0",
+    "unplugin-dts": ">=1.0.3",
     "vite": ">=6.0.0",
     "vitest": ">=2.0.0"
   }

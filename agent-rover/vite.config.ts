@@ -5,9 +5,10 @@
 
 import { builtinModules } from 'node:module';
 
+import { defineConfig } from 'vite';
 import prettierMax from 'prettier-max';
 import screwUp from 'screw-up';
-import { defineConfig } from 'vite';
+import dts from 'unplugin-dts/vite';
 
 const nodeBuiltins = builtinModules.flatMap((name) => [name, `node:${name}`]);
 
@@ -18,6 +19,9 @@ export default defineConfig({
     }),
     screwUp({
       outputMetadataFile: true,
+    }),
+    dts({
+      entryRoot: 'src',
     }),
   ],
   build: {

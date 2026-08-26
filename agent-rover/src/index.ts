@@ -749,9 +749,7 @@ export type RemoteDirectoryChecksum = 'sha256';
 
 /** Policy used when a remote file operation fails because a file is locked. */
 export type RemoteLockedFilePolicy =
-  | 'fail'
-  | 'retry'
-  | 'killRelatedProcessesAndRetry';
+  'fail' | 'retry' | 'killRelatedProcessesAndRetry';
 
 /** Recursive directory manifest entry. */
 export interface RemoteDirectoryManifestEntry {
@@ -843,11 +841,7 @@ export interface RemoteRemoveOptions {
 
 /** Event log severity label. */
 export type EventLogLevel =
-  | 'Critical'
-  | 'Error'
-  | 'Information'
-  | 'Verbose'
-  | 'Warning';
+  'Critical' | 'Error' | 'Information' | 'Verbose' | 'Warning';
 
 /** Event log entry returned by an agent. */
 export interface EventLogEntry {
