@@ -62,6 +62,21 @@ bool ReadFileBytes(
     std::string* error);
 
 /**
+ * Computes a file SHA-256 digest without retaining the file in memory.
+ *
+ * @param path UTF-8 path on the agent machine.
+ * @param total_bytes Receives the file size in bytes.
+ * @param sha256 Receives the lowercase hexadecimal digest.
+ * @param error Receives a human-readable error on failure.
+ * @return true on success.
+ */
+bool HashFileSha256(
+    const std::string& path,
+    uint64_t* total_bytes,
+    std::string* sha256,
+    std::string* error);
+
+/**
  * Writes a complete file, recursively creating parent directories.
  *
  * @param path UTF-8 path on the agent machine.

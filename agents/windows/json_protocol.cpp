@@ -7,6 +7,7 @@
 
 #include "../protocol_version.h"
 
+#include <cerrno>
 #include <cstdint>
 #include <cstdlib>
 #include <map>
@@ -15,12 +16,14 @@
 
 #include "agent_log.h"
 #include "binary_codec.h"
+#include "video_recording.h"
 #include "win32_capture.h"
 #include "win32_clipboard.h"
 #include "win32_eventlog.h"
 #include "win32_files.h"
 #include "win32_input.h"
 #include "win32_process.h"
+#include "win32_video.h"
 #include "win32_windows.h"
 
 namespace agent_rover {
@@ -300,6 +303,47 @@ static bool FindJsonNumberField(
   return true;
 }
 
+static bool FindJsonUInt32Field(
+    const std::string& json,
+    const std::string& key,
+    uint32_t* value) {
+  const std::string marker = "\"" + key + "\"";
+  const size_t key_position = json.find(marker);
+  if (key_position == std::string::npos) {
+    return false;
+  }
+  const size_t colon_position = json.find(':', key_position + marker.size());
+  if (colon_position == std::string::npos) {
+    return false;
+  }
+  size_t value_position = colon_position + 1;
+  while (value_position < json.size() &&
+         (json[value_position] == ' ' || json[value_position] == '\t' ||
+          json[value_position] == '\r' || json[value_position] == '\n')) {
+    value_position += 1;
+  }
+  if (value_position >= json.size() || json[value_position] < '0' ||
+      json[value_position] > '9') {
+    return false;
+  }
+  char* end = nullptr;
+  errno = 0;
+  const unsigned long long parsed =
+      std::strtoull(json.c_str() + value_position, &end, 10);
+  if (end == json.c_str() + value_position || errno == ERANGE ||
+      parsed > 0xffffffffull) {
+    return false;
+  }
+  while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+    end += 1;
+  }
+  if (*end != ',' && *end != '}') {
+    return false;
+  }
+  *value = static_cast<uint32_t>(parsed);
+  return true;
+}
+
 static bool FindJsonObjectField(
     const std::string& json,
     const std::string& key,
@@ -480,6 +524,12 @@ static std::string CapabilitiesJson() {
       "\"process.snapshot\","
       "\"eventLogs.read\","
       "\"";
+  if (IsVideoCaptureSupported()) {
+    const size_t feature_end = output.size() - 1;
+    output.insert(
+        feature_end,
+        "\"agent.recordVideo\",\"window.recordVideo\",");
+  }
   output += kTcpFrameCapabilityId;
   output += "\",";
   output +=
@@ -822,6 +872,60 @@ static std::string ScreenshotJson(
   return output;
 }
 
+static std::string VideoRecordingJson(const std::string& recording_id) {
+  std::string output = "{\"recordingId\":";
+  AppendJsonString(&output, recording_id);
+  output += "}";
+  return output;
+}
+
+static std::string VideoResultJson(
+    const VideoCaptureResult& video,
+    const OutboundFileTransfer& transfer) {
+  std::string output = "{\"transferId\":";
+  AppendJsonString(&output, transfer.transfer_id);
+  output += ",\"contentType\":\"video/mp4\",\"codec\":\"h264\"";
+  output += ",\"totalBytes\":";
+  output += std::to_string(transfer.total_bytes);
+  output += ",\"sha256\":";
+  AppendJsonString(&output, transfer.sha256);
+  output += ",\"durationMs\":";
+  output += std::to_string(video.duration_ms);
+  output += ",\"fps\":";
+  output += std::to_string(video.fps);
+  output += ",\"frameCount\":";
+  output += std::to_string(video.frame_count);
+  output += ",\"droppedFrames\":";
+  output += std::to_string(video.dropped_frames);
+  output += ",\"initialBounds\":";
+  AppendRectJson(&output, video.initial_bounds);
+  output += ",\"finalBounds\":";
+  AppendRectJson(&output, video.final_bounds);
+  output += ",\"clipped\":";
+  output += video.clipped ? "true" : "false";
+  output += "}";
+  return output;
+}
+
+static bool ReadVideoParameters(
+    const std::string& payload,
+    uint32_t* duration_ms,
+    uint32_t* fps,
+    uint32_t* quality,
+    std::string* error) {
+  if (!FindJsonUInt32Field(payload, "durationMs", duration_ms) ||
+      !FindJsonUInt32Field(payload, "fps", fps) ||
+      !FindJsonUInt32Field(payload, "quality", quality) ||
+      *duration_ms == 0 || *fps == 0 || *fps > 240 || *quality == 0 ||
+      *quality > 100) {
+    *error =
+        "Video capture requires durationMs, fps 1 through 240, and quality "
+        "1 through 100.";
+    return false;
+  }
+  return true;
+}
+
 static void AddBinaryTransferChunks(
     const std::string& transfer_id,
     const std::string& content_type,
@@ -959,8 +1063,11 @@ std::string CreateReadyEventJson() {
 std::string HandleJsonRequest(
     const std::string& payload,
     BinaryTransferStore* transfers,
-    std::vector<BinaryTransferChunk>* outbound_chunks) {
+    VideoRecordingStore* recordings,
+    std::vector<BinaryTransferChunk>* outbound_chunks,
+    OutboundFileTransfer* outbound_file) {
   outbound_chunks->clear();
+  *outbound_file = {};
   std::string kind;
   std::string id;
   std::string method;
@@ -1045,6 +1152,33 @@ std::string HandleJsonRequest(
     AddBinaryTransferChunks(
         transfer_id, "image/png", screenshot.image, outbound_chunks);
     return SuccessResponseJson(id, ScreenshotJson(screenshot, transfer_id));
+  }
+  if (method == "agent.recordVideo") {
+    VideoCaptureRequest request = {};
+    std::string error;
+    if (!ReadVideoParameters(
+            payload, &request.duration_ms, &request.fps, &request.quality,
+            &error)) {
+      return FailureResponseJson(id, error);
+    }
+    std::string rect_object;
+    if (FindJsonObjectField(payload, "rect", &rect_object)) {
+      if (!ReadRectField(payload, "rect", &request.initial_bounds)) {
+        return FailureResponseJson(id, "agent.recordVideo rect is invalid.");
+      }
+    } else if (!GetScreenBounds(&request.initial_bounds, &error)) {
+      return FailureResponseJson(id, error);
+    }
+    request.tracking = VideoWindowTracking::InitialBounds;
+    const std::string recording_id = id + "-video";
+    if (!IsVideoCaptureSupported()) {
+      return FailureResponseJson(
+          id, "Windows Media Foundation video capture is unavailable.");
+    }
+    if (!StartVideoRecording(recordings, recording_id, request, &error)) {
+      return FailureResponseJson(id, error);
+    }
+    return SuccessResponseJson(id, VideoRecordingJson(recording_id));
   }
   if (method == "agent.windows") {
     std::vector<WindowInfo> windows;
@@ -1286,6 +1420,67 @@ std::string HandleJsonRequest(
     AddBinaryTransferChunks(
         transfer_id, "image/png", screenshot.image, outbound_chunks);
     return SuccessResponseJson(id, ScreenshotJson(screenshot, transfer_id));
+  }
+  if (method == "window.recordVideo") {
+    VideoCaptureRequest request = {};
+    std::string error;
+    std::string tracking;
+    if (!FindJsonStringField(payload, "windowId", &request.window_id) ||
+        !FindJsonStringField(payload, "tracking", &tracking)) {
+      return FailureResponseJson(
+          id, "window.recordVideo requires windowId and tracking.");
+    }
+    if (!ReadVideoParameters(
+            payload, &request.duration_ms, &request.fps, &request.quality,
+            &error)) {
+      return FailureResponseJson(id, error);
+    }
+    if (tracking == "followWindow") {
+      request.tracking = VideoWindowTracking::FollowWindow;
+    } else if (tracking == "initialBounds") {
+      request.tracking = VideoWindowTracking::InitialBounds;
+    } else {
+      return FailureResponseJson(id, "window.recordVideo tracking is invalid.");
+    }
+    WindowInfo window = {};
+    if (!SnapshotWindowById(request.window_id, &window, &error)) {
+      return FailureResponseJson(id, error);
+    }
+    request.initial_bounds = window.bounds;
+    const std::string recording_id = id + "-video";
+    if (!IsVideoCaptureSupported()) {
+      return FailureResponseJson(
+          id, "Windows Media Foundation video capture is unavailable.");
+    }
+    if (!StartVideoRecording(recordings, recording_id, request, &error)) {
+      return FailureResponseJson(id, error);
+    }
+    return SuccessResponseJson(id, VideoRecordingJson(recording_id));
+  }
+  if (method == "video.result") {
+    std::string recording_id;
+    if (!FindJsonStringField(payload, "recordingId", &recording_id)) {
+      return FailureResponseJson(id, "video.result requires recordingId.");
+    }
+    VideoCaptureResult video = {};
+    std::string error;
+    if (!TakeVideoRecordingResult(
+            recordings, recording_id, &video, &error)) {
+      return FailureResponseJson(id, error);
+    }
+    OutboundFileTransfer transfer = {};
+    transfer.present = true;
+    transfer.transfer_id = recording_id + "-mp4";
+    transfer.content_type = "video/mp4";
+    transfer.path = video.path;
+    transfer.directory = video.directory;
+    if (!HashFileSha256(
+            video.path, &transfer.total_bytes, &transfer.sha256, &error)) {
+      RemoveVideoCaptureResult(video);
+      return FailureResponseJson(id, error);
+    }
+    *outbound_file = transfer;
+    return SuccessResponseJson(id, VideoResultJson(video, transfer));
   }
   if (method == "input.perform") {
     InputOperation operation = {};

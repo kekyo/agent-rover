@@ -6,6 +6,7 @@
 #include "binary_transfer.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -175,10 +176,10 @@ static bool FindJsonBoolField(
   return false;
 }
 
-static bool FindJsonNumberField(
+static bool FindJsonUInt64Field(
     const std::string& json,
     const std::string& key,
-    uint32_t* value) {
+    uint64_t* value) {
   const std::string marker = "\"" + key + "\"";
   const size_t key_position = json.find(marker);
   if (key_position == std::string::npos) {
@@ -195,9 +196,32 @@ static bool FindJsonNumberField(
     value_position += 1;
   }
   char* end = nullptr;
-  const unsigned long parsed =
-      std::strtoul(json.c_str() + value_position, &end, 10);
-  if (end == json.c_str() + value_position || parsed > 0xfffffffful) {
+  if (value_position >= json.size() || json[value_position] < '0' ||
+      json[value_position] > '9') {
+    return false;
+  }
+  errno = 0;
+  const unsigned long long parsed =
+      std::strtoull(json.c_str() + value_position, &end, 10);
+  if (end == json.c_str() + value_position || errno == ERANGE) {
+    return false;
+  }
+  while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+    end += 1;
+  }
+  if (*end != ',' && *end != '}') {
+    return false;
+  }
+  *value = static_cast<uint64_t>(parsed);
+  return true;
+}
+
+static bool FindJsonNumberField(
+    const std::string& json,
+    const std::string& key,
+    uint32_t* value) {
+  uint64_t parsed = 0;
+  if (!FindJsonUInt64Field(json, key, &parsed) || parsed > 0xffffffffu) {
     return false;
   }
   *value = static_cast<uint32_t>(parsed);
@@ -263,7 +287,7 @@ bool DecodeBinaryTransferChunkPayload(
     return false;
   }
   chunk->has_total_bytes =
-      FindJsonNumberField(metadata, "totalBytes", &chunk->total_bytes);
+      FindJsonUInt64Field(metadata, "totalBytes", &chunk->total_bytes);
   chunk->has_sha256 = FindJsonStringField(metadata, "sha256", &chunk->sha256);
   chunk->data.assign(payload.begin() + data_start, payload.end());
   return true;
@@ -276,16 +300,19 @@ void CreateBinaryTransferChunks(
     uint32_t chunk_size,
     std::vector<BinaryTransferChunk>* chunks) {
   chunks->clear();
-  const uint32_t total_bytes = static_cast<uint32_t>(data.size());
+  const uint64_t total_bytes = static_cast<uint64_t>(data.size());
   const std::string checksum = Sha256Hex(data);
   const uint32_t safe_chunk_size = std::max<uint32_t>(1, chunk_size);
   const uint32_t chunk_count =
-      std::max<uint32_t>(1, (total_bytes + safe_chunk_size - 1) /
-                                safe_chunk_size);
+      std::max<uint32_t>(
+          1,
+          static_cast<uint32_t>(
+              (total_bytes + safe_chunk_size - 1) / safe_chunk_size));
 
   for (uint32_t sequence = 0; sequence < chunk_count; sequence += 1) {
     const uint32_t start = sequence * safe_chunk_size;
-    const uint32_t end = std::min<uint32_t>(start + safe_chunk_size, total_bytes);
+    const uint32_t end = std::min<uint32_t>(
+        start + safe_chunk_size, static_cast<uint32_t>(total_bytes));
     const bool final = sequence == chunk_count - 1;
     BinaryTransferChunk chunk = {};
     chunk.transfer_id = transfer_id;

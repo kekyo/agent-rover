@@ -26,13 +26,31 @@ struct BinaryTransferChunk {
   /** MIME type for the transfer. */
   std::string content_type;
   /** Total payload byte count, valid when has_total_bytes is true. */
-  uint32_t total_bytes;
+  uint64_t total_bytes;
   /** Whether total_bytes is present. */
   bool has_total_bytes;
   /** SHA-256 hex digest, valid when has_sha256 is true. */
   std::string sha256;
   /** Whether sha256 is present. */
   bool has_sha256;
+};
+
+/** Completed file sent without loading the complete payload into memory. */
+struct OutboundFileTransfer {
+  /** Whether this structure contains a transfer to send. */
+  bool present;
+  /** Transfer id reported in binary chunk metadata. */
+  std::string transfer_id;
+  /** MIME type reported in binary chunk metadata. */
+  std::string content_type;
+  /** Source file path on the agent machine. */
+  std::string path;
+  /** Temporary directory removed after the transfer. */
+  std::string directory;
+  /** Total file size in bytes. */
+  uint64_t total_bytes;
+  /** SHA-256 hex digest for the complete file. */
+  std::string sha256;
 };
 
 /** Completed binary transfer stored until its JSON request/response consumes it. */
