@@ -68,6 +68,8 @@ export interface FakeTcpAgentOptions {
   readonly releasedManagedProcessIds?: number[];
   readonly protocolVersionOverride?: string;
   readonly screenshotImage?: Buffer;
+  readonly videoData?: Buffer;
+  readonly videoRequests?: Record<string, unknown>[];
   readonly windows?: readonly AppWindowSnapshot[];
 }
 
@@ -90,6 +92,7 @@ export const defaultFakeCapabilities: RemoteAgentCapabilities = {
     'agent.cursor',
     'agent.monitors',
     'agent.screenshot',
+    'agent.recordVideo',
     'windows',
     'window.children',
     'applications.launch',
@@ -100,6 +103,7 @@ export const defaultFakeCapabilities: RemoteAgentCapabilities = {
     'window.setBounds',
     'window.show',
     'window.screenshot',
+    'window.recordVideo',
     'window.snapshot',
     'file.exists',
     'file.mkdir',
@@ -395,6 +399,14 @@ export const startFakeTcpAgent = async (
   const files = new Map<string, Buffer>();
   const processes = new Map<number, RemoteProcessSnapshot>();
   const managedProcesses = new Map<number, number>();
+  const videoRecordings = new Map<
+    string,
+    {
+      readonly bounds: ScreenRect;
+      readonly durationMs: number;
+      readonly fps: number;
+    }
+  >();
   const managedProcessOptions = new Map<
     number,
     FakeManagedProcessLaunchOptions
@@ -404,6 +416,7 @@ export const startFakeTcpAgent = async (
   const sockets = new Set<Socket>();
   let clipboardText = '';
   let nextManagedProcessId = 1;
+  let nextVideoRecordingId = 1;
   let sawBase64Write = false;
 
   for (const process of options.initialProcesses ?? []) {
@@ -625,6 +638,32 @@ export const startFakeTcpAgent = async (
             transferId,
             visibleBounds: toJson(rect),
           });
+          return;
+        }
+        case 'agent.recordVideo': {
+          const durationMs = recordParams.durationMs;
+          const fps = recordParams.fps;
+          const rect =
+            recordParams.rect === undefined
+              ? defaultScreenBounds
+              : readScreenRect(recordParams.rect);
+          if (
+            typeof durationMs !== 'number' ||
+            typeof fps !== 'number' ||
+            rect === undefined
+          ) {
+            sendFailure(id, 'agent.recordVideo parameters are invalid.');
+            return;
+          }
+          const recordingId = `video-${String(nextVideoRecordingId)}`;
+          nextVideoRecordingId += 1;
+          videoRecordings.set(recordingId, {
+            bounds: rect,
+            durationMs,
+            fps,
+          });
+          options.videoRequests?.push({ ...recordParams });
+          sendSuccess(id, { recordingId });
           return;
         }
         case 'agent.windows':
@@ -976,6 +1015,70 @@ export const startFakeTcpAgent = async (
             totalBytes: screenshotImage.byteLength,
             transferId,
             visibleBounds: toJson(bounds),
+          });
+          return;
+        }
+        case 'window.recordVideo': {
+          const durationMs = recordParams.durationMs;
+          const fps = recordParams.fps;
+          const windowId = recordParams.windowId;
+          const window =
+            typeof windowId === 'string'
+              ? findWindow(windows, childrenByWindowId, windowId)
+              : undefined;
+          if (
+            typeof durationMs !== 'number' ||
+            typeof fps !== 'number' ||
+            window === undefined
+          ) {
+            sendFailure(id, 'window.recordVideo parameters are invalid.');
+            return;
+          }
+          const recordingId = `video-${String(nextVideoRecordingId)}`;
+          nextVideoRecordingId += 1;
+          videoRecordings.set(recordingId, {
+            bounds: window.bounds,
+            durationMs,
+            fps,
+          });
+          options.videoRequests?.push({ ...recordParams });
+          sendSuccess(id, { recordingId });
+          return;
+        }
+        case 'video.result': {
+          const recordingId = recordParams.recordingId;
+          const recording =
+            typeof recordingId === 'string'
+              ? videoRecordings.get(recordingId)
+              : undefined;
+          if (recording === undefined || typeof recordingId !== 'string') {
+            sendFailure(id, 'Video recording was not found.');
+            return;
+          }
+          videoRecordings.delete(recordingId);
+          const videoData =
+            options.videoData ?? Buffer.from('fake h264 mp4 bytes');
+          const transferId = `${id}-video`;
+          sendSuccess(id, {
+            clipped: false,
+            codec: 'h264',
+            contentType: 'video/mp4',
+            droppedFrames: 0,
+            durationMs: recording.durationMs,
+            finalBounds: toJson(recording.bounds),
+            fps: recording.fps,
+            frameCount: Math.ceil(
+              (recording.durationMs * recording.fps) / 1000
+            ),
+            initialBounds: toJson(recording.bounds),
+            sha256: sha256Hex(videoData),
+            totalBytes: videoData.byteLength,
+            transferId,
+          });
+          sendTcpBinaryTransfer(socket, {
+            contentType: 'video/mp4',
+            data: videoData,
+            transferId,
           });
           return;
         }

@@ -3,9 +3,14 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 
-import { connectRemoteAgent, packageName } from '../src/index';
+import {
+  connectRemoteAgent,
+  packageName,
+  type CapturedVideoResult,
+  type CapturedVideoStream,
+} from '../src/index';
 import { startFakeTcpAgent } from './helpers/fake-tcp-agent';
 
 describe('public package entry', () => {
@@ -22,6 +27,25 @@ describe('public package entry', () => {
     try {
       expect(agent.files.syncDirectory).toEqual(expect.any(Function));
       expect(agent.files.downloadDirectory).toEqual(expect.any(Function));
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('exposes distinct video stream and persisted-file overloads', async () => {
+    const fakeAgent = await startFakeTcpAgent({});
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      expectTypeOf(() => agent.recordVideo(1)).returns.toEqualTypeOf<
+        Promise<CapturedVideoStream>
+      >();
+      expectTypeOf(() =>
+        agent.recordVideo(1, 'capture.mp4')
+      ).returns.toEqualTypeOf<Promise<CapturedVideoResult>>();
     } finally {
       agent.release();
       await fakeAgent.close();

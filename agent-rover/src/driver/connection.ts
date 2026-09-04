@@ -4,18 +4,25 @@
 // https://github.com/kekyo/agent-rover
 
 import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import {
+  constants as fileConstants,
+  copyFile as copyLocalFile,
   mkdir as makeLocalDirectory,
   readdir as readLocalDirectory,
   readFile as readLocalFile,
   stat as statLocalPath,
   writeFile as writeLocalFile,
 } from 'node:fs/promises';
+import { once } from 'node:events';
 import {
   dirname as localDirname,
   join as joinLocalPath,
   relative as relativeLocalPath,
+  resolve as resolveLocalPath,
 } from 'node:path';
+
+import { createDeferred, delay } from 'async-primitives';
 
 import type {
   AppWindow,
@@ -23,6 +30,10 @@ import type {
   AppWindowProcess,
   AppWindowScreenshot,
   AppWindowSnapshot,
+  AppWindowVideoCaptureOptions,
+  CapturedVideoMetadata,
+  CapturedVideoResult,
+  CapturedVideoStream,
   ConnectRemoteAgentOptions,
   ScreenPoint,
   ScreenRect,
@@ -40,6 +51,7 @@ import type {
   RemoteAgentError,
   RemoteAgentErrorCode,
   RemoteAgentScreenshotOptions,
+  RemoteAgentVideoCaptureOptions,
   RemoteDiagnosticsCapture,
   RemoteDiagnosticsCaptureOptions,
   RemoteDiagnosticsWindow,
@@ -86,6 +98,11 @@ import {
   type ProtocolTransport,
   type ProtocolTransportCallbacks,
 } from './transport';
+import {
+  createFileBinaryTransferReceiver,
+  removeCompletedFileBinaryTransfer,
+  type CompletedFileBinaryTransfer,
+} from './file-binary-transfer';
 
 interface ReadyState {
   readonly reject: (error: RemoteAgentError) => void;
@@ -111,6 +128,18 @@ interface WaitingBinaryTransfer {
   readonly reject: (error: RemoteAgentError) => void;
   readonly resolve: (data: Buffer) => void;
   readonly timer: ReturnType<typeof setTimeout>;
+}
+
+interface WaitingFileBinaryTransfer {
+  readonly reference: BinaryTransferReference;
+  readonly reject: (error: RemoteAgentError) => void;
+  readonly resolve: (transfer: CompletedFileBinaryTransfer) => void;
+  readonly timer: ReturnType<typeof setTimeout>;
+}
+
+interface ParsedVideoResult {
+  readonly metadata: CapturedVideoMetadata;
+  readonly transfer: BinaryTransferReference;
 }
 
 interface ManagedProcessLaunchResult {
@@ -613,6 +642,195 @@ const parseScreenshot = async (
     clipped,
     image,
     visibleBounds: parseRect(value.visibleBounds),
+  };
+};
+
+const readVideoInteger = (
+  value: Record<string, unknown>,
+  key: string,
+  minimum: number
+): number => {
+  const field = value[key];
+  if (
+    typeof field !== 'number' ||
+    !Number.isSafeInteger(field) ||
+    field < minimum
+  ) {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      `Video result field ${key} is invalid.`
+    );
+  }
+  return field;
+};
+
+const parseVideoResult = (value: JsonValue | undefined): ParsedVideoResult => {
+  if (!isRecord(value)) {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'Video result must be an object.'
+    );
+  }
+  if (
+    value.contentType !== 'video/mp4' ||
+    value.codec !== 'h264' ||
+    typeof value.clipped !== 'boolean'
+  ) {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'Video result format metadata is invalid.'
+    );
+  }
+  return {
+    metadata: {
+      clipped: value.clipped,
+      codec: value.codec,
+      contentType: value.contentType,
+      droppedFrames: readVideoInteger(value, 'droppedFrames', 0),
+      durationMs: readVideoInteger(value, 'durationMs', 0),
+      finalBounds: parseRect(value.finalBounds),
+      fps: readVideoInteger(value, 'fps', 1),
+      frameCount: readVideoInteger(value, 'frameCount', 0),
+      initialBounds: parseRect(value.initialBounds),
+    },
+    transfer: parseBinaryTransferReference(value, 'video/mp4', 'Video result'),
+  };
+};
+
+const parseVideoRecordingId = (value: JsonValue | undefined): string => {
+  if (!isRecord(value) || typeof value.recordingId !== 'string') {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'Video recording start result is invalid.'
+    );
+  }
+  return value.recordingId;
+};
+
+const validateVideoDuration = (durationMs: number): void => {
+  if (
+    !Number.isSafeInteger(durationMs) ||
+    durationMs <= 0 ||
+    durationMs > 0xffffffff
+  ) {
+    throw createRemoteAgentError(
+      'INVALID_ARGUMENT',
+      'durationMs must be a positive integer no greater than 4294967295.'
+    );
+  }
+};
+
+const validateVideoOptions = (options: VideoCaptureOptions): void => {
+  if (
+    !Number.isSafeInteger(options.fps) ||
+    options.fps < 1 ||
+    options.fps > 240
+  ) {
+    throw createRemoteAgentError(
+      'INVALID_ARGUMENT',
+      'fps must be an integer from 1 through 240.'
+    );
+  }
+  if (
+    !Number.isSafeInteger(options.quality) ||
+    options.quality < 1 ||
+    options.quality > 100
+  ) {
+    throw createRemoteAgentError(
+      'INVALID_ARGUMENT',
+      'quality must be an integer from 1 through 100.'
+    );
+  }
+};
+
+interface VideoCaptureOptions {
+  readonly fps: number;
+  readonly quality: number;
+}
+
+const normalizeVideoOptions = (
+  options: AppWindowVideoCaptureOptions | RemoteAgentVideoCaptureOptions
+): VideoCaptureOptions => {
+  const normalized = {
+    fps: options.fps ?? 60,
+    quality: options.quality ?? 90,
+  };
+  validateVideoOptions(normalized);
+  return normalized;
+};
+
+const validateVideoRect = (rect: ScreenRect): void => {
+  if (
+    !Number.isSafeInteger(rect.x) ||
+    !Number.isSafeInteger(rect.y) ||
+    !Number.isSafeInteger(rect.width) ||
+    !Number.isSafeInteger(rect.height) ||
+    rect.width <= 0 ||
+    rect.height <= 0
+  ) {
+    throw createRemoteAgentError(
+      'INVALID_ARGUMENT',
+      'Video capture rect must contain integer coordinates and positive dimensions.'
+    );
+  }
+};
+
+const createCapturedVideoStream = (
+  transfer: CompletedFileBinaryTransfer,
+  metadata: CapturedVideoMetadata
+): CapturedVideoStream => {
+  const stream = createReadStream(transfer.path);
+  let releasePromise: Promise<void> | undefined = undefined;
+  const releaseAsync = async (): Promise<void> => {
+    if (releasePromise !== undefined) {
+      await releasePromise;
+      return;
+    }
+    releasePromise = (async (): Promise<void> => {
+      if (!stream.closed) {
+        const closed = once(stream, 'close');
+        stream.destroy();
+        try {
+          await closed;
+        } catch {
+          // Cleanup must continue even when a stream error caused closure.
+        }
+      }
+      await removeCompletedFileBinaryTransfer(transfer);
+    })();
+    await releasePromise;
+  };
+  return Object.assign(stream, metadata, {
+    releaseAsync,
+    [Symbol.asyncDispose]: releaseAsync,
+  }) as CapturedVideoStream;
+};
+
+const persistCapturedVideo = async (
+  transfer: CompletedFileBinaryTransfer,
+  metadata: CapturedVideoMetadata,
+  outputPath: string
+): Promise<CapturedVideoResult> => {
+  const path = resolveLocalPath(outputPath);
+  try {
+    await copyLocalFile(transfer.path, path, fileConstants.COPYFILE_EXCL);
+  } catch (error) {
+    await removeCompletedFileBinaryTransfer(transfer);
+    const code =
+      isRecord(error) && typeof error.code === 'string'
+        ? error.code
+        : undefined;
+    throw createRemoteAgentError(
+      code === 'EEXIST' ? 'INVALID_ARGUMENT' : 'PROTOCOL_ERROR',
+      code === 'EEXIST'
+        ? `Video output path already exists: ${path}.`
+        : `Failed to persist video output: ${path}.`
+    );
+  }
+  await removeCompletedFileBinaryTransfer(transfer);
+  return {
+    ...metadata,
+    path,
   };
 };
 
@@ -1240,8 +1458,17 @@ export const connectRemoteAgent = async (
     requestTimeoutMs: timeoutMs,
   });
   const binaryReceiver = createBinaryTransferReceiver();
+  const fileBinaryReceiver = createFileBinaryTransferReceiver();
   const completedBinaryTransfers = new Map<string, Buffer>();
+  const completedFileBinaryTransfers = new Map<
+    string,
+    CompletedFileBinaryTransfer
+  >();
   const waitingBinaryTransfers = new Map<string, WaitingBinaryTransfer[]>();
+  const waitingFileBinaryTransfers = new Map<
+    string,
+    WaitingFileBinaryTransfer[]
+  >();
   let nextBinaryTransferId = 1;
   let disconnected = false;
   let readyState: ReadyState | undefined = undefined;
@@ -1288,6 +1515,25 @@ export const connectRemoteAgent = async (
     waitingBinaryTransfers.clear();
   };
 
+  const rejectFileBinaryTransferWaiters = (error: RemoteAgentError): void => {
+    for (const waiters of waitingFileBinaryTransfers.values()) {
+      for (const waiter of waiters) {
+        clearTimeout(waiter.timer);
+        waiter.reject(error);
+      }
+    }
+    waitingFileBinaryTransfers.clear();
+  };
+
+  const cleanupFileBinaryTransfers = async (): Promise<void> => {
+    const completed = [...completedFileBinaryTransfers.values()];
+    completedFileBinaryTransfers.clear();
+    for (const transfer of completed) {
+      await removeCompletedFileBinaryTransfer(transfer);
+    }
+    await fileBinaryReceiver.releaseAsync();
+  };
+
   const verifyBinaryTransfer = (
     reference: BinaryTransferReference,
     data: Buffer
@@ -1323,7 +1569,41 @@ export const connectRemoteAgent = async (
     }
   };
 
-  const acceptBinaryChunk = (chunk: ProtocolBinaryTransferChunk): void => {
+  const acceptBinaryChunk = async (
+    chunk: ProtocolBinaryTransferChunk
+  ): Promise<void> => {
+    if (chunk.contentType === 'video/mp4') {
+      const result = await fileBinaryReceiver.acceptChunk(chunk);
+      if (result === undefined) {
+        return;
+      }
+      const waiters = waitingFileBinaryTransfers.get(chunk.transferId);
+      if (waiters === undefined || waiters.length === 0) {
+        waitingFileBinaryTransfers.delete(chunk.transferId);
+        completedFileBinaryTransfers.set(chunk.transferId, result);
+        return;
+      }
+      waitingFileBinaryTransfers.delete(chunk.transferId);
+      for (const waiter of waiters) {
+        clearTimeout(waiter.timer);
+        if (
+          waiter.reference.contentType !== result.contentType ||
+          waiter.reference.totalBytes !== result.totalBytes ||
+          waiter.reference.sha256 !== result.sha256
+        ) {
+          await removeCompletedFileBinaryTransfer(result);
+          waiter.reject(
+            createRemoteAgentError(
+              'PROTOCOL_ERROR',
+              `Video binary transfer metadata mismatch: ${chunk.transferId}.`
+            )
+          );
+        } else {
+          waiter.resolve(result);
+        }
+      }
+      return;
+    }
     const result = binaryReceiver.acceptChunk(chunk);
     if (result.state !== 'complete') {
       return;
@@ -1337,6 +1617,76 @@ export const connectRemoteAgent = async (
     waitingBinaryTransfers.delete(chunk.transferId);
     for (const waiter of waiters) {
       resolveBinaryTransferWaiter(waiter, result.data);
+    }
+  };
+
+  const readFileBinaryTransfer = async (
+    reference: BinaryTransferReference
+  ): Promise<CompletedFileBinaryTransfer> => {
+    const completed = completedFileBinaryTransfers.get(reference.transferId);
+    if (completed !== undefined) {
+      completedFileBinaryTransfers.delete(reference.transferId);
+      if (
+        reference.contentType !== completed.contentType ||
+        reference.totalBytes !== completed.totalBytes ||
+        reference.sha256 !== completed.sha256
+      ) {
+        await removeCompletedFileBinaryTransfer(completed);
+        throw createRemoteAgentError(
+          'PROTOCOL_ERROR',
+          `Video binary transfer metadata mismatch: ${reference.transferId}.`
+        );
+      }
+      return completed;
+    }
+
+    const controller = new AbortController();
+    const transferTimeoutMs = Math.max(
+      timeoutMs,
+      defaultTimeoutMs + Math.ceil(reference.totalBytes / (1024 * 1024)) * 1000
+    );
+    const timer = setTimeout(() => {
+      controller.abort();
+    }, transferTimeoutMs);
+    const deferred = createDeferred<CompletedFileBinaryTransfer>(
+      controller.signal
+    );
+    const waiter: WaitingFileBinaryTransfer = {
+      reference,
+      reject: (error): void => {
+        deferred.reject(error);
+      },
+      resolve: (transfer): void => {
+        deferred.resolve(transfer);
+      },
+      timer,
+    };
+    waitingFileBinaryTransfers.set(reference.transferId, [
+      ...(waitingFileBinaryTransfers.get(reference.transferId) ?? []),
+      waiter,
+    ]);
+    try {
+      return await deferred.promise;
+    } catch (error) {
+      const waiters = waitingFileBinaryTransfers.get(reference.transferId);
+      if (waiters !== undefined) {
+        const remaining = waiters.filter((entry) => entry !== waiter);
+        if (remaining.length === 0) {
+          waitingFileBinaryTransfers.delete(reference.transferId);
+        } else {
+          waitingFileBinaryTransfers.set(reference.transferId, remaining);
+        }
+      }
+      await fileBinaryReceiver.cancel(reference.transferId);
+      if (controller.signal.aborted) {
+        throw createRemoteAgentError(
+          'PROTOCOL_ERROR',
+          `Timed out waiting for video transfer: ${reference.transferId}.`
+        );
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
     }
   };
 
@@ -1406,9 +1756,9 @@ export const connectRemoteAgent = async (
     socketOpened ? 'AUTHENTICATION_FAILED' : 'CONNECTION_FAILED';
 
   transport = createTransport(options, timeoutMs, authToken, {
-    onBinaryChunk: (chunk) => {
+    onBinaryChunk: async (chunk): Promise<void> => {
       try {
-        acceptBinaryChunk(chunk);
+        await acceptBinaryChunk(chunk);
       } catch (error) {
         const wrapped = createRemoteAgentError(
           'PROTOCOL_ERROR',
@@ -1416,6 +1766,8 @@ export const connectRemoteAgent = async (
         );
         pending.rejectAll('PROTOCOL_ERROR', wrapped.message);
         rejectBinaryTransferWaiters(wrapped);
+        rejectFileBinaryTransferWaiters(wrapped);
+        await cleanupFileBinaryTransfers();
         void transport?.close();
       }
     },
@@ -1430,6 +1782,8 @@ export const connectRemoteAgent = async (
       }
       pending.rejectAll('DISCONNECTED', wrapped.message);
       rejectBinaryTransferWaiters(wrapped);
+      rejectFileBinaryTransferWaiters(wrapped);
+      void cleanupFileBinaryTransfers();
     },
     onError: (error) => {
       const wrapped = createRemoteAgentError(
@@ -1441,6 +1795,8 @@ export const connectRemoteAgent = async (
       }
       pending.rejectAll('DISCONNECTED', wrapped.message);
       rejectBinaryTransferWaiters(wrapped);
+      rejectFileBinaryTransferWaiters(wrapped);
+      void cleanupFileBinaryTransfers();
     },
     onMessage: (message) => {
       try {
@@ -1516,6 +1872,8 @@ export const connectRemoteAgent = async (
     );
     pending.rejectAll('DISCONNECTED', wrapped.message);
     rejectBinaryTransferWaiters(wrapped);
+    rejectFileBinaryTransferWaiters(wrapped);
+    void cleanupFileBinaryTransfers();
     void activeTransport.close();
   };
 
@@ -1571,6 +1929,100 @@ export const connectRemoteAgent = async (
     }
     return reference;
   };
+
+  const receiveRecordedVideo = async (
+    method: 'agent.recordVideo' | 'window.recordVideo',
+    durationMs: number,
+    outputPath: string | undefined,
+    options: AppWindowVideoCaptureOptions | RemoteAgentVideoCaptureOptions,
+    target: JsonValue
+  ): Promise<CapturedVideoResult | CapturedVideoStream> => {
+    validateVideoDuration(durationMs);
+    if (outputPath !== undefined && outputPath.trim() === '') {
+      throw createRemoteAgentError(
+        'INVALID_ARGUMENT',
+        'Video output path must not be empty.'
+      );
+    }
+    const normalized = normalizeVideoOptions(options);
+    const recordingId = parseVideoRecordingId(
+      await requestJson(method, {
+        durationMs,
+        fps: normalized.fps,
+        quality: normalized.quality,
+        ...(isRecord(target) ? target : {}),
+      })
+    );
+
+    await delay(durationMs);
+    const video = parseVideoResult(
+      await requestJson('video.result', {
+        recordingId,
+      })
+    );
+    const transfer = await readFileBinaryTransfer(video.transfer);
+    return outputPath === undefined
+      ? createCapturedVideoStream(transfer, video.metadata)
+      : await persistCapturedVideo(transfer, video.metadata, outputPath);
+  };
+
+  const createWindowRecordVideo = (
+    snapshot: AppWindowSnapshot
+  ): AppWindow['recordVideo'] =>
+    (async (
+      durationMs: number,
+      outputPathOrOptions?: string | AppWindowVideoCaptureOptions,
+      pathOptions?: AppWindowVideoCaptureOptions
+    ): Promise<CapturedVideoResult | CapturedVideoStream> => {
+      const outputPath =
+        typeof outputPathOrOptions === 'string'
+          ? outputPathOrOptions
+          : undefined;
+      const options =
+        typeof outputPathOrOptions === 'string'
+          ? (pathOptions ?? {})
+          : (outputPathOrOptions ?? {});
+      const tracking = options.tracking ?? 'followWindow';
+      if (tracking !== 'followWindow' && tracking !== 'initialBounds') {
+        throw createRemoteAgentError(
+          'INVALID_ARGUMENT',
+          'tracking must be followWindow or initialBounds.'
+        );
+      }
+      return await receiveRecordedVideo(
+        'window.recordVideo',
+        durationMs,
+        outputPath,
+        options,
+        {
+          tracking,
+          windowId: snapshot.id,
+        }
+      );
+    }) as AppWindow['recordVideo'];
+
+  const recordAgentVideo = (async (
+    durationMs: number,
+    outputPathOrOptions?: string | RemoteAgentVideoCaptureOptions,
+    pathOptions?: RemoteAgentVideoCaptureOptions
+  ): Promise<CapturedVideoResult | CapturedVideoStream> => {
+    const outputPath =
+      typeof outputPathOrOptions === 'string' ? outputPathOrOptions : undefined;
+    const options =
+      typeof outputPathOrOptions === 'string'
+        ? (pathOptions ?? {})
+        : (outputPathOrOptions ?? {});
+    if (options.rect !== undefined) {
+      validateVideoRect(options.rect);
+    }
+    return await receiveRecordedVideo(
+      'agent.recordVideo',
+      durationMs,
+      outputPath,
+      options,
+      options.rect === undefined ? {} : { rect: rectToJson(options.rect) }
+    );
+  }) as RemoteAgent['recordVideo'];
 
   const createWindowProxy = (snapshot: AppWindowSnapshot): AppWindow => ({
     ...snapshot,
@@ -1651,6 +2103,7 @@ export const connectRemoteAgent = async (
           })
         )
       ),
+    recordVideo: createWindowRecordVideo(snapshot),
     restore: async (): Promise<AppWindow> =>
       createWindowProxy(
         parseWindowSnapshot(
@@ -3403,6 +3856,7 @@ export const connectRemoteAgent = async (
         await waitForProcessExit(processId, options),
     },
     release: releaseAgent,
+    recordVideo: recordAgentVideo,
     screenshot: async (
       options?: RemoteAgentScreenshotOptions
     ): Promise<RemoteScreenshot> =>

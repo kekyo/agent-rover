@@ -34,7 +34,7 @@ export interface ProtocolTransportCallbacks {
   /** Accepts one validated protocol message. */
   readonly onMessage: (message: ProtocolMessage) => void;
   /** Accepts one raw binary transfer chunk. */
-  readonly onBinaryChunk: (chunk: ProtocolBinaryTransferChunk) => void;
+  readonly onBinaryChunk: (chunk: ProtocolBinaryTransferChunk) => Promise<void>;
   /** Reports a transport close notification. */
   readonly onClose: (message: string) => void;
   /** Reports a transport or protocol parsing error. */
@@ -160,20 +160,7 @@ export const createTcpFrameTransport = (
   let open = false;
   let authChallengeAnswered = false;
 
-  socket.setNoDelay(true);
-  socket.setTimeout(options.timeoutMs, () => {
-    closeWithProtocolError(
-      socket,
-      options.callbacks,
-      new Error('Timed out connecting to TCP frame agent.')
-    );
-  });
-  socket.on('connect', () => {
-    open = true;
-    socket.setTimeout(0);
-    options.callbacks.onOpen();
-  });
-  socket.on('data', (data) => {
+  const acceptSocketData = async (data: Buffer): Promise<void> => {
     try {
       for (const frame of decoder.accept(Buffer.from(data))) {
         switch (frame.kind) {
@@ -189,7 +176,7 @@ export const createTcpFrameTransport = (
             socket.end();
             break;
           case tcpFrameKindBinary:
-            options.callbacks.onBinaryChunk(
+            await options.callbacks.onBinaryChunk(
               parseBinaryTransferChunkPayload(frame.payload)
             );
             break;
@@ -238,7 +225,29 @@ export const createTcpFrameTransport = (
         options.callbacks,
         error instanceof Error ? error : new Error('Invalid TCP frame.')
       );
+    } finally {
+      if (!socket.destroyed) {
+        socket.resume();
+      }
     }
+  };
+
+  socket.setNoDelay(true);
+  socket.setTimeout(options.timeoutMs, () => {
+    closeWithProtocolError(
+      socket,
+      options.callbacks,
+      new Error('Timed out connecting to TCP frame agent.')
+    );
+  });
+  socket.on('connect', () => {
+    open = true;
+    socket.setTimeout(0);
+    options.callbacks.onOpen();
+  });
+  socket.on('data', (data) => {
+    socket.pause();
+    void acceptSocketData(Buffer.from(data));
   });
   socket.on('error', (error) => {
     options.callbacks.onError(error);

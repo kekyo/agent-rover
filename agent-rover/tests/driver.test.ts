@@ -4,7 +4,10 @@
 // https://github.com/kekyo/agent-rover
 
 import { createHmac } from 'node:crypto';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { connect as connectTcpSocket, type Socket } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
@@ -410,6 +413,133 @@ describe.concurrent('remote agent connection api', () => {
         image: Buffer.from('fake png bytes'),
       });
       expect(fakeAgent.requestUsedBase64()).toBe(false);
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('captures window video into a releaseable readable stream', async () => {
+    const videoData = Buffer.from('fake streamed h264 mp4');
+    const videoRequests: Record<string, unknown>[] = [];
+    const fakeAgent = await startFakeTcpAgent({ videoData, videoRequests });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const [window] = await agent.windows();
+      if (window === undefined) {
+        throw new Error('Expected fake window.');
+      }
+      const video = await window.recordVideo(1, {
+        fps: 30,
+        quality: 82,
+        tracking: 'initialBounds',
+      });
+      const chunks: Buffer[] = [];
+      for await (const chunk of video) {
+        chunks.push(Buffer.from(chunk));
+      }
+
+      expect(Buffer.concat(chunks)).toEqual(videoData);
+      expect(video).toMatchObject({
+        clipped: false,
+        codec: 'h264',
+        contentType: 'video/mp4',
+        droppedFrames: 0,
+        durationMs: 1,
+        fps: 30,
+      });
+      expect(video.releaseAsync).toEqual(expect.any(Function));
+      expect(video[Symbol.asyncDispose]).toEqual(expect.any(Function));
+      await video.releaseAsync();
+      await video[Symbol.asyncDispose]();
+      expect(videoRequests).toEqual([
+        {
+          durationMs: 1,
+          fps: 30,
+          quality: 82,
+          tracking: 'initialBounds',
+          windowId: defaultFakeWindow.id,
+        },
+      ]);
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it('persists screen video directly to a new host path', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-rover-video-test-'));
+    const outputPath = join(directory, 'capture.mp4');
+    const videoData = Buffer.from('fake persisted h264 mp4');
+    const fakeAgent = await startFakeTcpAgent({ videoData });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const result = await agent.recordVideo(1, outputPath, {
+        fps: 24,
+        quality: 75,
+        rect: { height: 240, width: 320, x: 5, y: 6 },
+      });
+
+      expect(result).toMatchObject({
+        codec: 'h264',
+        contentType: 'video/mp4',
+        path: resolve(outputPath),
+      });
+      expect(result).not.toHaveProperty('pipe');
+      await expect(readFile(outputPath)).resolves.toEqual(videoData);
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  it('does not overwrite an existing video output file', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-rover-video-test-'));
+    const outputPath = join(directory, 'capture.mp4');
+    const original = Buffer.from('keep existing file');
+    await writeFile(outputPath, original);
+    const fakeAgent = await startFakeTcpAgent({});
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      await expect(agent.recordVideo(1, outputPath)).rejects.toMatchObject({
+        code: 'INVALID_ARGUMENT',
+      });
+      await expect(readFile(outputPath)).resolves.toEqual(original);
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  it('validates video capture options at the public API boundary', async () => {
+    const fakeAgent = await startFakeTcpAgent({});
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      await expect(agent.recordVideo(0)).rejects.toMatchObject({
+        code: 'INVALID_ARGUMENT',
+      });
+      await expect(agent.recordVideo(1, { fps: 0 })).rejects.toMatchObject({
+        code: 'INVALID_ARGUMENT',
+      });
+      await expect(
+        agent.recordVideo(1, { quality: 101 })
+      ).rejects.toMatchObject({
+        code: 'INVALID_ARGUMENT',
+      });
     } finally {
       agent.release();
       await fakeAgent.close();
