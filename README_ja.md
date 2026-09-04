@@ -90,6 +90,8 @@ agent-roverは、GUIアプリケーション自体の監視や操作以外にも
 - リモートマシンにエージェントアプリケーションを配置し、リモートからテスト操作が可能。
 - ターゲットGUIアプリケーションの実行・探索・操作・状態の取得が可能。
   ファイル操作（送受信）も可能。
+- 画面またはアプリケーションウインドウをPNG画像として、対応するWindowsエージェントでは
+  H.264 MP4動画としてキャプチャ可能。
 - プリビルドエージェントは Windows (XP SP2以降のi686/amd64)・Linux X11 (i686/amd64/armv7l/arm64/riscv64) を使用可能。
 - エージェントとの通信はTCP独自プロトコル。認証はダイジェストハンドシェーク（但し通信電文自体は非暗号化）。
 - 画像認識（一致または近しい）・OCR解析アサーション。
@@ -201,6 +203,8 @@ agent-roverは特定のテストフレームワークに依存しません。
 | `RemoteAgent.monitors()` | 接続先セッションのモニター一覧、作業領域、スケール係数を取得します。 |
 | `RemoteAgent.cursor()` | 現在のカーソル位置と表示状態を取得します。 |
 | `RemoteAgent.screenshot(options?)` | 画面全体、または指定矩形をPNG画像としてキャプチャします。 |
+| `RemoteAgent.recordVideo(durationMs, outputPath, options?)` | 画面全体、または指定矩形をH.264 MP4ファイルとしてキャプチャします。 |
+| `RemoteAgent.recordVideo(durationMs, options?)` | 動画をキャプチャし、テンポラリファイルを元にしたReadableStreamを返します。 |
 
 - `connectRemoteAgent()`には、エージェントの`host`、`port`、必要に応じて`authToken`と`timeoutMs`を指定します。
 - `authToken`を省略した場合は、環境変数`AGENT_ROVER_AUTH_TOKEN`も使用できます。
@@ -244,6 +248,65 @@ try {
 }
 ```
 
+### 動画撮影
+
+`recordVideo()`はmsec単位で撮影時間を受け取り、デスクトップ上で見えている
+ピクセルを動画として撮影します。FPSのデフォルトは60、品質のデフォルトは90です。
+`fps`には1から240、`quality`には1から100の整数を指定出来ます。
+品質に100を指定してもH.264が可逆圧縮になるわけではありません。
+
+ホスト側の出力パスを渡すと、完成したMP4を直接永続化出来ます:
+
+```typescript
+const result = await agent.recordVideo(
+  1500,
+  'test-results/screen.mp4',
+  {
+    fps: 60,
+    quality: 90,
+    rect: { x: 100, y: 100, width: 1280, height: 720 },
+  }
+);
+
+console.log(result.path, result.frameCount, result.droppedFrames);
+```
+
+出力先に既存ファイルがある場合は上書きせず、エラーになります。MP4全体は最初に
+エージェント側で撮影され、ホスト側のテンポラリファイルへ転送された後、出力先へ
+コピーされます。出力パスを省略すると、そのホスト側テンポラリファイルを元にした
+`CapturedVideoStream`を返します。使用後に解放するとテンポラリファイルが削除されます:
+
+```typescript
+import { createWriteStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
+
+const video = await notepadWindow.recordVideo(1500, {
+  fps: 30,
+  quality: 90,
+  tracking: 'followWindow',
+});
+try {
+  await pipeline(video, createWriteStream('test-results/notepad.mp4'));
+} finally {
+  await video.releaseAsync();
+}
+```
+
+ウインドウ撮影の`tracking`は`followWindow`がデフォルトです。各フレームで
+ウインドウの現在位置を取得して追従します。`initialBounds`を指定すると、撮影開始時の
+矩形に固定します。エンコードする動画サイズは開始時のウインドウサイズで固定されます。
+途中のサイズ変更はクロップまたは黒色でパディングされ、開始時の幅または高さが奇数なら
+エンコーダー向けに偶数へパディングされます。デスクトップ上で見える矩形を撮影するため、
+手前に重なった別のウインドウも動画に映ります。
+
+ネイティブWindowsエージェントが必要なMedia Foundationコンポーネントを読み込める
+場合だけ、`agent.recordVideo`と`window.recordVideo`が機能一覧に含まれます。
+エンコード時には互換性のあるH.264エンコーダーも必要です。詳細はMicrosoftの
+[`MFCreateSinkWriterFromURL`](https://learn.microsoft.com/ja-jp/windows/win32/api/mfreadwrite/nf-mfreadwrite-mfcreatesinkwriterfromurl)、
+[Sink Writerの形式変換](https://learn.microsoft.com/ja-jp/windows/win32/medfound/mf-readwrite-disable-converters)、
+[Media Foundation H.264ビデオエンコーダー](https://learn.microsoft.com/ja-jp/windows/win32/medfound/h-264-video-encoder)
+を参照して下さい。
+
 ### ウインドウ探索と操作
 
 | API | 内容 |
@@ -259,6 +322,8 @@ try {
 | `AppWindow.children()` / `AppWindow.descendants(options?)` | 子ウインドウ、または子孫ウインドウを取得します。 |
 | `AppWindow.findDescendants(query)` | 子孫ウインドウを条件で検索します。 |
 | `AppWindow.screenshot()` | ウインドウ領域をPNG画像としてキャプチャします。 |
+| `AppWindow.recordVideo(durationMs, outputPath, options?)` | ウインドウ領域を永続化されたH.264 MP4ファイルとしてキャプチャします。 |
+| `AppWindow.recordVideo(durationMs, options?)` | ウインドウ領域をテンポラリファイルを元にしたReadableStreamとしてキャプチャします。 |
 | `AppWindow.waitForVisible(options?)` | ウインドウが表示状態になるまで待機します。 |
 | `AppWindow.waitForHidden(options?)` / `AppWindow.waitForClosed(options?)` | ウインドウが非表示、または閉じられるまで待機します。 |
 | `AppWindow.waitForStableBounds(options?)` | ウインドウ矩形が安定するまで待機します。 |

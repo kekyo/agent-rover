@@ -95,6 +95,8 @@ As shown in the example above, you can send and receive files and launch applica
 - Place the agent application on a remote machine and drive test operations remotely.
 - Launch, discover, operate, and inspect the state of target GUI applications.
   File operations, such as sending and receiving files, are also supported.
+- Capture the screen or an application window as a PNG image, or as an H.264
+  MP4 video on a supported Windows agent.
 - Prebuilt agents are available for Windows (i686/amd64 on XP SP2 or later) and Linux X11 (i686/amd64/armv7l/arm64/riscv64).
 - Agent communication uses a custom TCP protocol.
   Authentication uses a digest handshake, although the protocol messages themselves are not encrypted.
@@ -212,6 +214,8 @@ In code examples, an already connected `RemoteAgent` is referred to as `agent` w
 | `RemoteAgent.monitors()` | Gets the connected session's monitor list, work areas, and scale factors. |
 | `RemoteAgent.cursor()` | Gets the current cursor position and visibility state. |
 | `RemoteAgent.screenshot(options?)` | Captures the whole screen, or a specified rectangle, as a PNG image. |
+| `RemoteAgent.recordVideo(durationMs, outputPath, options?)` | Captures the whole screen, or a specified rectangle, as an H.264 MP4 file. |
+| `RemoteAgent.recordVideo(durationMs, options?)` | Captures video and returns a temporary-file-backed readable stream. |
 
 - Pass the agent `host`, `port`, and, as needed, `authToken` and `timeoutMs` to `connectRemoteAgent()`.
 - If `authToken` is omitted, the `AGENT_ROVER_AUTH_TOKEN` environment variable can also be used.
@@ -255,6 +259,67 @@ try {
 }
 ```
 
+### Video Recording
+
+`recordVideo()` records visible desktop pixels after receiving a duration in
+milliseconds. The default frame rate is 60 FPS and the default quality is 90.
+`fps` accepts an integer from 1 through 240, and `quality` accepts an integer
+from 1 through 100. A quality value of 100 does not make H.264 lossless.
+
+Pass a host-side output path to persist the completed MP4 directly:
+
+```typescript
+const result = await agent.recordVideo(
+  1500,
+  'test-results/screen.mp4',
+  {
+    fps: 60,
+    quality: 90,
+    rect: { x: 100, y: 100, width: 1280, height: 720 },
+  }
+);
+
+console.log(result.path, result.frameCount, result.droppedFrames);
+```
+
+The destination must not already exist. The complete MP4 is first captured on
+the agent and transferred to a temporary file on the host; it is then copied to
+the destination. When no output path is supplied, the result is a
+`CapturedVideoStream` backed by that host-side temporary file. Release it after
+use to delete the temporary file:
+
+```typescript
+import { createWriteStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
+
+const video = await notepadWindow.recordVideo(1500, {
+  fps: 30,
+  quality: 90,
+  tracking: 'followWindow',
+});
+try {
+  await pipeline(video, createWriteStream('test-results/notepad.mp4'));
+} finally {
+  await video.releaseAsync();
+}
+```
+
+For window recording, `tracking` defaults to `followWindow`, which resolves the
+window's current screen position for each frame. Use `initialBounds` to keep the
+capture rectangle fixed at its starting position. The encoded dimensions stay
+fixed at the initial window size: later size changes are cropped or padded with
+black, and odd initial dimensions are padded to even dimensions required by the
+encoder. Recording captures the visible desktop rectangle, so overlapping
+windows can appear in the video.
+
+Video recording is advertised as `agent.recordVideo` and `window.recordVideo`
+only when the native Windows agent can load the required Media Foundation
+components. Encoding also requires a compatible H.264 encoder at runtime. See
+Microsoft's documentation for
+[`MFCreateSinkWriterFromURL`](https://learn.microsoft.com/en-us/windows/win32/api/mfreadwrite/nf-mfreadwrite-mfcreatesinkwriterfromurl),
+[Sink Writer format conversion](https://learn.microsoft.com/en-us/windows/win32/medfound/mf-readwrite-disable-converters),
+and the [Media Foundation H.264 encoder](https://learn.microsoft.com/en-us/windows/win32/medfound/h-264-video-encoder).
+
 ### Window Discovery And Operations
 
 | API | Description |
@@ -270,6 +335,8 @@ try {
 | `AppWindow.children()` / `AppWindow.descendants(options?)` | Gets child windows, or descendant windows. |
 | `AppWindow.findDescendants(query)` | Searches descendant windows by criteria. |
 | `AppWindow.screenshot()` | Captures the window area as a PNG image. |
+| `AppWindow.recordVideo(durationMs, outputPath, options?)` | Captures the window area as a persisted H.264 MP4 file. |
+| `AppWindow.recordVideo(durationMs, options?)` | Captures the window area as a temporary-file-backed readable stream. |
 | `AppWindow.waitForVisible(options?)` | Waits until the window becomes visible. |
 | `AppWindow.waitForHidden(options?)` / `AppWindow.waitForClosed(options?)` | Waits until the window becomes hidden, or until it closes. |
 | `AppWindow.waitForStableBounds(options?)` | Waits until the window rectangle stabilizes. |
