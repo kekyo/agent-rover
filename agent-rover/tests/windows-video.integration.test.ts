@@ -198,12 +198,14 @@ describe('Windows video capture integration', () => {
         );
         const probeResult = JSON.parse(probe.stdout) as {
           readonly streams?: readonly {
+            readonly avg_frame_rate?: string;
             readonly codec_name?: string;
             readonly height?: number;
             readonly width?: number;
           }[];
         };
         expect(probeResult.streams?.[0]).toMatchObject({
+          avg_frame_rate: '60/1',
           codec_name: 'h264',
           height: initialBounds.height + (initialBounds.height % 2),
           width: initialBounds.width + (initialBounds.width % 2),

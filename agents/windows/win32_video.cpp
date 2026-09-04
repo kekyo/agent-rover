@@ -16,7 +16,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <limits>
 #include <string>
 #include <vector>
 
@@ -171,6 +170,8 @@ static uint32_t VideoBitrate(
     const VideoFrameSize& size,
     uint32_t fps,
     uint32_t quality) {
+  // A stable quality abstraction is mapped to average bitrate because the
+  // codec-specific quality controls vary between Media Foundation encoders.
   const double bits_per_pixel = 0.04 + static_cast<double>(quality) * 0.0026;
   const double calculated = static_cast<double>(size.width) * size.height * fps *
                             bits_per_pixel;
@@ -628,7 +629,7 @@ bool RecordVideoToFile(
   *result = {};
   const VideoFrameSize frame_size = CreateVideoFrameSize(request.initial_bounds);
   if (frame_size.width == 0 || frame_size.height == 0 || request.fps == 0 ||
-      request.quality == 0 || request.quality > 100 ||
+      request.fps > 240 || request.quality == 0 || request.quality > 100 ||
       request.duration_ms == 0) {
     *error = "Video capture parameters are invalid.";
     return false;
@@ -710,6 +711,8 @@ bool RecordVideoToFile(
     const uint64_t elapsed_frame =
         ((now - started) * request.fps) / frequency;
     if (elapsed_frame > frame_index) {
+      // Preserve the real-time timeline instead of emitting a burst of stale
+      // frames after capture or encoding misses one or more deadlines.
       const uint64_t skipped =
           std::min<uint64_t>(elapsed_frame - frame_index,
                              target_frames - frame_index);

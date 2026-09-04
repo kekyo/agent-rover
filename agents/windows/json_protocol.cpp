@@ -1163,7 +1163,9 @@ std::string HandleJsonRequest(
     }
     std::string rect_object;
     if (FindJsonObjectField(payload, "rect", &rect_object)) {
-      if (!ReadRectField(payload, "rect", &request.initial_bounds)) {
+      if (!ReadRectField(payload, "rect", &request.initial_bounds) ||
+          request.initial_bounds.width <= 0 ||
+          request.initial_bounds.height <= 0) {
         return FailureResponseJson(id, "agent.recordVideo rect is invalid.");
       }
     } else if (!GetScreenBounds(&request.initial_bounds, &error)) {

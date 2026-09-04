@@ -50,7 +50,7 @@ struct VideoCaptureResult {
   WindowRect initial_bounds;
   /** Window or screen bounds at recording end. */
   WindowRect final_bounds;
-  /** Whether any capture frame was clipped. */
+  /** Whether any frame was clipped by the screen or fixed encoded bounds. */
   bool clipped;
 };
 

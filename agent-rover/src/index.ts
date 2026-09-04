@@ -721,7 +721,7 @@ export interface CapturedVideoMetadata {
   readonly initialBounds: ScreenRect;
   /** Capture bounds at the end of recording. */
   readonly finalBounds: ScreenRect;
-  /** Whether at least one frame was clipped by the virtual screen. */
+  /** Whether any frame was clipped by the screen or fixed encoded bounds. */
   readonly clipped: boolean;
 }
 
