@@ -177,8 +177,9 @@ describe.concurrent('remote agent connection api', () => {
     }
   });
 
-  it.sequential(
+  it(
     'uses AGENT_ROVER_AUTH_TOKEN when no explicit tcp token is provided',
+    { concurrent: false },
     async () => {
       const original = process.env.AGENT_ROVER_AUTH_TOKEN;
       process.env.AGENT_ROVER_AUTH_TOKEN = 'env-token';
@@ -208,8 +209,9 @@ describe.concurrent('remote agent connection api', () => {
     }
   );
 
-  it.sequential(
+  it(
     'prefers the explicit tcp token over AGENT_ROVER_AUTH_TOKEN',
+    { concurrent: false },
     async () => {
       const original = process.env.AGENT_ROVER_AUTH_TOKEN;
       process.env.AGENT_ROVER_AUTH_TOKEN = 'wrong-env-token';
