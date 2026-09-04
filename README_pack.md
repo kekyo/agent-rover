@@ -90,6 +90,8 @@ As shown in the example above, you can send and receive files and launch applica
 - Place the agent application on a remote machine and drive test operations remotely.
 - Launch, discover, operate, and inspect the state of target GUI applications.
   File operations, such as sending and receiving files, are also supported.
+- Capture the screen or an application window as a PNG image, or as an H.264
+  MP4 video on a supported Windows agent.
 - Prebuilt agents are available for Windows (i686/amd64 on XP SP2 or later) and Linux X11 (i686/amd64/armv7l/arm64/riscv64).
 - Agent communication uses a custom TCP protocol.
   Authentication uses a digest handshake, although the protocol messages themselves are not encrypted.
@@ -134,6 +136,11 @@ agent-rover agent event: 2026-07-07T12:35:21Z connection #1 disconnected: peer r
 - The default TCP port is 39397. You need to open it in the OS firewall.
 - The Windows agent must be started from the user's interactive desktop so it can operate the desktop environment.
   This is a subtle issue, but launching a process from a Windows service restricts the desktop environment, so running the Windows agent as a service is not recommended.
+- H.264 MP4 recording is available when the Windows agent advertises
+  `agent.recordVideo` and `window.recordVideo`. It requires the Windows
+  [Media Foundation Sink Writer](https://learn.microsoft.com/en-us/windows/win32/api/mfreadwrite/nf-mfreadwrite-mfcreatesinkwriterfromurl)
+  and a compatible
+  [H.264 encoder](https://learn.microsoft.com/en-us/windows/win32/medfound/h-264-video-encoder).
 
 Then install agent-rover in your npm project:
 

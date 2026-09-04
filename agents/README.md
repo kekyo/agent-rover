@@ -250,6 +250,7 @@ Immediately after authentication, the agent must send:
         "agent.cursor",
         "agent.monitors",
         "agent.screenshot",
+        "agent.recordVideo",
         "agent.windows",
         "window.children",
         "applications.launch",
@@ -259,6 +260,7 @@ Immediately after authentication, the agent must send:
         "window.setBounds",
         "window.show",
         "window.screenshot",
+        "window.recordVideo",
         "window.snapshot",
         "input.perform",
         "file.read",
@@ -302,7 +304,9 @@ disable public APIs; unsupported methods fail only when called.
 Large binary values are sent through `Binary` frames. This is used for:
 
 - Agent to driver: `agent.screenshot`
+- Agent to driver: `agent.recordVideo` / `video.result`
 - Agent to driver: `window.screenshot`
+- Agent to driver: `window.recordVideo` / `video.result`
 - Agent to driver: `file.read`
 - Driver to agent: `file.write`
 
@@ -347,13 +351,16 @@ Receiver rules:
 - `contentType` should remain the same for every chunk in a transfer.
 - A zero-length payload is represented as one final chunk with empty raw data,
   `totalBytes: 0`, and the SHA-256 of an empty byte string.
-- When the final chunk arrives, concatenate all raw chunk data and verify both
-  `totalBytes` and `sha256`.
+- When the final chunk arrives, logically reassemble the ordered raw data and
+  verify both `totalBytes` and `sha256`. Receivers may write chunks directly to
+  disk instead of retaining the complete payload in memory; the TypeScript
+  driver does this for `video/mp4` transfers.
 
-For downloads, the agent sends binary chunks and then returns a JSON response
-whose result contains a transfer reference. The current driver also works if the
-JSON response arrives before the chunks, as long as the chunks arrive before the
-request timeout expires.
+For downloads, the agent sends binary chunks and a JSON response whose result
+contains a transfer reference. The current driver accepts either order. The
+native agent sends screenshot and file chunks before the response, but sends
+the video response before streaming its chunks from disk. The transfer must
+finish before the request timeout expires.
 
 For uploads, the current driver sends all binary chunks first, then sends the
 JSON request referencing that transfer. An agent should store completed
@@ -465,6 +472,34 @@ Screenshot methods return metadata and send an `image/png` binary transfer:
 The driver also accepts `imageBase64` in screenshot results, but the current
 native TCP agent uses binary transfers. Prefer binary transfers for custom TCP
 agents.
+
+### Video Result
+
+`video.result` returns capture metadata and a `video/mp4` binary transfer
+reference:
+
+```json
+{
+  "transferId": "req-5-video-mp4",
+  "contentType": "video/mp4",
+  "codec": "h264",
+  "totalBytes": 245760,
+  "sha256": "lowercase-hex-sha-256",
+  "durationMs": 1500,
+  "fps": 60,
+  "frameCount": 90,
+  "droppedFrames": 0,
+  "initialBounds": { "x": 10, "y": 20, "width": 640, "height": 480 },
+  "finalBounds": { "x": 90, "y": 80, "width": 640, "height": 480 },
+  "clipped": false
+}
+```
+
+`frameCount` is the number of samples written to the encoder.
+`droppedFrames` counts capture deadlines skipped because capture or encoding
+could not keep up. `initialBounds` and `finalBounds` describe the target at the
+start and end of recording; encoded dimensions remain fixed from the initial
+bounds.
 
 ### File Stat
 
@@ -587,6 +622,33 @@ Params:
 Result: `Screenshot Result`.
 
 Send the PNG image as an `image/png` binary transfer.
+
+### `agent.recordVideo`
+
+Params:
+
+```json
+{
+  "durationMs": 1500,
+  "fps": 60,
+  "quality": 90,
+  "rect": { "x": 0, "y": 0, "width": 1024, "height": 768 }
+}
+```
+
+`rect` is optional. When omitted, record the full virtual screen. `durationMs`
+must be a positive uint32. `fps` must be from 1 through 240 and `quality` must
+be from 1 through 100.
+
+Start recording asynchronously and return:
+
+```json
+{ "recordingId": "req-5-video" }
+```
+
+Only one recording is retained per connection until `video.result` consumes
+it. The native Windows agent advertises this method only when the Media
+Foundation entry points it requires are available.
 
 ### `agent.windows`
 
@@ -711,6 +773,41 @@ Params:
 Result: `Screenshot Result`.
 
 Send the PNG image as an `image/png` binary transfer.
+
+### `window.recordVideo`
+
+Params:
+
+```json
+{
+  "windowId": "0x1001",
+  "durationMs": 1500,
+  "fps": 60,
+  "quality": 90,
+  "tracking": "followWindow"
+}
+```
+
+`tracking` must be `followWindow` or `initialBounds`. In `followWindow` mode,
+resolve the current window rectangle for every frame. In `initialBounds` mode,
+keep capturing the rectangle resolved when recording began. Return the same
+asynchronous `recordingId` result as `agent.recordVideo`.
+
+### `video.result`
+
+Params:
+
+```json
+{ "recordingId": "req-5-video" }
+```
+
+Result: `Video Result`.
+
+Wait for the requested recording if it has not finished, finalize the H.264
+MP4, and return its metadata. Send the MP4 through `video/mp4` binary chunks
+without requiring the whole file to be held in memory. The native Windows
+agent sends the JSON response before these chunks; the driver accepts download
+chunks either before or after the response.
 
 ### `input.perform`
 
@@ -1201,8 +1298,8 @@ when no event log query is supplied.
 5. Implement binary transfer chunk encode/decode, contiguous sequence
    validation, `totalBytes`, and `sha256` verification.
 6. Store driver uploads by `transferId` until `file.write` consumes them.
-7. For screenshot and file download methods, send binary chunks and return a
-   transfer reference in the JSON result.
+7. For screenshot, video, and file download methods, send binary chunks and
+    return a transfer reference in the JSON result.
 8. Implement every RPC method that your tests will call. The driver does not
    call unsupported methods automatically after handshake.
 9. Respond to `Ping` with `Pong` and handle `Close` by closing the socket.

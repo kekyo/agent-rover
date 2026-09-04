@@ -585,6 +585,33 @@ export interface AppWindow extends AppWindowSnapshot {
   ) => Promise<readonly AppWindow[]>;
   /** Captures this window bounds as a PNG screenshot. */
   readonly screenshot: () => Promise<AppWindowScreenshot>;
+  /** Captures this window as an H.264 MP4 video. */
+  readonly recordVideo: {
+    /**
+     * Captures video and persists it to a host-side path.
+     *
+     * @param durationMs Capture duration in milliseconds.
+     * @param outputPath Destination path on the host running this driver.
+     * @param options Video capture options.
+     * @return Metadata for the persisted MP4 file.
+     */
+    (
+      durationMs: number,
+      outputPath: string,
+      options?: AppWindowVideoCaptureOptions
+    ): Promise<CapturedVideoResult>;
+    /**
+     * Captures video into a host-side temporary file.
+     *
+     * @param durationMs Capture duration in milliseconds.
+     * @param options Video capture options.
+     * @return A readable stream that deletes its temporary file when released.
+     */
+    (
+      durationMs: number,
+      options?: AppWindowVideoCaptureOptions
+    ): Promise<CapturedVideoStream>;
+  };
   /** Sets keyboard focus to this window when the platform allows it. */
   readonly focus: () => Promise<AppWindow>;
   /** Refreshes this window snapshot. */
@@ -640,6 +667,73 @@ export interface RemoteScreenshot {
   /** Whether capture bounds were clipped by the platform. */
   readonly clipped: boolean;
 }
+
+/** Window position behavior used while recording video. */
+export type WindowVideoTracking = 'followWindow' | 'initialBounds';
+
+/** Common options for recording an H.264 MP4 video. */
+export interface VideoCaptureOptions {
+  /**
+   * Encoded frames per second.
+   *
+   * @remarks Default is 60.
+   */
+  readonly fps?: number;
+  /**
+   * Encoder quality from 1 through 100.
+   *
+   * @remarks Default is 90. A value of 100 does not make H.264 lossless.
+   */
+  readonly quality?: number;
+}
+
+/** Options for recording an application window. */
+export interface AppWindowVideoCaptureOptions extends VideoCaptureOptions {
+  /**
+   * Whether the capture rectangle follows the window while it moves.
+   *
+   * @remarks Default is `followWindow`.
+   */
+  readonly tracking?: WindowVideoTracking;
+}
+
+/** Options for recording the remote screen. */
+export interface RemoteAgentVideoCaptureOptions extends VideoCaptureOptions {
+  /** Optional fixed screen rectangle to record. */
+  readonly rect?: ScreenRect;
+}
+
+/** Metadata shared by temporary and persisted video capture results. */
+export interface CapturedVideoMetadata {
+  /** MIME type of the captured video. */
+  readonly contentType: 'video/mp4';
+  /** Video codec stored in the MP4 container. */
+  readonly codec: 'h264';
+  /** Actual capture duration in milliseconds. */
+  readonly durationMs: number;
+  /** Nominal encoded frame rate. */
+  readonly fps: number;
+  /** Number of encoded frames. */
+  readonly frameCount: number;
+  /** Number of capture deadlines missed while recording. */
+  readonly droppedFrames: number;
+  /** Capture bounds at the beginning of recording. */
+  readonly initialBounds: ScreenRect;
+  /** Capture bounds at the end of recording. */
+  readonly finalBounds: ScreenRect;
+  /** Whether any frame was clipped by the screen or fixed encoded bounds. */
+  readonly clipped: boolean;
+}
+
+/** Result for a video persisted at a caller-supplied host path. */
+export interface CapturedVideoResult extends CapturedVideoMetadata {
+  /** Absolute path of the persisted host-side MP4 file. */
+  readonly path: string;
+}
+
+/** Temporary-file-backed video stream owned by the caller. */
+export interface CapturedVideoStream
+  extends CapturedVideoMetadata, NodeJS.ReadableStream, AsyncReleaseable {}
 
 /** Remote monitor geometry. */
 export interface RemoteMonitor {
@@ -1043,6 +1137,33 @@ export interface RemoteAgent extends Releaseable {
   readonly screenshot: (
     options?: RemoteAgentScreenshotOptions
   ) => Promise<RemoteScreenshot>;
+  /** Captures the whole screen or a screen rectangle as an H.264 MP4 video. */
+  readonly recordVideo: {
+    /**
+     * Captures video and persists it to a host-side path.
+     *
+     * @param durationMs Capture duration in milliseconds.
+     * @param outputPath Destination path on the host running this driver.
+     * @param options Video capture options.
+     * @return Metadata for the persisted MP4 file.
+     */
+    (
+      durationMs: number,
+      outputPath: string,
+      options?: RemoteAgentVideoCaptureOptions
+    ): Promise<CapturedVideoResult>;
+    /**
+     * Captures video into a host-side temporary file.
+     *
+     * @param durationMs Capture duration in milliseconds.
+     * @param options Video capture options.
+     * @return A readable stream that deletes its temporary file when released.
+     */
+    (
+      durationMs: number,
+      options?: RemoteAgentVideoCaptureOptions
+    ): Promise<CapturedVideoStream>;
+  };
   /** Reads the virtual screen bounds. */
   readonly bounds: () => Promise<ScreenRect>;
   /** Lists monitors in the current screen session. */

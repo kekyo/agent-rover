@@ -6,11 +6,13 @@
 #include "win32_files.h"
 
 #include <windows.h>
+#include <bcrypt.h>
 
 #include <algorithm>
 #include <cstdio>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "binary_codec.h"
 #include "win32_util.h"
@@ -168,6 +170,110 @@ bool ReadFileBytes(
   }
   data->resize(offset);
   CloseHandle(file);
+  return true;
+}
+
+bool HashFileSha256(
+    const std::string& path,
+    uint64_t* total_bytes,
+    std::string* sha256,
+    std::string* error) {
+  const std::wstring wide_path = Utf8ToWide(path);
+  if (wide_path.empty()) {
+    *error = "File path is empty or invalid UTF-8.";
+    return false;
+  }
+  HANDLE file = CreateFileW(
+      wide_path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+      nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    *error = Win32PathError(
+        "CreateFileW for hashing failed.", wide_path, GetLastError());
+    return false;
+  }
+
+  LARGE_INTEGER file_size = {};
+  if (!GetFileSizeEx(file, &file_size) || file_size.QuadPart < 0) {
+    const DWORD error_code = GetLastError();
+    CloseHandle(file);
+    *error = Win32PathError("GetFileSizeEx failed.", wide_path, error_code);
+    return false;
+  }
+
+  BCRYPT_ALG_HANDLE algorithm = nullptr;
+  BCRYPT_HASH_HANDLE hash = nullptr;
+  DWORD object_bytes = 0;
+  DWORD digest_bytes = 0;
+  DWORD received_bytes = 0;
+  NTSTATUS status = BCryptOpenAlgorithmProvider(
+      &algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0);
+  if (BCRYPT_SUCCESS(status)) {
+    status = BCryptGetProperty(
+        algorithm, BCRYPT_OBJECT_LENGTH,
+        reinterpret_cast<PUCHAR>(&object_bytes), sizeof(object_bytes),
+        &received_bytes, 0);
+  }
+  if (BCRYPT_SUCCESS(status)) {
+    status = BCryptGetProperty(
+        algorithm, BCRYPT_HASH_LENGTH,
+        reinterpret_cast<PUCHAR>(&digest_bytes), sizeof(digest_bytes),
+        &received_bytes, 0);
+  }
+  std::vector<unsigned char> hash_object(object_bytes);
+  std::vector<unsigned char> digest(digest_bytes);
+  if (BCRYPT_SUCCESS(status)) {
+    status = BCryptCreateHash(
+        algorithm, &hash, hash_object.data(), object_bytes,
+        nullptr, 0, 0);
+  }
+
+  std::vector<unsigned char> buffer(64 * 1024);
+  bool file_read_succeeded = true;
+  DWORD file_read_error = ERROR_SUCCESS;
+  while (BCRYPT_SUCCESS(status)) {
+    DWORD read = 0;
+    if (!ReadFile(
+            file, buffer.data(), static_cast<DWORD>(buffer.size()),
+            &read, nullptr)) {
+      file_read_succeeded = false;
+      file_read_error = GetLastError();
+      break;
+    }
+    if (read == 0) {
+      break;
+    }
+    status = BCryptHashData(hash, buffer.data(), read, 0);
+  }
+  if (file_read_succeeded && BCRYPT_SUCCESS(status)) {
+    status = BCryptFinishHash(hash, digest.data(), digest_bytes, 0);
+  }
+
+  if (hash != nullptr) {
+    BCryptDestroyHash(hash);
+  }
+  if (algorithm != nullptr) {
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+  }
+  CloseHandle(file);
+  if (!file_read_succeeded) {
+    *error = Win32PathError(
+        "ReadFile for hashing failed.", wide_path, file_read_error);
+    return false;
+  }
+  if (!BCRYPT_SUCCESS(status) || digest_bytes != 32) {
+    *error = "BCrypt SHA-256 file hashing failed.";
+    return false;
+  }
+
+  static const char* digits = "0123456789abcdef";
+  sha256->clear();
+  sha256->reserve(digest.size() * 2);
+  for (const unsigned char byte : digest) {
+    sha256->push_back(digits[(byte >> 4) & 0x0f]);
+    sha256->push_back(digits[byte & 0x0f]);
+  }
+  *total_bytes = static_cast<uint64_t>(file_size.QuadPart);
   return true;
 }
 

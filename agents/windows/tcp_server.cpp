@@ -6,7 +6,9 @@
 #include "tcp_server.h"
 
 #include <winsock2.h>
+#include <windows.h>
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -16,6 +18,8 @@
 #include "binary_transfer.h"
 #include "frame.h"
 #include "json_protocol.h"
+#include "video_recording.h"
+#include "win32_util.h"
 
 namespace agent_rover {
 
@@ -56,6 +60,84 @@ static bool SendBinaryChunk(SOCKET client, const BinaryTransferChunk& chunk) {
   EncodeBinaryTransferChunkPayload(chunk, &payload);
   const Frame frame = {FrameKind::Binary, payload};
   return WriteFrame(client, frame, &error);
+}
+
+static void RemoveOutboundFile(const OutboundFileTransfer& transfer) {
+  const std::wstring path = Utf8ToWide(transfer.path);
+  if (!path.empty()) {
+    DeleteFileW(path.c_str());
+  }
+  const std::wstring directory = Utf8ToWide(transfer.directory);
+  if (!directory.empty()) {
+    RemoveDirectoryW(directory.c_str());
+  }
+}
+
+static bool SendBinaryFile(
+    SOCKET client,
+    const OutboundFileTransfer& transfer,
+    std::string* error) {
+  const std::wstring path = Utf8ToWide(transfer.path);
+  if (path.empty()) {
+    *error = "Recorded video path is empty or invalid UTF-8.";
+    return false;
+  }
+  HANDLE file = CreateFileW(
+      path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    *error = "Unable to open recorded video for transfer.";
+    return false;
+  }
+
+  uint64_t offset = 0;
+  uint32_t sequence = 0;
+  bool succeeded = true;
+  do {
+    const uint64_t remaining = transfer.total_bytes - offset;
+    const DWORD requested = static_cast<DWORD>(
+        std::min<uint64_t>(remaining, 64 * 1024));
+    BinaryTransferChunk chunk = {};
+    chunk.transfer_id = transfer.transfer_id;
+    chunk.sequence = sequence;
+    chunk.content_type = transfer.content_type;
+    chunk.data.assign(requested, 0);
+    DWORD read = 0;
+    if (requested != 0 &&
+        !ReadFile(file, chunk.data.data(), requested, &read, nullptr)) {
+      *error = "Reading recorded video for transfer failed.";
+      succeeded = false;
+      break;
+    }
+    chunk.data.resize(read);
+    offset += read;
+    if (requested != 0 && read == 0) {
+      *error = "Recorded video ended before its announced size.";
+      succeeded = false;
+      break;
+    }
+    chunk.final = offset == transfer.total_bytes;
+    if (chunk.final) {
+      chunk.total_bytes = transfer.total_bytes;
+      chunk.has_total_bytes = true;
+      chunk.sha256 = transfer.sha256;
+      chunk.has_sha256 = true;
+    }
+    if (!SendBinaryChunk(client, chunk)) {
+      *error = "Failed to send recorded video chunk.";
+      succeeded = false;
+      break;
+    }
+    if (sequence == 0xffffffffu && !chunk.final) {
+      *error = "Recorded video requires too many transfer chunks.";
+      succeeded = false;
+      break;
+    }
+    sequence += 1;
+  } while (offset < transfer.total_bytes);
+
+  CloseHandle(file);
+  return succeeded;
 }
 
 static bool SendReadyEvent(SOCKET client) {
@@ -126,6 +208,7 @@ static void HandleFrame(
     SOCKET client,
     const Frame& frame,
     BinaryTransferStore* transfers,
+    VideoRecordingStore* recordings,
     bool* should_close,
     std::string* close_reason) {
   std::string error;
@@ -134,8 +217,9 @@ static void HandleFrame(
     case FrameKind::Json: {
       const std::string request(frame.payload.begin(), frame.payload.end());
       std::vector<BinaryTransferChunk> outbound_chunks;
-      const std::string response =
-          HandleJsonRequest(request, transfers, &outbound_chunks);
+      OutboundFileTransfer outbound_file = {};
+      const std::string response = HandleJsonRequest(
+          request, transfers, recordings, &outbound_chunks, &outbound_file);
       for (const BinaryTransferChunk& chunk : outbound_chunks) {
         if (!SendBinaryChunk(client, chunk)) {
           *should_close = true;
@@ -144,9 +228,21 @@ static void HandleFrame(
         }
       }
       if (!SendJson(client, response)) {
+        if (outbound_file.present) {
+          RemoveOutboundFile(outbound_file);
+        }
         *should_close = true;
         *close_reason = "failed to send JSON response";
         return;
+      }
+      if (outbound_file.present) {
+        const bool sent = SendBinaryFile(client, outbound_file, &error);
+        RemoveOutboundFile(outbound_file);
+        if (!sent) {
+          *should_close = true;
+          *close_reason = error;
+          return;
+        }
       }
       break;
     }
@@ -207,6 +303,7 @@ static void HandleClient(
   PrintAgentLogEvent(
       CreateAgentConnectionStateLogEvent(connection_id, "ready"));
   BinaryTransferStore transfers = {};
+  VideoRecordingStore recordings = {};
 
   for (;;) {
     Frame frame = {};
@@ -214,19 +311,21 @@ static void HandleClient(
     if (!ReadFrame(client, kMaxJsonPayloadBytes, &frame, &error)) {
       PrintAgentLogEvent(CreateAgentConnectionDisconnectedLogEvent(
           connection_id, error));
-      return;
+      break;
     }
 
     bool should_close = false;
     std::string close_reason;
-    HandleFrame(client, frame, &transfers, &should_close, &close_reason);
+    HandleFrame(
+        client, frame, &transfers, &recordings, &should_close, &close_reason);
     if (should_close) {
       PrintAgentLogEvent(CreateAgentConnectionDisconnectedLogEvent(
           connection_id,
           close_reason.empty() ? "connection closed" : close_reason));
-      return;
+      break;
     }
   }
+  CancelVideoRecording(&recordings);
 }
 
 static std::string ClientEndpoint(const sockaddr_in& address) {
