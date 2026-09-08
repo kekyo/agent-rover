@@ -1119,7 +1119,12 @@ Params:
 }
 ```
 
-`recursive` is always sent by the current driver as a boolean.
+`recursive` and `ignoreMissing` are sent as booleans. An absent target fails unless
+`ignoreMissing` is true. Recursive removal does not follow directory reparse points.
+Each RPC performs one attempt; the driver owns the shared removal deadline
+(default 10000 ms) and bounded backoff. `onLockedFile: "fail"` disables retries.
+Failures carry structured OS details and driver retry results; diagnostic text is
+not used to decide whether to retry. Removal never terminates a process.
 
 Result: `null`.
 

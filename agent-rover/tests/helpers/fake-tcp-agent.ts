@@ -1226,10 +1226,22 @@ export const startFakeTcpAgent = async (
             lockedRenameFailures.get(normalizedTo) ?? 0;
           if (remainingLockedFailures > 0) {
             lockedRenameFailures.set(normalizedTo, remainingLockedFailures - 1);
-            sendFailure(
+            sendTcpProtocolMessage(socket, {
               id,
-              `MoveFileExW failed. path=${normalizedTo} win32Error=32`
-            );
+              kind: 'response',
+              ok: false,
+              error: {
+                code: 'OPERATION_FAILED',
+                message: 'The target is locked.',
+                details: {
+                  operation: method,
+                  nativeOperation: 'MoveFileExW',
+                  path: normalizedTo,
+                  osCode: 32,
+                  reason: 'sharingViolation',
+                },
+              },
+            });
             return;
           }
           const file = files.get(normalizedFrom);
@@ -1268,6 +1280,29 @@ export const startFakeTcpAgent = async (
             return;
           }
           const normalized = normalizePath(path);
+          if (
+            !files.has(normalized) &&
+            !directories.has(normalized) &&
+            recordParams.ignoreMissing !== true
+          ) {
+            sendTcpProtocolMessage(socket, {
+              id,
+              kind: 'response',
+              ok: false,
+              error: {
+                code: 'OPERATION_FAILED',
+                message: 'The target is absent.',
+                details: {
+                  operation: method,
+                  nativeOperation: 'GetFileAttributesW',
+                  path,
+                  osCode: 2,
+                  reason: 'notFound',
+                },
+              },
+            });
+            return;
+          }
           if (files.delete(normalized)) {
             sendSuccess(id, null);
             return;

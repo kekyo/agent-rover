@@ -1526,8 +1526,11 @@ std::string HandleJsonRequest(
     if (!FindJsonStringField(payload, "path", &path)) {
       return FailureResponseJson(id, "file.exists requires path.");
     }
+    bool exists = false;
+    OperationError error;
+    if (!CheckPathExists(path, &exists, &error)) return OperationFailureJson(id, method, error);
     const std::string output =
-        std::string("{\"exists\":") + (PathExists(path) ? "true}" : "false}");
+        std::string("{\"exists\":") + (exists ? "true}" : "false}");
     return SuccessResponseJson(id, output);
   }
   if (method == "file.stat") {
@@ -1587,7 +1590,9 @@ std::string HandleJsonRequest(
     }
     FindJsonBoolField(payload, "recursive", &recursive);
     OperationError error;
-    if (!RemovePath(path, recursive, &error)) {
+    bool ignore_missing = false;
+    FindJsonBoolField(payload, "ignoreMissing", &ignore_missing);
+    if (!RemovePath(path, recursive, ignore_missing, &error)) {
       return OperationFailureJson(id, method, error);
     }
     return SuccessResponseJson(id, "null");

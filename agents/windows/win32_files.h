@@ -159,10 +159,18 @@ bool ReadDirectoryManifest(
  *
  * @param path UTF-8 path on the agent machine.
  * @param recursive Whether directory contents may be removed recursively.
+ * @param ignore_missing Whether an absent target counts as success.
  * @param error Receives a structured diagnostic on failure.
  * @return true on success.
  */
-bool RemovePath(const std::string& path, bool recursive, OperationError* error);
+bool RemovePath(const std::string& path, bool recursive, bool ignore_missing, OperationError* error);
+/** Checks existence without confusing access errors with an absent entry.
+ * @param path Target UTF-8 path.
+ * @param exists Receives whether the entry exists.
+ * @param error Receives a structured diagnostic on failure.
+ * @return true if existence was determined.
+ */
+bool CheckPathExists(const std::string& path, bool* exists, OperationError* error);
 /**
  * Renames or moves a file or directory.
  *

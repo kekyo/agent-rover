@@ -485,25 +485,38 @@ bool ReadDirectoryManifest(
   return ReadDirectoryManifestRecursive(wide_path, L"", entries, error);
 }
 
-bool RemovePath(const std::string& path, bool recursive, OperationError* error) {
+bool CheckPathExists(const std::string& path, bool* exists, OperationError* error) {
+  const auto attributes = GetFileAttributesW(Utf8ToWide(path).c_str());
+  if (attributes != INVALID_FILE_ATTRIBUTES) { *exists = true; return true; }
+  const auto code = GetLastError();
+  if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) { *exists = false; return true; }
+  *error = MakeOperationError("GetFileAttributesW", path, code);
+  return false;
+}
+
+bool RemovePath(const std::string& path, bool recursive, bool ignore_missing, OperationError* error) {
   const std::wstring wide_path = Utf8ToWide(path);
   if (IsDangerousRemovePath(wide_path)) {
     *error = "Refusing to remove dangerous path.";
     return false;
   }
-  FileStat stat = {};
-  if (!StatPath(path, &stat, error)) {
+  const auto attributes = GetFileAttributesW(wide_path.c_str());
+  if (attributes == INVALID_FILE_ATTRIBUTES) {
+    const auto code = GetLastError();
+    if (ignore_missing && (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND)) return true;
+    *error = MakeOperationError("GetFileAttributesW", path, code);
     return false;
   }
-  if (stat.type == "directory") {
-    if (recursive) {
+  if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+    // Remove reparse points themselves without traversing their targets.
+    if (recursive && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
       std::vector<DirectoryEntry> entries;
       if (!ReadDirectoryEntries(path, &entries, error)) {
         return false;
       }
       for (const DirectoryEntry& entry : entries) {
         if (!RemovePath(
-                WideToUtf8(JoinPath(wide_path, Utf8ToWide(entry.name))), true,
+                WideToUtf8(JoinPath(wide_path, Utf8ToWide(entry.name))), true, true,
                 error)) {
           return false;
         }
@@ -513,14 +526,15 @@ bool RemovePath(const std::string& path, bool recursive, OperationError* error) 
       *error = MakeOperationError("RemoveDirectoryW", WideToUtf8(wide_path), GetLastError());
       return false;
     }
-    return true;
-  }
-  if (!DeleteFileW(wide_path.c_str())) {
+  } else if (!DeleteFileW(wide_path.c_str())) {
     *error = MakeOperationError("DeleteFileW", path, GetLastError());
     const auto attributes = GetFileAttributesW(wide_path.c_str());
     if (error->os_code == ERROR_ACCESS_DENIED && attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_READONLY) != 0) error->reason = "readOnly";
     return false;
   }
+  bool exists = false;
+  if (!CheckPathExists(path, &exists, error)) return false;
+  if (exists) { *error = MakeOperationError("RemovePath", path, ERROR_BUSY); return false; }
   return true;
 }
 

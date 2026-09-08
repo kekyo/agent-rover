@@ -946,6 +946,12 @@ export interface RemoteMkdirOptions {
 export interface RemoteRemoveOptions {
   /** Whether directory contents should be removed recursively. */
   readonly recursive?: boolean;
+  /** Transient failure policy. Defaults to retry; never terminates processes. */
+  readonly onLockedFile?: 'fail' | 'retry';
+  /** Deadline for the entire removal in milliseconds. Defaults to 10000; zero tries once. */
+  readonly timeoutMs?: number;
+  /** Whether an already absent target counts as success. Defaults to false. */
+  readonly ignoreMissing?: boolean;
 }
 
 /** Event log severity label. */

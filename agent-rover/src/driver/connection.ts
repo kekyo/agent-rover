@@ -62,6 +62,7 @@ import type {
   RemoteDirectorySyncOptions,
   RemoteDirectorySyncResult,
   RemoteFileStat,
+  RemoteRemoveOptions,
   RemoteFileType,
   RemoteInteractionSession,
   RemoteInteractionSessionOptions,
@@ -87,6 +88,7 @@ import type {
 import { resolveAuthToken } from '../auth';
 import { waitForResult } from '../wait';
 import {
+  type ResourceDeadline,
   createResourceDeadline,
   operationDetails,
   retryResourceOperation,
@@ -188,8 +190,6 @@ const defaultTimeoutMs = 30000;
 const defaultPasteRestoreDelayMs = 500;
 const binaryTransferChunkSize = 64 * 1024;
 const maxRecentDiagnosticsOperations = 100;
-const lockedFileRetryAttempts = 5;
-const lockedFileRetryDelayMs = 100;
 
 const sha256Hex = (data: Buffer): string =>
   createHash('sha256').update(data).digest('hex');
@@ -371,19 +371,17 @@ const buildLocalDirectoryManifest = async (
   return entries.sort((left, right) => left.path.localeCompare(right.path));
 };
 
-const isLockedFileError = (error: unknown): boolean => {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-  const message = error.message.toLowerCase();
+const isTransientFileFailure = (error: unknown): boolean => {
+  const reason = operationDetails(error)?.reason;
   return (
-    message.includes('win32error=32') ||
-    message.includes('win32error=33') ||
-    message.includes('win32error=5') ||
-    message.includes('sharing violation') ||
-    message.includes('lock violation') ||
-    message.includes('access is denied') ||
-    message.includes('access denied')
+    reason !== undefined &&
+    [
+      'sharingViolation',
+      'lockViolation',
+      'accessDenied',
+      'directoryNotEmpty',
+      'busy',
+    ].includes(reason)
   );
 };
 
@@ -2729,12 +2727,38 @@ export const connectRemoteAgent = async (
 
   const removeRemotePath = async (
     path: string,
-    recursive: boolean
+    recursive: boolean,
+    ignoreMissing: boolean
   ): Promise<void> => {
     await requestJson('file.remove', {
       path,
       recursive,
+      ignoreMissing,
     });
+  };
+
+  const removeWithDeadline = async (
+    path: string,
+    options: RemoteRemoveOptions,
+    deadline: ResourceDeadline
+  ): Promise<void> => {
+    const policy = options.onLockedFile ?? 'retry';
+    if (policy !== 'fail' && policy !== 'retry')
+      throw createRemoteAgentError(
+        'INVALID_ARGUMENT',
+        'onLockedFile must be fail or retry.'
+      );
+    await retryResourceOperation(
+      deadline,
+      (error) => policy === 'retry' && isTransientFileFailure(error),
+      async () => {
+        await removeRemotePath(
+          path,
+          options.recursive ?? false,
+          options.ignoreMissing ?? false
+        );
+      }
+    );
   };
 
   const renameRemotePath = async (from: string, to: string): Promise<void> => {
@@ -2774,30 +2798,25 @@ export const connectRemoteAgent = async (
     operation: () => Promise<T>
   ): Promise<T> => {
     let killedProcesses = false;
-    for (let attempt = 0; attempt < lockedFileRetryAttempts; attempt += 1) {
-      try {
-        return await operation();
-      } catch (error) {
-        if (
-          retryOptions.policy === 'fail' ||
-          !isLockedFileError(error) ||
-          attempt === lockedFileRetryAttempts - 1
-        ) {
+    return await retryResourceOperation(
+      createResourceDeadline(undefined),
+      (error) =>
+        retryOptions.policy !== 'fail' && isTransientFileFailure(error),
+      async () => {
+        try {
+          return await operation();
+        } catch (error) {
+          if (
+            retryOptions.policy === 'killRelatedProcessesAndRetry' &&
+            !killedProcesses &&
+            isTransientFileFailure(error)
+          ) {
+            await killRelatedProcesses(retryOptions.relatedProcessPaths);
+            killedProcesses = true;
+          }
           throw error;
         }
-        if (
-          retryOptions.policy === 'killRelatedProcessesAndRetry' &&
-          !killedProcesses
-        ) {
-          await killRelatedProcesses(retryOptions.relatedProcessPaths);
-          killedProcesses = true;
-        }
-        await waitForDelay(lockedFileRetryDelayMs);
       }
-    }
-    throw createRemoteAgentError(
-      'PROTOCOL_ERROR',
-      'Locked file retry exhausted.'
     );
   };
 
@@ -2830,7 +2849,8 @@ export const connectRemoteAgent = async (
     await withLockedFileRetry(retryOptions, async () => {
       await removeRemotePath(
         joinRemotePath(remoteRoot, entry.path),
-        entry.type === 'directory'
+        entry.type === 'directory',
+        true
       );
     });
   };
@@ -3554,7 +3574,11 @@ export const connectRemoteAgent = async (
           treeReleased = true;
         }
         if (options.tempDirectory !== undefined)
-          await removeRemotePath(options.tempDirectory, true);
+          await removeWithDeadline(
+            options.tempDirectory,
+            { recursive: true, ignoreMissing: true },
+            deadline
+          );
         released = true;
       };
       releasing = attempt();
@@ -3844,7 +3868,11 @@ export const connectRemoteAgent = async (
           })
         ),
       remove: async (path, options): Promise<void> => {
-        await removeRemotePath(path, options?.recursive ?? false);
+        await removeWithDeadline(
+          path,
+          options ?? {},
+          createResourceDeadline(options?.timeoutMs)
+        );
       },
       rename: async (from, to): Promise<void> => {
         await renameRemotePath(from, to);

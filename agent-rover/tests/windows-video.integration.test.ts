@@ -416,6 +416,60 @@ describe('Windows cleanup integration', () => {
           expect(await empty.stdoutText()).toBe('');
           expect(await empty.stderrText()).toBe('');
           await empty.releaseAsync();
+          const removalRoot = `${root}/removal`;
+          await agent.files.mkdir(removalRoot);
+          await agent.files.writeFile(`${removalRoot}/a.txt`, Buffer.from('a'));
+          await agent.files.writeFile(
+            `${removalRoot}/locked.txt`,
+            Buffer.from('retained')
+          );
+          const lockReady = `${root}/lock.ready`;
+          const lockEvent = `Local\\agent-rover-${randomBytes(12).toString('hex')}`;
+          const holder = await agent.processes.launchManaged({
+            path: `${root}/helper.exe`,
+            arguments: [
+              'hold',
+              `${removalRoot}/locked.txt`,
+              lockReady,
+              lockEvent,
+            ],
+            createNoWindow: true,
+          });
+          let lockSignaled = false;
+          try {
+            await waitForResult(async () => {
+              expect(await activeAgent.files.exists(lockReady)).toBe(true);
+            });
+            const immediate = { recursive: false, timeoutMs: 0 };
+            await expect(
+              agent.files.remove(`${removalRoot}/locked.txt`, immediate)
+            ).rejects.toMatchObject({
+              details: { osCode: 32, attempts: 1, timedOut: true },
+            });
+            const deleting = (async () => {
+              try {
+                await activeAgent.files.remove(removalRoot, {
+                  recursive: true,
+                });
+                return { removed: true };
+              } catch (error) {
+                return { error };
+              }
+            })();
+            await agent.files.stat(lockReady);
+            await command(['signal', lockEvent]);
+            lockSignaled = true;
+            expect(await deleting).toEqual({ removed: true });
+            expect(await agent.files.exists(removalRoot)).toBe(false);
+          } finally {
+            if (!lockSignaled) await command(['signal', lockEvent]);
+            await holder.releaseAsync();
+          }
+          const ignore = { recursive: false, ignoreMissing: true };
+          await agent.files.remove(`${root}/already-removed.txt`, ignore);
+          await expect(
+            agent.files.remove(`${root}/already-removed.txt`)
+          ).rejects.toMatchObject({ details: { reason: 'notFound' } });
           const ready = `${root}/no-kill.ready`;
           const event = `Local\\agent-rover-${randomBytes(12).toString('hex')}`;
           const noKill = await agent.processes.launchManaged({
