@@ -705,6 +705,65 @@ await agent.files.remove(remoteDirectory, {
 });
 ```
 
+### Process Cleanup And File Removal
+
+`await process.releaseAsync({ timeoutMs: 10000 })` waits for the managed process
+tree to exit, closes its capture resources, and removes its internal output
+directory. Concurrent release calls share the work. A failed call keeps its
+unfinished state so you can call it again; a successful release is idempotent.
+New process operations are rejected once release starts. `Symbol.asyncDispose`
+uses the same operation with the default deadline.
+
+With `killTreeOnRelease: false`, release does not terminate the process. Without
+capture it closes monitoring resources immediately. With capture it waits for
+the writers to finish and fails if the deadline expires. After stopping the
+process yourself, call release again. During execution, `stdoutText()` and
+`stderrText()` return snapshots. After the root exits they wait for managed
+descendants and return complete output, including the tail. Both accept
+`{ timeoutMs }`. Release waits for reads already in progress.
+
+`files.remove(path, options)` accepts these options:
+
+| Option | Default | Behavior |
+| :-- | :-- | :-- |
+| `recursive` | `false` | Remove directory contents. |
+| `onLockedFile` | `'retry'` | Retry transient conflicts; `'fail'` makes one attempt. |
+| `timeoutMs` | `10000` | One deadline for the entire removal; `0` makes one attempt. |
+| `ignoreMissing` | `false` | Accept an already absent target when `true`. |
+| `onReadOnly` | `'fail'` | `'clear'` permits clearing the read-only bit. |
+| `onPermissionDenied` | `'fail'` | `'grantDelete'` permits adding current-user removal access. |
+
+Internal capture directories created and registered by the agent use attribute
+and permission repair automatically. User paths, including `files.mkdtemp`
+results, require the explicit options above. Repair is limited to local absolute
+paths. It does not traverse reparse points, modify multiply linked files, replace
+the owner, or enable privileges. DACLs containing deny ACEs are refused.
+These restrictions do not guarantee that every locked or inaccessible file can
+be removed. The removal contract concerns the requested directory entry, not
+other hard links or physical storage reclamation.
+
+Failed deletion restores changed attributes and ACLs on surviving original
+objects. Files already deleted by a recursive attempt stay deleted. Errors have
+`code: 'OPERATION_FAILED'` and `details` containing the operation, actual failing
+path, OS code and reason. Cleanup failures also report attempts, elapsed time and
+deadline exhaustion; `details.repairs` records repairs and restoration failures.
+Restoration failure stops automatic retries. Use these fields rather than parsing
+the diagnostic message. Deadlines bound retries, not an OS call that stops responding.
+
+`files.remove` never discovers or terminates processes. The existing explicit
+`syncDirectory` policy `killRelatedProcessesAndRetry` remains separate.
+
+```typescript
+await process.waitForExit();
+const output = await process.stdoutText();
+await process.releaseAsync();
+await agent.files.remove(remoteDirectory, {
+  recursive: true,
+  timeoutMs: 10000,
+  ignoreMissing: true,
+});
+```
+
 ### Image Comparison, OCR, And Wait Helpers
 
 | API | Description |

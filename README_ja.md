@@ -692,6 +692,62 @@ await agent.files.remove(remoteDirectory, {
 });
 ```
 
+### プロセスの解放とファイル削除
+
+`await process.releaseAsync({ timeoutMs: 10000 })` は管理対象のプロセス木の終了、
+captureリソースの解放、内部出力ディレクトリの削除を確認して完了します。
+同時に呼び出した解放は処理を共有します。失敗後は未完了の状態を保持するため、
+再度呼び出して残りの処理を完了できます。成功後の再呼出しは何もしません。
+解放開始後の新しいプロセス操作は拒否されます。
+`Symbol.asyncDispose` も既定の期限で同じ解放処理を行います。
+
+`killTreeOnRelease: false` ではプロセスを終了しません。captureなしなら監視リソースを
+直ちに解放し、captureありなら書込み終了を待ち、期限を超えると失敗します。
+利用者がプロセスを終了させてから再度解放してください。
+実行中の `stdoutText()` / `stderrText()` はその時点の出力を返します。
+ルート終了後は管理対象の子孫と書込み終了を待ち、末尾を含む出力を返します。
+どちらも `{ timeoutMs }` を指定できます。解放処理は既に開始した読取りの完了を待ちます。
+
+`files.remove(path, options)` には次を指定できます。
+
+| オプション | 既定値 | 動作 |
+| :-- | :-- | :-- |
+| `recursive` | `false` | ディレクトリ内も削除します。 |
+| `onLockedFile` | `'retry'` | 一時的な競合を再試行します。`'fail'` では1回だけ試します。 |
+| `timeoutMs` | `10000` | 削除全体で共有する期限です。`0` では1回だけ試します。 |
+| `ignoreMissing` | `false` | `true` では対象が既に存在しない場合も成功にします。 |
+| `onReadOnly` | `'fail'` | `'clear'` でread-onlyビットの解除を許可します。 |
+| `onPermissionDenied` | `'fail'` | `'grantDelete'` で実行ユーザーの削除用権限の追加を許可します。 |
+
+agentが内部で作成・登録したcapture領域では属性・権限を自動対処します。
+`files.mkdtemp` の結果を含む利用者のパスでは、上記オプションの明示指定が必要です。
+修復対象はローカルの絶対パスに限定します。reparse pointをたどる修復や、複数の
+ハードリンクを持つファイルの変更、所有者の置換、特権の有効化は行いません。
+拒否ACEを含むDACLは修復を拒否します。すべてのロックや権限不足を解消できるわけではありません。
+削除の契約は指定した名前の除去であり、別のハードリンクの削除や記憶領域の回収までは保証しません。
+
+削除に失敗すると、残存する元の対象の属性・ACLを復元します。
+再帰処理で既に削除したファイルは復元しません。
+エラーの `code` は `'OPERATION_FAILED'` で、`details` に操作、実際の失敗パス、
+OSコード、原因分類を含みます。cleanupでは試行回数、経過時間、期限切れも報告します。
+`details.repairs` で属性・権限の対処結果と復元失敗を確認できます。
+復元に失敗した場合は自動再試行を停止します。メッセージの文字列解析は不要です。
+期限は再試行の上限であり、応答しないOS呼出しを強制終了するものではありません。
+
+`files.remove` はプロセスの探索・終了を行いません。既存の `syncDirectory` で
+明示指定できる `killRelatedProcessesAndRetry` とは別の方針です。
+
+```typescript
+await process.waitForExit();
+const output = await process.stdoutText();
+await process.releaseAsync();
+await agent.files.remove(remoteDirectory, {
+  recursive: true,
+  timeoutMs: 10000,
+  ignoreMissing: true,
+});
+```
+
 ### 画像比較、OCR、待機ヘルパー
 
 | API | 内容 |
