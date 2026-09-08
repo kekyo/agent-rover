@@ -29,7 +29,7 @@ static bool DirectoryExists(const std::wstring& path) {
          (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
-static bool CreateOneDirectory(const std::wstring& path, std::string* error) {
+static bool CreateOneDirectory(const std::wstring& path, OperationError* error) {
   if (path.empty() || DirectoryExists(path)) {
     return true;
   }
@@ -39,17 +39,8 @@ static bool CreateOneDirectory(const std::wstring& path, std::string* error) {
   if (GetLastError() == ERROR_ALREADY_EXISTS && DirectoryExists(path)) {
     return true;
   }
-  *error = "CreateDirectoryW failed. path=" + WideToUtf8(path) +
-           " win32Error=" + std::to_string(GetLastError());
+  *error = MakeOperationError("CreateDirectoryW", WideToUtf8(path), GetLastError());
   return false;
-}
-
-static std::string Win32PathError(
-    const std::string& message,
-    const std::wstring& path,
-    DWORD error_code) {
-  return message + " path=" + WideToUtf8(path) +
-         " win32Error=" + std::to_string(error_code);
 }
 
 static std::string FileTimeIso(const FILETIME& file_time) {
@@ -90,7 +81,7 @@ static std::wstring JoinPath(
 
 static bool EnsureParentDirectories(
     const std::wstring& path,
-    std::string* error) {
+    OperationError* error) {
   const size_t separator = path.find_last_of(L"\\/");
   if (separator == std::wstring::npos) {
     return true;
@@ -126,7 +117,7 @@ static bool EnsureParentDirectories(
 bool ReadFileBytes(
     const std::string& path,
     std::vector<unsigned char>* data,
-    std::string* error) {
+    OperationError* error) {
   const std::wstring wide_path = Utf8ToWide(path);
   if (wide_path.empty()) {
     *error = "File path is empty or invalid UTF-8.";
@@ -137,8 +128,7 @@ bool ReadFileBytes(
                             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
                             nullptr);
   if (file == INVALID_HANDLE_VALUE) {
-    *error = Win32PathError(
-        "CreateFileW for read failed.", wide_path, GetLastError());
+    *error = MakeOperationError("CreateFileW", WideToUtf8(wide_path), GetLastError());
     return false;
   }
 
@@ -160,7 +150,7 @@ bool ReadFileBytes(
     if (!ReadFile(file, data->data() + offset, chunk, &read, nullptr)) {
       const DWORD error_code = GetLastError();
       CloseHandle(file);
-      *error = Win32PathError("ReadFile failed.", wide_path, error_code);
+      *error = MakeOperationError("ReadFile", WideToUtf8(wide_path), error_code);
       return false;
     }
     if (read == 0) {
@@ -177,7 +167,7 @@ bool HashFileSha256(
     const std::string& path,
     uint64_t* total_bytes,
     std::string* sha256,
-    std::string* error) {
+    OperationError* error) {
   const std::wstring wide_path = Utf8ToWide(path);
   if (wide_path.empty()) {
     *error = "File path is empty or invalid UTF-8.";
@@ -188,8 +178,7 @@ bool HashFileSha256(
       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
       nullptr);
   if (file == INVALID_HANDLE_VALUE) {
-    *error = Win32PathError(
-        "CreateFileW for hashing failed.", wide_path, GetLastError());
+    *error = MakeOperationError("CreateFileW", WideToUtf8(wide_path), GetLastError());
     return false;
   }
 
@@ -197,7 +186,7 @@ bool HashFileSha256(
   if (!GetFileSizeEx(file, &file_size) || file_size.QuadPart < 0) {
     const DWORD error_code = GetLastError();
     CloseHandle(file);
-    *error = Win32PathError("GetFileSizeEx failed.", wide_path, error_code);
+    *error = MakeOperationError("GetFileSizeEx", WideToUtf8(wide_path), error_code);
     return false;
   }
 
@@ -257,8 +246,7 @@ bool HashFileSha256(
   }
   CloseHandle(file);
   if (!file_read_succeeded) {
-    *error = Win32PathError(
-        "ReadFile for hashing failed.", wide_path, file_read_error);
+    *error = MakeOperationError("ReadFile", WideToUtf8(wide_path), file_read_error);
     return false;
   }
   if (!BCRYPT_SUCCESS(status) || digest_bytes != 32) {
@@ -280,7 +268,7 @@ bool HashFileSha256(
 bool WriteFileBytes(
     const std::string& path,
     const std::vector<unsigned char>& data,
-    std::string* error) {
+    OperationError* error) {
   const std::wstring wide_path = Utf8ToWide(path);
   if (wide_path.empty()) {
     *error = "File path is empty or invalid UTF-8.";
@@ -293,8 +281,7 @@ bool WriteFileBytes(
   HANDLE file = CreateFileW(wide_path.c_str(), GENERIC_WRITE, 0, nullptr,
                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (file == INVALID_HANDLE_VALUE) {
-    *error = Win32PathError(
-        "CreateFileW for write failed.", wide_path, GetLastError());
+    *error = MakeOperationError("CreateFileW", WideToUtf8(wide_path), GetLastError());
     return false;
   }
 
@@ -306,7 +293,7 @@ bool WriteFileBytes(
     if (!WriteFile(file, data.data() + offset, chunk, &written, nullptr)) {
       const DWORD error_code = GetLastError();
       CloseHandle(file);
-      *error = Win32PathError("WriteFile failed.", wide_path, error_code);
+      *error = MakeOperationError("WriteFile", WideToUtf8(wide_path), error_code);
       return false;
     }
     if (written == 0) {
@@ -328,7 +315,7 @@ bool PathExists(const std::string& path) {
   return GetFileAttributesW(wide_path.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
-bool StatPath(const std::string& path, FileStat* stat, std::string* error) {
+bool StatPath(const std::string& path, FileStat* stat, OperationError* error) {
   const std::wstring wide_path = Utf8ToWide(path);
   if (wide_path.empty()) {
     *error = "File path is empty or invalid UTF-8.";
@@ -337,7 +324,7 @@ bool StatPath(const std::string& path, FileStat* stat, std::string* error) {
   WIN32_FILE_ATTRIBUTE_DATA data = {};
   if (!GetFileAttributesExW(
           wide_path.c_str(), GetFileExInfoStandard, &data)) {
-    *error = "GetFileAttributesExW failed.";
+    *error = MakeOperationError("GetFileAttributesExW", path, GetLastError());
     return false;
   }
   const bool directory = (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
@@ -354,7 +341,7 @@ bool StatPath(const std::string& path, FileStat* stat, std::string* error) {
 bool MakeDirectory(
     const std::string& path,
     bool recursive,
-    std::string* error) {
+    OperationError* error) {
   const std::wstring wide_path = Utf8ToWide(path);
   if (wide_path.empty()) {
     *error = "Directory path is empty or invalid UTF-8.";
@@ -369,7 +356,7 @@ bool MakeDirectory(
 bool ReadDirectoryEntries(
     const std::string& path,
     std::vector<DirectoryEntry>* entries,
-    std::string* error) {
+    OperationError* error) {
   const std::wstring wide_path = Utf8ToWide(path);
   if (wide_path.empty()) {
     *error = "Directory path is empty or invalid UTF-8.";
@@ -380,7 +367,7 @@ bool ReadDirectoryEntries(
   WIN32_FIND_DATAW data = {};
   HANDLE find = FindFirstFileW(pattern.c_str(), &data);
   if (find == INVALID_HANDLE_VALUE) {
-    *error = "FindFirstFileW failed.";
+    *error = MakeOperationError("FindFirstFileW", path, GetLastError());
     return false;
   }
   do {
@@ -421,7 +408,7 @@ static bool ReadDirectoryManifestRecursive(
     const std::wstring& root,
     const std::wstring& relative,
     std::vector<DirectoryManifestEntry>* entries,
-    std::string* error) {
+    OperationError* error) {
   const std::wstring directory = relative.empty() ? root : JoinPath(root, relative);
   const std::wstring pattern = JoinPath(directory, L"*");
   WIN32_FIND_DATAW data = {};
@@ -431,7 +418,7 @@ static bool ReadDirectoryManifestRecursive(
     if (error_code == ERROR_FILE_NOT_FOUND) {
       return true;
     }
-    *error = Win32PathError("FindFirstFileW failed.", directory, error_code);
+    *error = MakeOperationError("FindFirstFileW", WideToUtf8(directory), error_code);
     return false;
   }
   do {
@@ -479,22 +466,21 @@ static bool ReadDirectoryManifestRecursive(
 bool ReadDirectoryManifest(
     const std::string& path,
     std::vector<DirectoryManifestEntry>* entries,
-    std::string* error) {
+    OperationError* error) {
   const std::wstring wide_path = Utf8ToWide(path);
   if (wide_path.empty()) {
     *error = "Directory path is empty or invalid UTF-8.";
     return false;
   }
   if (!DirectoryExists(wide_path)) {
-    *error = Win32PathError(
-        "Directory does not exist.", wide_path, ERROR_PATH_NOT_FOUND);
+    *error = MakeOperationError("Directory", WideToUtf8(wide_path), ERROR_PATH_NOT_FOUND);
     return false;
   }
   entries->clear();
   return ReadDirectoryManifestRecursive(wide_path, L"", entries, error);
 }
 
-bool RemovePath(const std::string& path, bool recursive, std::string* error) {
+bool RemovePath(const std::string& path, bool recursive, OperationError* error) {
   const std::wstring wide_path = Utf8ToWide(path);
   if (IsDangerousRemovePath(wide_path)) {
     *error = "Refusing to remove dangerous path.";
@@ -519,14 +505,15 @@ bool RemovePath(const std::string& path, bool recursive, std::string* error) {
       }
     }
     if (!RemoveDirectoryW(wide_path.c_str())) {
-      *error = Win32PathError(
-          "RemoveDirectoryW failed.", wide_path, GetLastError());
+      *error = MakeOperationError("RemoveDirectoryW", WideToUtf8(wide_path), GetLastError());
       return false;
     }
     return true;
   }
   if (!DeleteFileW(wide_path.c_str())) {
-    *error = Win32PathError("DeleteFileW failed.", wide_path, GetLastError());
+    *error = MakeOperationError("DeleteFileW", path, GetLastError());
+    const auto attributes = GetFileAttributesW(wide_path.c_str());
+    if (error->os_code == ERROR_ACCESS_DENIED && attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_READONLY) != 0) error->reason = "readOnly";
     return false;
   }
   return true;
@@ -535,7 +522,7 @@ bool RemovePath(const std::string& path, bool recursive, std::string* error) {
 bool RenamePath(
     const std::string& from,
     const std::string& to,
-    std::string* error) {
+    OperationError* error) {
   const std::wstring wide_from = Utf8ToWide(from);
   const std::wstring wide_to = Utf8ToWide(to);
   if (wide_from.empty() || wide_to.empty()) {
@@ -547,7 +534,7 @@ bool RenamePath(
   }
   if (!MoveFileExW(
           wide_from.c_str(), wide_to.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-    *error = Win32PathError("MoveFileExW failed.", wide_to, GetLastError());
+    *error = MakeOperationError("MoveFileExW", WideToUtf8(wide_to), GetLastError());
     return false;
   }
   return true;
@@ -556,7 +543,7 @@ bool RenamePath(
 bool MakeTempDirectory(
     const std::string& prefix,
     std::string* path,
-    std::string* error) {
+    OperationError* error) {
   for (int index = 0; index < 1000; index += 1) {
     const std::string candidate = prefix + std::to_string(index);
     if (PathExists(candidate)) {

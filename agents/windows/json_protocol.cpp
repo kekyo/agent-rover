@@ -565,6 +565,12 @@ static std::string FailureResponseJson(
   return output;
 }
 
+static std::string OperationFailureJson(const std::string& id, const std::string& method, const OperationError& error) {
+  std::string output = "{\"id\":\"" + JsonEscape(id) + "\",\"kind\":\"response\",\"ok\":false,\"error\":{\"code\":\"OPERATION_FAILED\",\"message\":\"" + JsonEscape(error.message) + "\",\"details\":{\"operation\":\"" + JsonEscape(method) + "\",\"nativeOperation\":\"" + JsonEscape(error.native_operation) + "\",\"path\":\"" + JsonEscape(error.path) + "\",\"osCode\":" + (error.os_code == 0 ? "null" : std::to_string(error.os_code)) + ",\"reason\":\"" + JsonEscape(error.reason) + "\"";
+  if (!error.stage.empty()) output += ",\"stage\":\"" + JsonEscape(error.stage) + "\"";
+  return output + "}}}";
+}
+
 static void AppendJsonString(std::string* output, const std::string& value) {
   output->push_back('"');
   *output += JsonEscape(value);
@@ -1476,10 +1482,11 @@ std::string HandleJsonRequest(
     transfer.content_type = "video/mp4";
     transfer.path = video.path;
     transfer.directory = video.directory;
+    OperationError file_error;
     if (!HashFileSha256(
-            video.path, &transfer.total_bytes, &transfer.sha256, &error)) {
+            video.path, &transfer.total_bytes, &transfer.sha256, &file_error)) {
       RemoveVideoCaptureResult(video);
-      return FailureResponseJson(id, error);
+      return OperationFailureJson(id, method, file_error);
     }
     *outbound_file = transfer;
     return SuccessResponseJson(id, VideoResultJson(video, transfer));
@@ -1510,9 +1517,9 @@ std::string HandleJsonRequest(
       return FailureResponseJson(id, "file.stat requires path.");
     }
     FileStat stat = {};
-    std::string error;
+    OperationError error;
     if (!StatPath(path, &stat, &error)) {
-      return FailureResponseJson(id, error);
+      return OperationFailureJson(id, method, error);
     }
     return SuccessResponseJson(id, FileStatJson(stat));
   }
@@ -1523,9 +1530,9 @@ std::string HandleJsonRequest(
       return FailureResponseJson(id, "file.mkdir requires path.");
     }
     FindJsonBoolField(payload, "recursive", &recursive);
-    std::string error;
+    OperationError error;
     if (!MakeDirectory(path, recursive, &error)) {
-      return FailureResponseJson(id, error);
+      return OperationFailureJson(id, method, error);
     }
     return SuccessResponseJson(id, "null");
   }
@@ -1535,9 +1542,9 @@ std::string HandleJsonRequest(
       return FailureResponseJson(id, "file.readdir requires path.");
     }
     std::vector<DirectoryEntry> entries;
-    std::string error;
+    OperationError error;
     if (!ReadDirectoryEntries(path, &entries, &error)) {
-      return FailureResponseJson(id, error);
+      return OperationFailureJson(id, method, error);
     }
     return SuccessResponseJson(id, DirectoryEntryArrayJson(entries));
   }
@@ -1547,9 +1554,9 @@ std::string HandleJsonRequest(
       return FailureResponseJson(id, "file.manifest requires path.");
     }
     std::vector<DirectoryManifestEntry> entries;
-    std::string error;
+    OperationError error;
     if (!ReadDirectoryManifest(path, &entries, &error)) {
-      return FailureResponseJson(id, error);
+      return OperationFailureJson(id, method, error);
     }
     return SuccessResponseJson(id, DirectoryManifestJson(entries));
   }
@@ -1560,9 +1567,9 @@ std::string HandleJsonRequest(
       return FailureResponseJson(id, "file.remove requires path.");
     }
     FindJsonBoolField(payload, "recursive", &recursive);
-    std::string error;
+    OperationError error;
     if (!RemovePath(path, recursive, &error)) {
-      return FailureResponseJson(id, error);
+      return OperationFailureJson(id, method, error);
     }
     return SuccessResponseJson(id, "null");
   }
@@ -1573,9 +1580,9 @@ std::string HandleJsonRequest(
         !FindJsonStringField(payload, "to", &to)) {
       return FailureResponseJson(id, "file.rename requires from and to.");
     }
-    std::string error;
+    OperationError error;
     if (!RenamePath(from, to, &error)) {
-      return FailureResponseJson(id, error);
+      return OperationFailureJson(id, method, error);
     }
     return SuccessResponseJson(id, "null");
   }
@@ -1585,9 +1592,9 @@ std::string HandleJsonRequest(
       return FailureResponseJson(id, "file.mkdtemp requires prefix.");
     }
     std::string path;
-    std::string error;
+    OperationError error;
     if (!MakeTempDirectory(prefix, &path, &error)) {
-      return FailureResponseJson(id, error);
+      return OperationFailureJson(id, method, error);
     }
     std::string output = "{\"path\":";
     AppendJsonString(&output, path);
@@ -1600,9 +1607,9 @@ std::string HandleJsonRequest(
       return FailureResponseJson(id, "file.read requires path.");
     }
     std::vector<unsigned char> data;
-    std::string error;
+    OperationError error;
     if (!ReadFileBytes(path, &data, &error)) {
-      return FailureResponseJson(id, error);
+      return OperationFailureJson(id, method, error);
     }
     const std::string transfer_id = id + "-file-read";
     AddBinaryTransferChunks(
@@ -1628,15 +1635,15 @@ std::string HandleJsonRequest(
         return FailureResponseJson(id, "file.write contentType is invalid.");
       }
       std::vector<unsigned char> data;
-      std::string error;
+      OperationError error;
       if (!ConsumeBinaryTransfer(
               transfers, transfer_id, content_type,
               static_cast<uint32_t>(expected_total_bytes), expected_sha256,
-              &data, &error)) {
-        return FailureResponseJson(id, error);
+              &data, &error.message)) {
+        return OperationFailureJson(id, method, error);
       }
       if (!WriteFileBytes(path, data, &error)) {
-        return FailureResponseJson(id, error);
+        return OperationFailureJson(id, method, error);
       }
       return SuccessResponseJson(id, "null");
     }
@@ -1649,15 +1656,15 @@ std::string HandleJsonRequest(
           id, "file.write requires path, dataBase64, and sha256.");
     }
     std::vector<unsigned char> data;
-    std::string error;
-    if (!Base64Decode(data_base64, &data, &error)) {
-      return FailureResponseJson(id, error);
+    OperationError error;
+    if (!Base64Decode(data_base64, &data, &error.message)) {
+      return OperationFailureJson(id, method, error);
     }
     if (Sha256Hex(data) != expected_sha256) {
       return FailureResponseJson(id, "file.write checksum mismatch.");
     }
     if (!WriteFileBytes(path, data, &error)) {
-      return FailureResponseJson(id, error);
+      return OperationFailureJson(id, method, error);
     }
     return SuccessResponseJson(id, "null");
   }

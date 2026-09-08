@@ -12,12 +12,10 @@ import { fileURLToPath } from 'node:url';
 
 import { delay } from 'async-primitives';
 import { describe, expect, it } from 'vitest';
+import { connectWindowsBootstrap } from './helpers/windows-bootstrap';
+import { waitForResult } from '../src/wait';
 
-import {
-  connectRemoteAgent,
-  type RemoteAgent,
-  type RemoteManagedProcess,
-} from '../src/index';
+import { connectRemoteAgent, type RemoteAgent } from '../src/index';
 
 interface CommandResult {
   readonly stderr: string;
@@ -28,7 +26,6 @@ const testDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryDirectory = join(testDirectory, '..', '..');
 const agentDirectory = join(repositoryDirectory, 'agents');
 const builtAgentPath = join(agentDirectory, 'dist', 'agent-amd64.exe');
-const bootstrapPort = 39397;
 const testAgentPort = 39407;
 const hostEnvironmentName = 'AGENT_ROVER_WIN11_HOST2';
 const tokenEnvironmentName = 'AGENT_ROVER_WIN11_TOKEN2';
@@ -96,7 +93,6 @@ describe('Windows video capture integration', () => {
     'records a moving Notepad window as a decodable H.264 MP4',
     async () => {
       const host = requireEnvironment(hostEnvironmentName);
-      const bootstrapToken = requireEnvironment(tokenEnvironmentName);
       const testToken = randomBytes(24).toString('base64url');
       const uniqueName = `${String(process.pid)}-${String(Date.now())}`;
       const remoteDirectory = String.raw`C:\Windows\Temp\agent-rover-video-${uniqueName}`;
@@ -108,24 +104,21 @@ describe('Windows video capture integration', () => {
       const outputPath = join(localDirectory, 'notepad.mp4');
 
       await execFileResult('make', ['amd64'], agentDirectory);
-      const bootstrap = await connectRemoteAgent({
-        authToken: bootstrapToken,
-        host,
-        port: bootstrapPort,
-        timeoutMs: 30000,
-      });
+      const bootstrap = await connectWindowsBootstrap();
       let testAgent: RemoteAgent | undefined = undefined;
-      let testAgentProcess: RemoteManagedProcess | undefined = undefined;
+      let testAgentProcess: { managedProcessId: number } | undefined =
+        undefined;
       let capturedWindow:
         Awaited<ReturnType<RemoteAgent['waitForWindow']>> | undefined =
         undefined;
       try {
-        await bootstrap.files.mkdir(remoteDirectory, { recursive: true });
-        await bootstrap.files.writeFile(
-          remoteAgentPath,
-          await readFile(builtAgentPath)
-        );
-        testAgentProcess = await bootstrap.processes.launchManaged({
+        await bootstrap.request('file.mkdir', {
+          path: remoteDirectory,
+          recursive: true,
+        });
+        await bootstrap.upload(remoteAgentPath, await readFile(builtAgentPath));
+        testAgentProcess = (await bootstrap.request('process.launchManaged', {
+          killTreeOnRelease: true,
           arguments: [
             '--host',
             '0.0.0.0',
@@ -137,7 +130,7 @@ describe('Windows video capture integration', () => {
           createNoWindow: true,
           path: remoteAgentPath,
           workingDirectory: remoteDirectory,
-        });
+        })) as { managedProcessId: number };
         testAgent = await connectToTestAgent(host, testToken);
 
         await testAgent.files.writeFile(
@@ -221,21 +214,156 @@ describe('Windows video capture integration', () => {
         testAgent?.release();
         if (testAgentProcess !== undefined) {
           try {
-            await testAgentProcess.releaseAsync();
+            await bootstrap.request('process.releaseManaged', {
+              managedProcessId: testAgentProcess.managedProcessId,
+            });
           } catch {
             // Continue teardown when the uploaded agent has already exited.
           }
         }
         await delay(250);
         try {
-          await bootstrap.files.remove(remoteDirectory, { recursive: true });
+          await bootstrap.request('file.remove', {
+            path: remoteDirectory,
+            recursive: true,
+          });
         } catch {
           // A failed assertion must not be hidden by best-effort remote cleanup.
         }
-        bootstrap.release();
+        await bootstrap.close();
         await rm(localDirectory, { force: true, recursive: true });
       }
     },
     120000
   );
+});
+
+describe('Windows cleanup integration', () => {
+  for (const abi of ['amd64', 'i686'] as const) {
+    win11It(
+      `reports real file failures on ${abi}`,
+      async () => {
+        await execFileResult('make', ['-j4'], agentDirectory);
+        await execFileResult(
+          'make',
+          ['-j4'],
+          join(agentDirectory, 'tests', 'cleanup')
+        );
+        const bootstrap = await connectWindowsBootstrap();
+        const root = `C:/Windows/Temp/agent-rover-cleanup-${randomBytes(8).toString('hex')}`;
+        const token = randomBytes(24).toString('base64url');
+        const port = 39417;
+        let agent: RemoteAgent | undefined;
+        let agentId: number | undefined;
+        try {
+          await bootstrap.request('file.mkdir', {
+            path: root,
+            recursive: true,
+          });
+          await bootstrap.upload(
+            `${root}/agent.exe`,
+            await readFile(join(agentDirectory, 'dist', `agent-${abi}.exe`))
+          );
+          await bootstrap.upload(
+            `${root}/helper.exe`,
+            await readFile(
+              join(agentDirectory, '.build', 'cleanup', abi, 'helper.exe')
+            )
+          );
+          const launched = (await bootstrap.request('applications.launch', {
+            path: `${root}/agent.exe`,
+            arguments: [
+              '--host',
+              '0.0.0.0',
+              '--port',
+              String(port),
+              '--unsafe-token',
+              token,
+            ],
+            createNoWindow: true,
+          })) as { id: number };
+          agentId = launched.id;
+          agent = await waitForResult(
+            async () => {
+              try {
+                return await connectRemoteAgent({
+                  host: requireEnvironment(hostEnvironmentName),
+                  authToken: token,
+                  port,
+                  timeoutMs: 2000,
+                });
+              } catch (cause) {
+                throw new Error('Uploaded agent is not ready.', { cause });
+              }
+            },
+            { timeoutMs: 15000, intervalMs: 50 }
+          );
+          const activeAgent = agent;
+          const command = async (args: readonly string[]): Promise<void> => {
+            const child = await activeAgent.processes.launchManaged({
+              path: `${root}/helper.exe`,
+              arguments: args,
+              createNoWindow: true,
+              killTreeOnRelease: false,
+            });
+            try {
+              const result = await child.waitForExit();
+              expect(result.root.exitCode).toBe(0);
+            } finally {
+              await child.releaseAsync();
+            }
+          };
+          const file = `${root}/readonly.txt`;
+          await agent.files.writeFile(file, Buffer.from('retained data'));
+          await command(['readonly', file]);
+          try {
+            await expect(agent.files.remove(file)).rejects.toMatchObject({
+              code: 'OPERATION_FAILED',
+              details: {
+                operation: 'file.remove',
+                nativeOperation: 'DeleteFileW',
+                path: file,
+                osCode: 5,
+                reason: 'readOnly',
+              },
+            });
+            expect((await agent.files.readFile(file)).toString()).toBe(
+              'retained data'
+            );
+          } finally {
+            await command(['writable', file]);
+          }
+        } finally {
+          agent?.release();
+          if (agentId !== undefined) {
+            await bootstrap.request('process.kill', { processId: agentId });
+            await waitForResult(
+              async () => {
+                const state = (await bootstrap.request('process.snapshot', {
+                  processId: agentId!,
+                })) as { running: boolean };
+                expect(state.running).toBe(false);
+              },
+              { timeoutMs: 10000, intervalMs: 50 }
+            );
+          }
+          // The preinstalled deployment agent is outside the implementation under test.
+          try {
+            await waitForResult(
+              async () => {
+                await bootstrap.request('file.remove', {
+                  path: root,
+                  recursive: true,
+                });
+              },
+              { timeoutMs: 10000, intervalMs: 50 }
+            );
+          } finally {
+            await bootstrap.close();
+          }
+        }
+      },
+      120000
+    );
+  }
 });

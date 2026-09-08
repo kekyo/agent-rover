@@ -1200,6 +1200,7 @@ export interface ConnectRemoteAgentOptions {
 
 /** Stable error codes raised by the remote agent driver. */
 export type RemoteAgentErrorCode =
+  | 'OPERATION_FAILED'
   | 'AUTHENTICATION_FAILED'
   | 'CONNECTION_FAILED'
   | 'DISCONNECTED'
@@ -1211,6 +1212,34 @@ export type RemoteAgentErrorCode =
 export interface RemoteAgentError extends Error {
   /** Stable machine-readable error code. */
   readonly code: RemoteAgentErrorCode;
+  /** Structured process or file failure, when reported by the operation. */
+  readonly details?: RemoteOperationErrorDetails;
+}
+
+/** Native process or file failure information, independent of the message language. */
+export interface RemoteOperationErrorDetails {
+  /** Requested protocol operation. */
+  readonly operation: string;
+  /** Failing operating-system API. */
+  readonly nativeOperation: string;
+  /** Actual failing file or directory, or empty for a non-file operation. */
+  readonly path: string;
+  /** Native error code, or null when the failure has no OS code. */
+  readonly osCode: number | null;
+  /** Observed cause; accessDenied does not by itself identify a lock or a permanent denial. */
+  readonly reason:
+    | 'unknown'
+    | 'sharingViolation'
+    | 'lockViolation'
+    | 'accessDenied'
+    | 'readOnly'
+    | 'notFound'
+    | 'directoryNotEmpty'
+    | 'busy'
+    | 'unsupported'
+    | 'invalidArgument';
+  /** Incomplete cleanup stage, when applicable. */
+  readonly stage?: string;
 }
 
 export { connectRemoteAgent } from './driver/connection';

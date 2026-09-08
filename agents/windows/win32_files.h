@@ -6,6 +6,8 @@
 #ifndef AGENT_ROVER_WINDOWS_AGENT_WIN32_FILES_H
 #define AGENT_ROVER_WINDOWS_AGENT_WIN32_FILES_H
 
+#include "operation_error.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -59,7 +61,7 @@ struct DirectoryManifestEntry {
 bool ReadFileBytes(
     const std::string& path,
     std::vector<unsigned char>* data,
-    std::string* error);
+    OperationError* error);
 
 /**
  * Computes a file SHA-256 digest without retaining the file in memory.
@@ -74,7 +76,7 @@ bool HashFileSha256(
     const std::string& path,
     uint64_t* total_bytes,
     std::string* sha256,
-    std::string* error);
+    OperationError* error);
 
 /**
  * Writes a complete file, recursively creating parent directories.
@@ -87,7 +89,7 @@ bool HashFileSha256(
 bool WriteFileBytes(
     const std::string& path,
     const std::vector<unsigned char>& data,
-    std::string* error);
+    OperationError* error);
 
 /**
  * Returns whether a path exists.
@@ -104,7 +106,7 @@ bool PathExists(const std::string& path);
  * @param error Receives a human-readable error on failure.
  * @return true on success.
  */
-bool StatPath(const std::string& path, FileStat* stat, std::string* error);
+bool StatPath(const std::string& path, FileStat* stat, OperationError* error);
 /**
  * Creates a directory.
  *
@@ -116,7 +118,7 @@ bool StatPath(const std::string& path, FileStat* stat, std::string* error);
 bool MakeDirectory(
     const std::string& path,
     bool recursive,
-    std::string* error);
+    OperationError* error);
 /**
  * Reads direct directory entries.
  *
@@ -128,7 +130,7 @@ bool MakeDirectory(
 bool ReadDirectoryEntries(
     const std::string& path,
     std::vector<DirectoryEntry>* entries,
-    std::string* error);
+    OperationError* error);
 /**
  * Reads a recursive directory manifest without following reparse points.
  *
@@ -140,7 +142,7 @@ bool ReadDirectoryEntries(
 bool ReadDirectoryManifest(
     const std::string& path,
     std::vector<DirectoryManifestEntry>* entries,
-    std::string* error);
+    OperationError* error);
 /**
  * Removes a file or directory.
  *
@@ -149,7 +151,7 @@ bool ReadDirectoryManifest(
  * @param error Receives a human-readable error on failure.
  * @return true on success.
  */
-bool RemovePath(const std::string& path, bool recursive, std::string* error);
+bool RemovePath(const std::string& path, bool recursive, OperationError* error);
 /**
  * Renames or moves a file or directory.
  *
@@ -161,7 +163,7 @@ bool RemovePath(const std::string& path, bool recursive, std::string* error);
 bool RenamePath(
     const std::string& from,
     const std::string& to,
-    std::string* error);
+    OperationError* error);
 /**
  * Creates a temporary directory from a prefix.
  *
@@ -173,7 +175,7 @@ bool RenamePath(
 bool MakeTempDirectory(
     const std::string& prefix,
     std::string* path,
-    std::string* error);
+    OperationError* error);
 
 }  // namespace agent_rover
 

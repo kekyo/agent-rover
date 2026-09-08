@@ -13,7 +13,7 @@ schema unless the driver is extended.
 
 | Name | Value | Source |
 | --- | --- | --- |
-| JSON protocol version | `2026-07-07` | `protocolVersion` / `kProtocolVersion` |
+| JSON protocol version | `2026-09-09` | `protocolVersion` / `kProtocolVersion` |
 | TCP frame version | `2` | `tcpFrameVersion` / `kTcpFrameVersion` |
 | TCP transport capability | `transport.tcp-frame-v1` | `tcpFrameCapabilityId` / `kTcpFrameCapabilityId` |
 | Default frame payload limit | `16 * 1024 * 1024` bytes | driver and native agent |
@@ -21,7 +21,7 @@ schema unless the driver is extended.
 | Binary transfer chunk size used by driver and native agent | `64 * 1024` bytes | implementation detail, peers must accept other positive chunk sizes |
 
 The driver rejects the connection during the ready handshake when the reported
-JSON protocol version is not exactly `2026-07-07`.
+JSON protocol version is not exactly `2026-09-09`.
 
 ## Connection Lifecycle
 
@@ -239,7 +239,7 @@ Immediately after authentication, the agent must send:
   "name": "agent.ready",
   "data": {
     "capabilities": {
-      "protocolVersion": "2026-07-07",
+      "protocolVersion": "2026-09-09",
       "platform": "windows",
       "features": [
         "capabilities",
@@ -285,14 +285,14 @@ Immediately after authentication, the agent must send:
         "agent.native-windows"
       ]
     },
-    "protocolVersion": "2026-07-07"
+    "protocolVersion": "2026-09-09"
   }
 }
 ```
 
 The driver validates `data.capabilities`:
 
-- `protocolVersion` must be a string and must equal `2026-07-07`.
+- `protocolVersion` must be a string and must equal `2026-09-09`.
 - `platform` must be the string `windows`.
 - `features` must be an array of strings.
 
@@ -395,7 +395,7 @@ system. Multi-monitor systems may use negative `x` or `y` values.
 
 ```json
 {
-  "protocolVersion": "2026-07-07",
+  "protocolVersion": "2026-09-09",
   "platform": "windows",
   "features": ["transport.tcp-frame-v1"]
 }
@@ -1292,7 +1292,7 @@ when no event log query is supplied.
 1. Listen on a TCP port and read/write 20-byte `TRVR` frames.
 2. Implement optional auth challenge/response, including the NUL byte in the
    HMAC message prefix.
-3. Send `agent.ready` with protocol version `2026-07-07`, platform `windows`,
+3. Send `agent.ready` with protocol version `2026-09-09`, platform `windows`,
    and a string feature array.
 4. Decode JSON request frames and return matching JSON response frames.
 5. Implement binary transfer chunk encode/decode, contiguous sequence
@@ -1306,3 +1306,14 @@ when no event log query is supplied.
 10. Test with `connectRemoteAgent()` and a small script that calls
     `capabilities()`, `bounds()`, `windows()`, a screenshot method, and a file
     round trip.
+
+### Native operation failures
+
+File operation failures use `OPERATION_FAILED` with a `details` object containing
+`operation`, `nativeOperation`, `path`, `osCode` (or null), and `reason`.
+The path identifies the actual failing entry during recursive operations.
+`reason` distinguishes `readOnly`, `sharingViolation`, `lockViolation`,
+`accessDenied`, `notFound`, `directoryNotEmpty`, `busy`, and `unknown`.
+An access-denied code alone does not identify a transient lock or a permanent
+permission problem. Clients must use these fields instead of parsing `message`.
+Process cleanup may additionally report an incomplete `stage`.

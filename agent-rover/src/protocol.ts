@@ -18,6 +18,7 @@ export type JsonValue =
 
 /** Stable machine-readable protocol error codes. */
 export type ProtocolErrorCode =
+  | 'OPERATION_FAILED'
   | 'AUTHENTICATION_FAILED'
   | 'CHECKSUM_MISMATCH'
   | 'DISCONNECTED'
@@ -29,6 +30,8 @@ export type ProtocolErrorCode =
 export interface ProtocolRuntimeError extends Error {
   /** Stable machine-readable error code. */
   readonly code: ProtocolErrorCode;
+  /** Structured native failure, when available. */
+  readonly details?: import('./index').RemoteOperationErrorDetails;
 }
 
 /** Error payload transported over the wire. */
@@ -37,6 +40,8 @@ export interface ProtocolErrorPayload {
   readonly code: ProtocolErrorCode;
   /** Human-readable diagnostic message. */
   readonly message: string;
+  /** Structured native failure, independent of the diagnostic message. */
+  readonly details?: import('./index').RemoteOperationErrorDetails;
 }
 
 /** Request message sent over the control channel. */
@@ -336,9 +341,57 @@ const readErrorPayload = (value: unknown): ProtocolErrorPayload => {
       'Protocol response error must be an object.'
     );
   }
+  let details: import('./index').RemoteOperationErrorDetails | undefined;
+  if (value.details !== undefined) {
+    const raw = value.details;
+    if (
+      !isRecord(raw) ||
+      !(
+        raw.osCode === null ||
+        (typeof raw.osCode === 'number' &&
+          Number.isSafeInteger(raw.osCode) &&
+          raw.osCode >= 0)
+      )
+    ) {
+      throw createProtocolRuntimeError(
+        'PROTOCOL_ERROR',
+        'Invalid native error details.'
+      );
+    }
+    const reason = requireString(raw, 'reason');
+    if (
+      ![
+        'unknown',
+        'sharingViolation',
+        'lockViolation',
+        'accessDenied',
+        'readOnly',
+        'notFound',
+        'directoryNotEmpty',
+        'busy',
+        'unsupported',
+        'invalidArgument',
+      ].includes(reason)
+    ) {
+      throw createProtocolRuntimeError(
+        'PROTOCOL_ERROR',
+        'Invalid native error reason.'
+      );
+    }
+    details = {
+      operation: requireString(raw, 'operation'),
+      nativeOperation:
+        typeof raw.nativeOperation === 'string' ? raw.nativeOperation : '',
+      path: typeof raw.path === 'string' ? raw.path : '',
+      osCode: raw.osCode as number | null,
+      reason: reason as import('./index').RemoteOperationErrorDetails['reason'],
+      ...(typeof raw.stage === 'string' ? { stage: raw.stage } : {}),
+    };
+  }
   return {
     code: requireString(value, 'code') as ProtocolErrorCode,
     message: requireString(value, 'message'),
+    ...(details === undefined ? {} : { details }),
   };
 };
 
@@ -534,9 +587,14 @@ export const createPendingRequestTable = (
         entry.resolve(response.result);
       } else {
         entry.reject(
-          createProtocolRuntimeError(
-            response.error.code,
-            response.error.message
+          Object.assign(
+            createProtocolRuntimeError(
+              response.error.code,
+              response.error.message
+            ),
+            response.error.details === undefined
+              ? {}
+              : { details: response.error.details }
           )
         );
       }
