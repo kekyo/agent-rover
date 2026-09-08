@@ -455,10 +455,18 @@ export interface RemoteManagedProcess
   readonly waitForExit: (
     options?: RemoteWaitOptions
   ) => Promise<RemoteManagedProcessSnapshot>;
-  /** Reads captured standard output as UTF-8 text. */
-  readonly stdoutText: () => Promise<string>;
-  /** Reads captured standard error as UTF-8 text. */
-  readonly stderrText: () => Promise<string>;
+  /**
+   * Reads a live snapshot, or complete UTF-8 stdout after the root exits.
+   * @param options Deadline for descendant writers and capture availability.
+   * @returns Captured output, including the final bytes after completion.
+   */
+  readonly stdoutText: (options?: RemoteCleanupOptions) => Promise<string>;
+  /**
+   * Reads a live snapshot, or complete UTF-8 stderr after the root exits.
+   * @param options Deadline for descendant writers and capture availability.
+   * @returns Captured error output, including the final bytes after completion.
+   */
+  readonly stderrText: (options?: RemoteCleanupOptions) => Promise<string>;
 }
 
 /** Remote process snapshot. */

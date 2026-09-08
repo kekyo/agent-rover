@@ -1330,3 +1330,14 @@ With `killTreeOnRelease: false`, capture-free release closes monitoring handles
 without terminating the process. Captured processes must finish writing before
 release can complete. The driver marks release complete only after native
 release and removal of its temporary directory both succeed.
+
+### Managed capture and tree state
+
+`process.managedRunning` takes `managedProcessId` and returns whether the Job
+contains active processes, including descendants whose parents have exited.
+`process.readCaptured` takes `managedProcessId` and `stream` (`stdout` or
+`stderr`) and returns a binary file-transfer reference. While the root runs it
+reads a snapshot using write sharing. After root exit it reports `busy` until
+all Job members exit, then reads without write sharing to reject remaining
+writers. General `file.read` retains its original sharing behavior.
+The driver waits for in-flight capture reads before releasing their resources.

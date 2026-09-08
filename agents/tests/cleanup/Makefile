@@ -6,21 +6,21 @@ OUTPUT := ../../.build/cleanup
 .PHONY: all
 all: $(OUTPUT)/amd64/helper.exe $(OUTPUT)/i686/helper.exe $(OUTPUT)/amd64/lifecycle.exe $(OUTPUT)/i686/lifecycle.exe
 
-LIFECYCLE_SOURCES := lifecycle.cpp ../../windows/win32_util.cpp ../../windows/command_line.cpp ../../windows/operation_error.cpp
+LIFECYCLE_SOURCES := lifecycle.cpp ../../windows/win32_util.cpp ../../windows/command_line.cpp ../../windows/operation_error.cpp ../../windows/win32_files.cpp ../../windows/binary_codec.cpp
 LIFECYCLE_HEADERS := $(wildcard ../../windows/*.h) ../../windows/win32_process.cpp
 
 $(OUTPUT)/amd64/lifecycle.exe: $(LIFECYCLE_SOURCES) $(LIFECYCLE_HEADERS)
 	@mkdir -p $(@D)
-	$(AMD64_CXX) $(CXXFLAGS) -Wno-error=type-limits -DPSAPI_VERSION=1 $(LIFECYCLE_SOURCES) -o $@ -lpsapi
+	$(AMD64_CXX) $(CXXFLAGS) -Wno-error=type-limits -DPSAPI_VERSION=1 $(LIFECYCLE_SOURCES) -o $@ -lpsapi -lbcrypt
 
 $(OUTPUT)/i686/lifecycle.exe: $(LIFECYCLE_SOURCES) $(LIFECYCLE_HEADERS)
 	@mkdir -p $(@D)
-	$(I686_CXX) $(CXXFLAGS) -Wno-error=type-limits -DPSAPI_VERSION=1 $(LIFECYCLE_SOURCES) -o $@ -lpsapi
+	$(I686_CXX) $(CXXFLAGS) -Wno-error=type-limits -DPSAPI_VERSION=1 $(LIFECYCLE_SOURCES) -o $@ -lpsapi -lbcrypt
 
-$(OUTPUT)/amd64/helper.exe: helper.cpp
+$(OUTPUT)/amd64/helper.exe: helper.cpp ../../windows/command_line.cpp
 	@mkdir -p $(@D)
-	$(AMD64_CXX) $(CXXFLAGS) $< -o $@ -ladvapi32
+	$(AMD64_CXX) $(CXXFLAGS) -Wno-error=type-limits $^ -o $@ -ladvapi32
 
-$(OUTPUT)/i686/helper.exe: helper.cpp
+$(OUTPUT)/i686/helper.exe: helper.cpp ../../windows/command_line.cpp
 	@mkdir -p $(@D)
-	$(I686_CXX) $(CXXFLAGS) $< -o $@ -ladvapi32
+	$(I686_CXX) $(CXXFLAGS) -Wno-error=type-limits $^ -o $@ -ladvapi32

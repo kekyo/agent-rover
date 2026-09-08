@@ -127,6 +127,8 @@ export const defaultFakeCapabilities: RemoteAgentCapabilities = {
     'process.list',
     'process.launchManaged',
     'process.managedSnapshot',
+    'process.managedRunning',
+    'process.readCaptured',
     'process.releaseManaged',
     'process.snapshot',
     'eventLogs.read',
@@ -859,6 +861,17 @@ export const startFakeTcpAgent = async (
             });
           }
           return;
+        case 'process.managedRunning': {
+          const processId = managedProcesses.get(
+            Number(recordParams.managedProcessId)
+          );
+          sendSuccess(
+            id,
+            processId !== undefined &&
+              processes.get(processId)?.running === true
+          );
+          return;
+        }
         case 'process.managedSnapshot': {
           const managedProcessId = recordParams.managedProcessId;
           if (typeof managedProcessId !== 'number') {
@@ -1286,8 +1299,17 @@ export const startFakeTcpAgent = async (
           sendSuccess(id, null);
           return;
         }
+        case 'process.readCaptured':
         case 'file.read': {
-          const path = recordParams.path;
+          const launch = managedProcessOptions.get(
+            Number(recordParams.managedProcessId)
+          );
+          const path =
+            method === 'file.read'
+              ? recordParams.path
+              : recordParams.stream === 'stderr'
+                ? launch?.stderrPath
+                : launch?.stdoutPath;
           const data =
             typeof path === 'string'
               ? (files.get(normalizePath(path)) ?? Buffer.alloc(0))

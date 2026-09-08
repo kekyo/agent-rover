@@ -349,6 +349,99 @@ describe('Windows cleanup integration', () => {
           } finally {
             await command(['writable', file]);
           }
+          for (const mode of ['capture', 'capture-tree']) {
+            const ready = `${root}/${mode}.ready`;
+            const event = `Local\\agent-rover-${randomBytes(12).toString('hex')}`;
+            const captured = await agent.processes.launchManaged({
+              path: `${root}/helper.exe`,
+              arguments: [mode, ready, event],
+              captureStdout: true,
+              captureStderr: true,
+              createNoWindow: true,
+            });
+            let signaled = false;
+            try {
+              await waitForResult(async () => {
+                expect(await activeAgent.files.exists(ready)).toBe(true);
+              });
+              if (mode === 'capture') {
+                expect(await captured.stdoutText()).toBe('start\n');
+                expect(await captured.stderrText()).toBe('error-start\n');
+                await command(['signal', event]);
+                signaled = true;
+                expect((await captured.waitForExit()).root.exitCode).toBe(0);
+                expect(await captured.stdoutText()).toBe(
+                  `start\n${'x'.repeat(131077)}\n終端\n`
+                );
+              } else {
+                await waitForResult(async () => {
+                  expect((await captured.rootSnapshot()).running).toBe(false);
+                });
+                expect((await captured.snapshot()).running).toBe(true);
+                let settled = false;
+                const reading = (async () => {
+                  try {
+                    return { value: await captured.stdoutText() };
+                  } catch (error) {
+                    return { error };
+                  } finally {
+                    settled = true;
+                  }
+                })();
+                // This later RPC is a barrier: the first capture request has reached the agent.
+                await activeAgent.files.stat(ready);
+                expect(settled).toBe(false);
+                await command(['signal', event]);
+                signaled = true;
+                expect(await reading).toEqual({
+                  value: `start\n${'x'.repeat(131077)}\n終端\n`,
+                });
+              }
+              expect(await captured.stderrText()).toBe(
+                'error-start\nerror-end\n'
+              );
+            } finally {
+              if (!signaled) await command(['signal', event]);
+              await captured.releaseAsync();
+            }
+          }
+          const empty = await agent.processes.launchManaged({
+            path: `${root}/helper.exe`,
+            arguments: ['empty', 'unused'],
+            captureStdout: true,
+            captureStderr: true,
+            createNoWindow: true,
+          });
+          await empty.waitForExit();
+          expect(await empty.stdoutText()).toBe('');
+          expect(await empty.stderrText()).toBe('');
+          await empty.releaseAsync();
+          const ready = `${root}/no-kill.ready`;
+          const event = `Local\\agent-rover-${randomBytes(12).toString('hex')}`;
+          const noKill = await agent.processes.launchManaged({
+            path: `${root}/helper.exe`,
+            arguments: ['capture', ready, event],
+            captureStdout: true,
+            captureStderr: true,
+            killTreeOnRelease: false,
+            createNoWindow: true,
+          });
+          try {
+            await waitForResult(async () => {
+              expect(await activeAgent.files.exists(ready)).toBe(true);
+            });
+            await expect(
+              noKill.releaseAsync({ timeoutMs: 0 })
+            ).rejects.toMatchObject({
+              details: { reason: 'busy', stage: 'processExit', timedOut: true },
+            });
+            expect((await agent.processes.snapshot(noKill.id)).running).toBe(
+              true
+            );
+          } finally {
+            await command(['signal', event]);
+            await noKill.releaseAsync();
+          }
         } finally {
           agent?.release();
           if (agentId !== undefined) {

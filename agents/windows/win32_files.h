@@ -64,6 +64,17 @@ bool ReadFileBytes(
     OperationError* error);
 
 /**
+ * Reads a capture snapshot, permitting a live writer only when requested.
+ * @param path Captured file path.
+ * @param allow_writer Whether an existing write handle may coexist with this read.
+ * @param data Receives bytes present at the start of the read.
+ * @param error Receives the structured read or sharing failure.
+ * @return Whether all snapshot bytes were read.
+ */
+bool ReadCaptureFileBytes(const std::string& path, bool allow_writer,
+                          std::vector<unsigned char>* data, OperationError* error);
+
+/**
  * Computes a file SHA-256 digest without retaining the file in memory.
  *
  * @param path UTF-8 path on the agent machine.

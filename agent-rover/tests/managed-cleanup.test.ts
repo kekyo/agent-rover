@@ -8,6 +8,56 @@ import { connectRemoteAgent } from '../src/index';
 import { startFakeTcpAgent } from './helpers/fake-tcp-agent';
 
 describe('managed cleanup completion', () => {
+  it('keeps output alive until an in-flight completed-output read finishes', async () => {
+    let allowRead = false;
+    let sawRead: () => void = () => {};
+    const readStarted = new Promise<void>((resolve) => {
+      sawRead = resolve;
+    });
+    const fake = await startFakeTcpAgent({
+      beforeRequest: (method) => {
+        if (method !== 'process.readCaptured' || allowRead) return undefined;
+        sawRead();
+        return {
+          code: 'OPERATION_FAILED',
+          message: 'descendant is writing',
+          details: {
+            operation: method,
+            nativeOperation: 'QueryInformationJobObject',
+            path: '',
+            osCode: 170,
+            reason: 'busy',
+          },
+        };
+      },
+    });
+    const agent = await connectRemoteAgent({
+      host: fake.host,
+      port: fake.port,
+    });
+    try {
+      const child = await agent.processes.launchManaged({
+        path: 'test.exe',
+        captureStdout: true,
+      });
+      const reading = child.stdoutText();
+      await readStarted;
+      const releasing = child.releaseAsync();
+      await agent.files.exists('C:/agent-rover-managed-process-fake');
+      expect(fake.managedProcessCount()).toBe(1);
+      allowRead = true;
+      const [output] = await Promise.all([reading, releasing]);
+      expect(output).toBe('managed stdout');
+      expect(fake.managedProcessCount()).toBe(0);
+      expect(
+        await agent.files.exists('C:/agent-rover-managed-process-fake')
+      ).toBe(false);
+    } finally {
+      allowRead = true;
+      agent.release();
+      await fake.close();
+    }
+  });
   it('retains resources after native release failure and retries the unfinished release', async () => {
     let fail = true;
     const fake = await startFakeTcpAgent({

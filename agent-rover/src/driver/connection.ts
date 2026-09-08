@@ -3126,6 +3126,7 @@ export const connectRemoteAgent = async (
     let nativeReleased = false;
     let treeReleased = false;
     let releasing: Promise<void> | undefined;
+    const activeReads = new Set<Promise<string>>();
     const knownProcessIds = new Set<number>([options.process.id]);
 
     const assertNotReleased = (): void => {
@@ -3240,11 +3241,23 @@ export const connectRemoteAgent = async (
     const snapshot = async (): Promise<RemoteManagedProcessSnapshot> => {
       const root = await rootSnapshot();
       const trackedProcesses = await collectTrackedProcesses(root);
+      const nativeRunning = options.nativeManaged
+        ? await requestJson('process.managedRunning', {
+            managedProcessId: nativeManagedProcessId(),
+          })
+        : false;
+      if (typeof nativeRunning !== 'boolean')
+        throw createRemoteAgentError(
+          'PROTOCOL_ERROR',
+          'Invalid managed process running state.'
+        );
       return {
         processes: trackedProcesses,
         root,
         running:
-          root.running || trackedProcesses.some((process) => process.running),
+          nativeRunning ||
+          root.running ||
+          trackedProcesses.some((process) => process.running),
       };
     };
 
@@ -3326,10 +3339,37 @@ export const connectRemoteAgent = async (
 
     const readCapturedText = async (
       label: 'stderr' | 'stdout',
-      path: string | undefined
+      path: string | undefined,
+      readOptions: RemoteCleanupOptions | undefined
     ): Promise<string> => {
       assertNotReleased();
-      return (await readRemoteFile(capturedPath(label, path))).toString('utf8');
+      const resolvedPath = capturedPath(label, path);
+      const deadline = createResourceDeadline(readOptions?.timeoutMs);
+      const reading = retryResourceOperation(
+        deadline,
+        (error) =>
+          ['busy', 'sharingViolation', 'lockViolation'].includes(
+            operationDetails(error)?.reason ?? ''
+          ),
+        async () => {
+          const data = options.nativeManaged
+            ? await parseFileReadResult(
+                await requestJson('process.readCaptured', {
+                  managedProcessId: nativeManagedProcessId(),
+                  stream: label,
+                }),
+                readBinaryTransfer
+              )
+            : await readRemoteFile(resolvedPath);
+          return data.toString('utf8');
+        }
+      );
+      activeReads.add(reading);
+      try {
+        return await reading;
+      } finally {
+        activeReads.delete(reading);
+      }
     };
 
     const releaseNative = async (): Promise<void> => {
@@ -3443,6 +3483,37 @@ export const connectRemoteAgent = async (
       const deadline = createResourceDeadline(releaseOptions?.timeoutMs);
       releaseStarted = true;
       const attempt = async (): Promise<void> => {
+        if (activeReads.size > 0) {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const timeout = new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () =>
+                reject(
+                  Object.assign(
+                    new Error('Capture read is still in progress.'),
+                    {
+                      code: 'OPERATION_FAILED',
+                      details: {
+                        operation: 'process.releaseManaged',
+                        nativeOperation: '',
+                        path: options.tempDirectory ?? '',
+                        osCode: null,
+                        reason: 'busy',
+                        stage: 'captureRead',
+                        timedOut: true,
+                      },
+                    }
+                  )
+                ),
+              Math.max(0, deadline.expiresAt - performance.now())
+            );
+          });
+          try {
+            await Promise.race([Promise.allSettled([...activeReads]), timeout]);
+          } finally {
+            clearTimeout(timer);
+          }
+        }
         if (options.nativeManaged) {
           if (!nativeReleased) {
             await retryResourceOperation(
@@ -3511,10 +3582,10 @@ export const connectRemoteAgent = async (
         assertNotReleased();
         return await snapshot();
       },
-      stderrText: async (): Promise<string> =>
-        await readCapturedText('stderr', options.stderrPath),
-      stdoutText: async (): Promise<string> =>
-        await readCapturedText('stdout', options.stdoutPath),
+      stderrText: async (readOptions): Promise<string> =>
+        await readCapturedText('stderr', options.stderrPath, readOptions),
+      stdoutText: async (readOptions): Promise<string> =>
+        await readCapturedText('stdout', options.stdoutPath, readOptions),
       waitForNoWindow,
       waitForWindow,
       waitForExit,

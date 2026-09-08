@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "command_line.h"
+#include "win32_files.h"
 #include "win32_util.h"
 
 namespace agent_rover {
@@ -32,6 +33,8 @@ struct ManagedProcessEntry {
   bool exit_confirmed = false;
   std::vector<std::string> capture_paths = {};
   HANDLE capture_guard = nullptr;
+  std::string stdout_path = {};
+  std::string stderr_path = {};
 };
 
 static std::map<uint32_t, ManagedProcessEntry> g_managed_processes;
@@ -372,6 +375,8 @@ bool LaunchManagedProcess(
   };
   if (!options.launch.stdout_path.empty()) entry.capture_paths.push_back(options.launch.stdout_path);
   if (!options.launch.stderr_path.empty()) entry.capture_paths.push_back(options.launch.stderr_path);
+  entry.stdout_path = options.launch.stdout_path;
+  entry.stderr_path = options.launch.stderr_path;
   g_managed_processes[managed_id] = entry;
 
   *process = {
@@ -521,6 +526,35 @@ bool KillManagedProcess(uint32_t managed_id, OperationError* error) {
   }
   entry.termination_requested = true;
   return true;
+}
+
+bool ManagedProcessRunning(uint32_t managed_id, bool* running, OperationError* error) {
+  const auto iterator = g_managed_processes.find(managed_id);
+  if (iterator == g_managed_processes.end()) { *error = "Unknown managed process id."; return false; }
+  const auto& entry = iterator->second;
+  JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting = {};
+  if (!QueryInformationJobObject(entry.job, JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), nullptr)) {
+    *error = MakeOperationError("QueryInformationJobObject", entry.path, GetLastError()); return false;
+  }
+  *running = accounting.ActiveProcesses != 0;
+  return true;
+}
+
+bool ReadManagedCapture(uint32_t managed_id, bool stderr_stream,
+                         std::vector<unsigned char>* data, OperationError* error) {
+  const auto iterator = g_managed_processes.find(managed_id);
+  if (iterator == g_managed_processes.end()) { *error = "Unknown managed process id."; return false; }
+  const auto& entry = iterator->second;
+  const auto& path = stderr_stream ? entry.stderr_path : entry.stdout_path;
+  if (path.empty()) { *error = "The requested output was not captured."; error->reason = "invalidArgument"; return false; }
+  const auto state = WaitForSingleObject(entry.process, 0);
+  if (state == WAIT_FAILED) { *error = MakeOperationError("WaitForSingleObject", path, GetLastError()); return false; }
+  if (state == WAIT_OBJECT_0) {
+    bool running = false;
+    if (!ManagedProcessRunning(managed_id, &running, error)) return false;
+    if (running) { *error = MakeOperationError("QueryInformationJobObject", path, ERROR_BUSY); error->stage = "capture"; return false; }
+  }
+  return ReadCaptureFileBytes(path, state != WAIT_OBJECT_0, data, error);
 }
 
 bool ReleaseManagedProcess(uint32_t managed_id, OperationError* error) {

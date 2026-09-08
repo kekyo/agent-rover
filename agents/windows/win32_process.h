@@ -181,6 +181,26 @@ bool KillManagedProcess(uint32_t managed_id, OperationError* error);
  */
 bool ReleaseManagedProcess(uint32_t managed_id, OperationError* error);
 
+/**
+ * Checks all members of a managed Job, including descendants whose parent exited.
+ * @param managed_id Managed resource identifier.
+ * @param running Receives whether any member is still active.
+ * @param error Receives a structured query failure.
+ * @return Whether the state could be read.
+ */
+bool ManagedProcessRunning(uint32_t managed_id, bool* running, OperationError* error);
+
+/**
+ * Reads a live output snapshot or completed output after the root exits.
+ * @param managed_id Managed resource identifier.
+ * @param stderr_stream Selects stderr instead of stdout.
+ * @param data Receives UTF-8 capture bytes.
+ * @param error Receives busy while descendants still write, or another native failure.
+ * @return Whether the selected output is available.
+ */
+bool ReadManagedCapture(uint32_t managed_id, bool stderr_stream,
+                         std::vector<unsigned char>* data, OperationError* error);
+
 }  // namespace agent_rover
 
 #endif  // AGENT_ROVER_WINDOWS_AGENT_WIN32_PROCESS_H

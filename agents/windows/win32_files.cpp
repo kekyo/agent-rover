@@ -118,13 +118,18 @@ bool ReadFileBytes(
     const std::string& path,
     std::vector<unsigned char>* data,
     OperationError* error) {
+  return ReadCaptureFileBytes(path, false, data, error);
+}
+
+bool ReadCaptureFileBytes(const std::string& path, bool allow_writer,
+                          std::vector<unsigned char>* data, OperationError* error) {
   const std::wstring wide_path = Utf8ToWide(path);
   if (wide_path.empty()) {
     *error = "File path is empty or invalid UTF-8.";
     return false;
   }
 
-  HANDLE file = CreateFileW(wide_path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+  HANDLE file = CreateFileW(wide_path.c_str(), GENERIC_READ, FILE_SHARE_READ | (allow_writer ? FILE_SHARE_WRITE : 0),
                             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
                             nullptr);
   if (file == INVALID_HANDLE_VALUE) {

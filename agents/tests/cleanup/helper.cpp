@@ -5,6 +5,18 @@
 #include <windows.h>
 #include <aclapi.h>
 #include <string>
+#include <vector>
+#include "../../windows/command_line.h"
+
+static bool Output(HANDLE handle, const std::string& text) {
+  size_t offset = 0;
+  while (offset < text.size()) {
+    DWORD written = 0;
+    if (!WriteFile(handle, text.data() + offset, static_cast<DWORD>(text.size() - offset), &written, nullptr) || written == 0) return false;
+    offset += written;
+  }
+  return true;
+}
 
 static bool Touch(const wchar_t* path) {
   const auto file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr,
@@ -15,6 +27,30 @@ static bool Touch(const wchar_t* path) {
 int wmain(int argc, wchar_t** argv) {
   if (argc < 3) return 2;
   const std::wstring mode = argv[1];
+  if (mode == L"empty") return 0;
+  if (mode == L"capture" && argc == 4) {
+    const auto event = CreateEventW(nullptr, TRUE, FALSE, argv[3]);
+    if (event == nullptr) return 30;
+    if (!Output(GetStdHandle(STD_OUTPUT_HANDLE), "start\n") || !Output(GetStdHandle(STD_ERROR_HANDLE), "error-start\n") || !Touch(argv[2])) return 31;
+    const auto waited = WaitForSingleObject(event, 60000);
+    CloseHandle(event);
+    if (waited != WAIT_OBJECT_0) return 32;
+    return Output(GetStdHandle(STD_OUTPUT_HANDLE), std::string(131077, 'x') + "\n終端\n") &&
+        Output(GetStdHandle(STD_ERROR_HANDLE), "error-end\n") ? 0 : 33;
+  }
+  if (mode == L"capture-tree" && argc == 4) {
+    const auto line = agent_rover::BuildCommandLine(argv[0], {L"capture", argv[2], argv[3]});
+    std::vector<wchar_t> command(line.begin(), line.end()); command.push_back(0);
+    STARTUPINFOW startup = {}; startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    PROCESS_INFORMATION process = {};
+    if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) return 34;
+    CloseHandle(process.hThread); CloseHandle(process.hProcess);
+    return 0;
+  }
   if (mode == L"readonly" || mode == L"writable") {
     const auto attributes = GetFileAttributesW(argv[2]);
     if (attributes == INVALID_FILE_ATTRIBUTES) return 3;

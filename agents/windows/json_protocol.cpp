@@ -521,6 +521,8 @@ static std::string CapabilitiesJson() {
       "\"process.releaseManaged\","
       "\"process.launchManaged\","
       "\"process.managedSnapshot\","
+      "\"process.managedRunning\","
+      "\"process.readCaptured\","
       "\"process.snapshot\","
       "\"eventLogs.read\","
       "\"";
@@ -1261,6 +1263,23 @@ std::string HandleJsonRequest(
       return OperationFailureJson(id, method, error);
     }
     return SuccessResponseJson(id, ProcessSnapshotJson(process));
+  }
+  if (method == "process.managedRunning" || method == "process.readCaptured") {
+    int managed_id = 0;
+    if (!FindJsonNumberField(payload, "managedProcessId", &managed_id) || managed_id <= 0) return FailureResponseJson(id, "A managed process ID is required.");
+    OperationError error;
+    if (method == "process.managedRunning") {
+      bool running = false;
+      if (!ManagedProcessRunning(static_cast<uint32_t>(managed_id), &running, &error)) return OperationFailureJson(id, method, error);
+      return SuccessResponseJson(id, running ? "true" : "false");
+    }
+    std::string stream;
+    if (!FindJsonStringField(payload, "stream", &stream) || (stream != "stdout" && stream != "stderr")) return FailureResponseJson(id, "Capture stream must be stdout or stderr.");
+    std::vector<unsigned char> data;
+    if (!ReadManagedCapture(static_cast<uint32_t>(managed_id), stream == "stderr", &data, &error)) return OperationFailureJson(id, method, error);
+    const std::string transfer_id = id + "-capture";
+    AddBinaryTransferChunks(transfer_id, "application/octet-stream", data, outbound_chunks);
+    return SuccessResponseJson(id, BinaryTransferMetadataJson(transfer_id, "application/octet-stream", data));
   }
   if (method == "process.killManaged") {
     int managed_process_id = 0;
