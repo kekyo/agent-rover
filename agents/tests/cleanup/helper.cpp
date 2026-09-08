@@ -68,10 +68,10 @@ int wmain(int argc, wchar_t** argv) {
     CloseHandle(event);
     if (waited != WAIT_OBJECT_0) return 32;
     return Output(GetStdHandle(STD_OUTPUT_HANDLE), std::string(131077, 'x') + "\n終端\n") &&
-        Output(GetStdHandle(STD_ERROR_HANDLE), "error-end\n") ? 0 : 33;
+        Output(GetStdHandle(STD_ERROR_HANDLE), std::string(131077, 'e') + "\n終端\n") ? 0 : 33;
   }
-  if (mode == L"capture-tree" && argc == 4) {
-    const auto line = agent_rover::BuildCommandLine(argv[0], {L"capture", argv[2], argv[3]});
+  if ((mode == L"capture-tree" || mode == L"capture-grandchild") && argc == 4) {
+    const auto line = agent_rover::BuildCommandLine(argv[0], {mode == L"capture-grandchild" ? L"capture-tree" : L"capture", argv[2], argv[3]});
     std::vector<wchar_t> command(line.begin(), line.end()); command.push_back(0);
     STARTUPINFOW startup = {}; startup.cb = sizeof(startup);
     startup.dwFlags = STARTF_USESTDHANDLES;

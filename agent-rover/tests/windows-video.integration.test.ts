@@ -65,27 +65,32 @@ const connectToTestAgent = async (
   host: string,
   token: string
 ): Promise<RemoteAgent> => {
-  let lastError: unknown = undefined;
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    try {
-      return await connectRemoteAgent({
-        authToken: token,
-        host,
-        port: testAgentPort,
-        timeoutMs: 5000,
-      });
-    } catch (error) {
-      lastError = error;
-      await delay(250);
-    }
-  }
-  throw new Error(
-    `Timed out connecting to the uploaded video test agent: ${String(
-      lastError
-    )}`
+  return await waitForResult(
+    async () => {
+      try {
+        return await connectRemoteAgent({
+          authToken: token,
+          host,
+          port: testAgentPort,
+          timeoutMs: 5000,
+        });
+      } catch (error) {
+        throw new Error('The uploaded video agent is not ready.', {
+          cause: error,
+        });
+      }
+    },
+    { timeoutMs: 15000, intervalMs: 50 }
   );
 };
 
+if (
+  process.env.AGENT_ROVER_REQUIRE_WINDOWS_TESTS === '1' &&
+  !hasWin11Environment()
+)
+  throw new Error(
+    'Windows acceptance requires AGENT_ROVER_WIN11_HOST2 and AGENT_ROVER_WIN11_TOKEN2.'
+  );
 const win11It = hasWin11Environment() ? it : it.skip;
 
 describe('Windows video capture integration', () => {
@@ -106,8 +111,9 @@ describe('Windows video capture integration', () => {
       await execFileResult('make', ['amd64'], agentDirectory);
       const bootstrap = await connectWindowsBootstrap();
       let testAgent: RemoteAgent | undefined = undefined;
-      let testAgentProcess: { managedProcessId: number } | undefined =
-        undefined;
+      let testAgentProcess:
+        { managedProcessId: number; id: number } | undefined = undefined;
+      const failures: unknown[] = [];
       let capturedWindow:
         Awaited<ReturnType<RemoteAgent['waitForWindow']>> | undefined =
         undefined;
@@ -130,7 +136,7 @@ describe('Windows video capture integration', () => {
           createNoWindow: true,
           path: remoteAgentPath,
           workingDirectory: remoteDirectory,
-        })) as { managedProcessId: number };
+        })) as { managedProcessId: number; id: number };
         testAgent = await connectToTestAgent(host, testToken);
 
         await testAgent.files.writeFile(
@@ -203,12 +209,29 @@ describe('Windows video capture integration', () => {
           height: initialBounds.height + (initialBounds.height % 2),
           width: initialBounds.width + (initialBounds.width % 2),
         });
+      } catch (error) {
+        failures.push(error);
       } finally {
         if (capturedWindow !== undefined) {
           try {
             await capturedWindow.close();
-          } catch {
-            // Continue teardown when the test window has already closed.
+            await testAgent!.waitForNoWindow({
+              processName: 'notepad.exe',
+              titleRegex: new RegExp(uniqueName, 'u'),
+              visible: true,
+            });
+          } catch (error) {
+            failures.push(error);
+          }
+        }
+        if (testAgent !== undefined) {
+          try {
+            await testAgent.files.remove(remoteTextPath, {
+              ignoreMissing: true,
+            });
+            expect(await testAgent.files.exists(remoteTextPath)).toBe(false);
+          } catch (error) {
+            failures.push(error);
           }
         }
         testAgent?.release();
@@ -217,22 +240,51 @@ describe('Windows video capture integration', () => {
             await bootstrap.request('process.releaseManaged', {
               managedProcessId: testAgentProcess.managedProcessId,
             });
-          } catch {
-            // Continue teardown when the uploaded agent has already exited.
+            await waitForResult(
+              async () => {
+                const state = (await bootstrap.request('process.snapshot', {
+                  processId: testAgentProcess!.id,
+                })) as { running: boolean };
+                expect(state.running).toBe(false);
+              },
+              { timeoutMs: 10000, intervalMs: 50 }
+            );
+          } catch (error) {
+            failures.push(error);
           }
         }
-        await delay(250);
         try {
-          await bootstrap.request('file.remove', {
-            path: remoteDirectory,
-            recursive: true,
-          });
-        } catch {
-          // A failed assertion must not be hidden by best-effort remote cleanup.
+          await waitForResult(
+            async () => {
+              try {
+                await bootstrap.request('file.remove', {
+                  path: remoteDirectory,
+                  recursive: true,
+                });
+              } catch (error) {
+                throw new Error(
+                  `Deployment directory is not removable yet: ${String(error)}`,
+                  { cause: error }
+                );
+              }
+            },
+            { timeoutMs: 10000, intervalMs: 50 }
+          );
+          expect(
+            await bootstrap.request('file.exists', { path: remoteDirectory })
+          ).toEqual({ exists: false });
+        } catch (error) {
+          failures.push(error);
+        } finally {
+          await bootstrap.close();
+          await rm(localDirectory, { force: true, recursive: true });
         }
-        await bootstrap.close();
-        await rm(localDirectory, { force: true, recursive: true });
       }
+      if (failures.length > 0)
+        throw new AggregateError(
+          failures,
+          'Video assertions or cleanup failed.'
+        );
     },
     120000
   );
@@ -255,6 +307,7 @@ describe('Windows cleanup integration', () => {
         const port = 39417;
         let agent: RemoteAgent | undefined;
         let agentId: number | undefined;
+        let managedAgentId: number | undefined;
         const failures: unknown[] = [];
         try {
           await bootstrap.request('file.mkdir', {
@@ -271,7 +324,8 @@ describe('Windows cleanup integration', () => {
               join(agentDirectory, '.build', 'cleanup', abi, 'helper.exe')
             )
           );
-          const launched = (await bootstrap.request('applications.launch', {
+          const launched = (await bootstrap.request('process.launchManaged', {
+            killTreeOnRelease: true,
             path: `${root}/agent.exe`,
             arguments: [
               '--host',
@@ -282,8 +336,9 @@ describe('Windows cleanup integration', () => {
               token,
             ],
             createNoWindow: true,
-          })) as { id: number };
+          })) as { managedProcessId: number; id: number };
           agentId = launched.id;
+          managedAgentId = launched.managedProcessId;
           agent = await waitForResult(
             async () => {
               try {
@@ -410,7 +465,11 @@ describe('Windows cleanup integration', () => {
             if (await agent.files.exists(denied))
               await command(['restore', denied]);
           }
-          for (const mode of ['capture', 'capture-tree']) {
+          for (const mode of [
+            'capture',
+            'capture-tree',
+            'capture-grandchild',
+          ]) {
             const ready = `${root}/${mode}.ready`;
             const event = `Local\\agent-rover-${randomBytes(12).toString('hex')}`;
             const captured = await agent.processes.launchManaged({
@@ -459,7 +518,7 @@ describe('Windows cleanup integration', () => {
                 });
               }
               expect(await captured.stderrText()).toBe(
-                'error-start\nerror-end\n'
+                `error-start\n${'e'.repeat(131077)}\n終端\n`
               );
             } finally {
               if (!signaled) await command(['signal', event]);
@@ -563,7 +622,9 @@ describe('Windows cleanup integration', () => {
           try {
             agent?.release();
             if (agentId !== undefined) {
-              await bootstrap.request('process.kill', { processId: agentId });
+              await bootstrap.request('process.releaseManaged', {
+                managedProcessId: managedAgentId!,
+              });
               await waitForResult(
                 async () => {
                   const state = (await bootstrap.request('process.snapshot', {
