@@ -422,6 +422,13 @@ export interface RemoteManagedProcessSnapshot {
 /** Managed remote process handle. */
 export interface RemoteManagedProcess
   extends RemoteApplicationProcess, AsyncReleaseable {
+  /**
+   * Completes owned cleanup, preserving unfinished stages after failure.
+   * @param options Overall cleanup deadline, defaulting to 10000 milliseconds.
+   * @returns Completion of process termination, owned handle release and temporary cleanup.
+   * @remarks Concurrent calls join the current release. A failed release can be retried.
+   */
+  readonly releaseAsync: (options?: RemoteCleanupOptions) => Promise<void>;
   /** Reads the current root process state. */
   readonly rootSnapshot: () => Promise<RemoteProcessSnapshot>;
   /** Reads the current logical application state. */
@@ -1240,6 +1247,18 @@ export interface RemoteOperationErrorDetails {
     | 'invalidArgument';
   /** Incomplete cleanup stage, when applicable. */
   readonly stage?: string;
+  /** Attempts made by the current retry operation. */
+  readonly attempts?: number;
+  /** Milliseconds elapsed since the outermost operation started. */
+  readonly elapsedMs?: number;
+  /** Whether the operation's deadline was reached. */
+  readonly timedOut?: boolean;
+}
+
+/** Deadline options for process cleanup and completed-output reads. */
+export interface RemoteCleanupOptions {
+  /** Overall deadline in milliseconds; zero permits one immediate attempt. Default is 10000. */
+  readonly timeoutMs?: number;
 }
 
 export { connectRemoteAgent } from './driver/connection';

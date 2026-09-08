@@ -299,6 +299,22 @@ describe('Windows cleanup integration', () => {
             { timeoutMs: 15000, intervalMs: 50 }
           );
           const activeAgent = agent;
+          await agent.files.writeFile(
+            `${root}/lifecycle.exe`,
+            await readFile(
+              join(agentDirectory, '.build', 'cleanup', abi, 'lifecycle.exe')
+            )
+          );
+          const lifecycle = await agent.processes.launchManaged({
+            path: `${root}/lifecycle.exe`,
+            createNoWindow: true,
+          });
+          try {
+            const exited = await lifecycle.waitForExit();
+            expect(exited.root.exitCode).toBe(0);
+          } finally {
+            await lifecycle.releaseAsync();
+          }
           const command = async (args: readonly string[]): Promise<void> => {
             const child = await activeAgent.processes.launchManaged({
               path: `${root}/helper.exe`,

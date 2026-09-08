@@ -6,6 +6,8 @@
 #ifndef AGENT_ROVER_WINDOWS_AGENT_WIN32_PROCESS_H
 #define AGENT_ROVER_WINDOWS_AGENT_WIN32_PROCESS_H
 
+#include "operation_error.h"
+
 #include <cstdint>
 #include <map>
 #include <string>
@@ -92,92 +94,92 @@ struct ProcessListOptions {
  *
  * @param options Launch options.
  * @param process Receives launched process metadata.
- * @param error Receives a human-readable error on failure.
+ * @param error Receives a structured diagnostic on failure.
  * @return true on success.
  */
 bool LaunchApplication(
     const ApplicationLaunchOptions& options,
     ApplicationProcess* process,
-    std::string* error);
+    OperationError* error);
 
 /**
  * Launches a managed application and keeps its process handle.
  *
  * @param options Launch options.
  * @param process Receives managed process metadata.
- * @param error Receives a human-readable error on failure.
+ * @param error Receives a structured diagnostic on failure.
  * @return true on success.
  */
 bool LaunchManagedProcess(
     const ManagedProcessLaunchOptions& options,
     ManagedProcess* process,
-    std::string* error);
+    OperationError* error);
 
 /**
  * Reads one process snapshot.
  *
  * @param process_id Operating system process id.
  * @param snapshot Receives process snapshot.
- * @param error Receives a human-readable error on failure.
+ * @param error Receives a structured diagnostic on failure.
  * @return true on success.
  */
 bool SnapshotProcess(
     uint32_t process_id,
     ProcessSnapshot* snapshot,
-    std::string* error);
+    OperationError* error);
 
 /**
  * Reads one managed process snapshot from its retained handle.
  *
  * @param managed_id Agent-side managed process id.
  * @param snapshot Receives process snapshot.
- * @param error Receives a human-readable error on failure.
+ * @param error Receives a structured diagnostic on failure.
  * @return true on success.
  */
 bool SnapshotManagedProcess(
     uint32_t managed_id,
     ProcessSnapshot* snapshot,
-    std::string* error);
+    OperationError* error);
 
 /**
  * Lists running processes.
  *
  * @param options Process list options.
  * @param processes Receives process snapshots.
- * @param error Receives a human-readable error on failure.
+ * @param error Receives a structured diagnostic on failure.
  * @return true on success.
  */
 bool ListProcesses(
     const ProcessListOptions& options,
     std::vector<ProcessSnapshot>* processes,
-    std::string* error);
+    OperationError* error);
 
 /**
  * Terminates a process.
  *
  * @param process_id Operating system process id.
- * @param error Receives a human-readable error on failure.
+ * @param error Receives a structured diagnostic on failure.
  * @return true on success.
  */
-bool KillProcess(uint32_t process_id, std::string* error);
+bool KillProcess(uint32_t process_id, OperationError* error);
 
 /**
  * Terminates a managed process.
  *
  * @param managed_id Agent-side managed process id.
- * @param error Receives a human-readable error on failure.
+ * @param error Receives a structured diagnostic on failure.
  * @return true on success.
  */
-bool KillManagedProcess(uint32_t managed_id, std::string* error);
+bool KillManagedProcess(uint32_t managed_id, OperationError* error);
 
 /**
  * Releases a managed process and closes retained handles.
  *
  * @param managed_id Agent-side managed process id.
- * @param error Receives a human-readable error on failure.
+ * @param error Receives a structured diagnostic on failure.
  * @return true on success.
  */
-bool ReleaseManagedProcess(uint32_t managed_id, std::string* error);
+bool ReleaseManagedProcess(uint32_t managed_id, OperationError* error);
 
 }  // namespace agent_rover
 

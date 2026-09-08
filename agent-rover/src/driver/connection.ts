@@ -73,6 +73,7 @@ import type {
   RemoteMouseClickOptions,
   RemoteMouseDragOptions,
   RemoteMouseWheelOptions,
+  RemoteCleanupOptions,
   RemoteManagedProcess,
   RemoteManagedProcessLaunchOptions,
   RemoteManagedProcessSnapshot,
@@ -85,6 +86,11 @@ import type {
 } from '../index';
 import { resolveAuthToken } from '../auth';
 import { waitForResult } from '../wait';
+import {
+  createResourceDeadline,
+  operationDetails,
+  retryResourceOperation,
+} from './resource-operation';
 import {
   createBinaryTransferChunks,
   createBinaryTransferReceiver,
@@ -3116,10 +3122,14 @@ export const connectRemoteAgent = async (
     readonly tempDirectory: string | undefined;
   }): RemoteManagedProcess => {
     let released = false;
+    let releaseStarted = false;
+    let nativeReleased = false;
+    let treeReleased = false;
+    let releasing: Promise<void> | undefined;
     const knownProcessIds = new Set<number>([options.process.id]);
 
     const assertNotReleased = (): void => {
-      if (released) {
+      if (released || releaseStarted) {
         throw createRemoteAgentError(
           'INVALID_ARGUMENT',
           'Managed process has already been released.'
@@ -3152,7 +3162,6 @@ export const connectRemoteAgent = async (
     };
 
     const rootSnapshot = async (): Promise<RemoteProcessSnapshot> => {
-      assertNotReleased();
       if (!options.nativeManaged) {
         return await snapshotProcess(options.process.id);
       }
@@ -3293,7 +3302,13 @@ export const connectRemoteAgent = async (
 
     const kill = async (): Promise<void> => {
       assertNotReleased();
-      await killTrackedProcessTree();
+      if (options.nativeManaged) {
+        await requestJson('process.killManaged', {
+          managedProcessId: nativeManagedProcessId(),
+        });
+      } else {
+        await killTrackedProcessTree();
+      }
     };
 
     const waitForExit = async (
@@ -3417,35 +3432,65 @@ export const connectRemoteAgent = async (
       }, waitOptions);
     };
 
-    const releaseAsync = async (): Promise<void> => {
-      if (released) {
+    const releaseAsync = async (
+      releaseOptions?: RemoteCleanupOptions
+    ): Promise<void> => {
+      if (released) return;
+      if (releasing !== undefined) {
+        await releasing;
         return;
       }
-
-      let firstError: unknown = undefined;
-      try {
-        if (options.killTreeOnRelease) {
-          await killTrackedProcessTree();
-        }
+      const deadline = createResourceDeadline(releaseOptions?.timeoutMs);
+      releaseStarted = true;
+      const attempt = async (): Promise<void> => {
         if (options.nativeManaged) {
-          await releaseNative();
+          if (!nativeReleased) {
+            await retryResourceOperation(
+              deadline,
+              (error) =>
+                ['busy', 'sharingViolation', 'lockViolation'].includes(
+                  operationDetails(error)?.reason ?? ''
+                ),
+              releaseNative
+            );
+            nativeReleased = true;
+          }
+        } else if (!treeReleased) {
+          if (options.killTreeOnRelease) {
+            await killTrackedProcessTree();
+            await retryResourceOperation(
+              deadline,
+              (error) => operationDetails(error)?.reason === 'busy',
+              async () => {
+                if ((await snapshot()).running)
+                  throw Object.assign(
+                    new Error('Managed process tree has not exited.'),
+                    {
+                      code: 'OPERATION_FAILED',
+                      details: {
+                        operation: 'process.releaseManaged',
+                        nativeOperation: '',
+                        path: options.process.name,
+                        osCode: null,
+                        reason: 'busy',
+                        stage: 'processExit',
+                      },
+                    }
+                  );
+              }
+            );
+          }
+          treeReleased = true;
         }
-      } catch (error) {
-        firstError = error;
-      }
-
-      try {
-        if (options.tempDirectory !== undefined) {
+        if (options.tempDirectory !== undefined)
           await removeRemotePath(options.tempDirectory, true);
-        }
-      } catch (error) {
-        firstError = firstError ?? error;
-      } finally {
         released = true;
-      }
-
-      if (firstError !== undefined) {
-        throw firstError;
+      };
+      releasing = attempt();
+      try {
+        await releasing;
+      } finally {
+        releasing = undefined;
       }
     };
 
@@ -3453,11 +3498,19 @@ export const connectRemoteAgent = async (
       id: options.process.id,
       kill,
       name: options.process.name,
-      processes: async (): Promise<readonly RemoteProcessSnapshot[]> =>
-        (await snapshot()).processes,
+      processes: async (): Promise<readonly RemoteProcessSnapshot[]> => {
+        assertNotReleased();
+        return (await snapshot()).processes;
+      },
       releaseAsync,
-      rootSnapshot,
-      snapshot,
+      rootSnapshot: async () => {
+        assertNotReleased();
+        return await rootSnapshot();
+      },
+      snapshot: async () => {
+        assertNotReleased();
+        return await snapshot();
+      },
       stderrText: async (): Promise<string> =>
         await readCapturedText('stderr', options.stderrPath),
       stdoutText: async (): Promise<string> =>
@@ -3466,7 +3519,9 @@ export const connectRemoteAgent = async (
       waitForWindow,
       waitForExit,
       windows: managedWindows,
-      [Symbol.asyncDispose]: releaseAsync,
+      [Symbol.asyncDispose]: async () => {
+        await releaseAsync();
+      },
     };
   };
 

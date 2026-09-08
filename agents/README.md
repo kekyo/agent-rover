@@ -1317,3 +1317,16 @@ The path identifies the actual failing entry during recursive operations.
 An access-denied code alone does not identify a transient lock or a permanent
 permission problem. Clients must use these fields instead of parsing `message`.
 Process cleanup may additionally report an incomplete `stage`.
+
+### Managed release completion
+
+`process.releaseManaged` retains unfinished native cleanup state. It returns
+`OPERATION_FAILED` with reason `busy` and stage `processExit` while a bounded
+exit check finds live Job members. The driver retries under one deadline.
+Termination, capture closure and handle closure errors retain the managed ID
+for a later attempt; repeating an already completed release succeeds.
+Managed launch requires successful Job assignment before resuming the process.
+With `killTreeOnRelease: false`, capture-free release closes monitoring handles
+without terminating the process. Captured processes must finish writing before
+release can complete. The driver marks release complete only after native
+release and removal of its temporary directory both succeed.

@@ -55,7 +55,7 @@ struct DirectoryManifestEntry {
  *
  * @param path UTF-8 path on the agent machine.
  * @param data Receives file bytes.
- * @param error Receives a human-readable error on failure.
+ * @param error Receives a structured diagnostic on failure.
  * @return true on success.
  */
 bool ReadFileBytes(
@@ -69,7 +69,7 @@ bool ReadFileBytes(
  * @param path UTF-8 path on the agent machine.
  * @param total_bytes Receives the file size in bytes.
  * @param sha256 Receives the lowercase hexadecimal digest.
- * @param error Receives a human-readable error on failure.
+ * @param error Receives a structured diagnostic on failure.
  * @return true on success.
  */
 bool HashFileSha256(
@@ -83,7 +83,7 @@ bool HashFileSha256(
  *
  * @param path UTF-8 path on the agent machine.
  * @param data Bytes to write.
- * @param error Receives a human-readable error on failure.
+ * @param error Receives a structured diagnostic on failure.
  * @return true on success.
  */
 bool WriteFileBytes(
@@ -103,7 +103,7 @@ bool PathExists(const std::string& path);
  *
  * @param path UTF-8 path on the agent machine.
  * @param stat Receives path metadata.
- * @param error Receives a human-readable error on failure.
+ * @param error Receives a structured diagnostic on failure.
  * @return true on success.
  */
 bool StatPath(const std::string& path, FileStat* stat, OperationError* error);
@@ -112,7 +112,7 @@ bool StatPath(const std::string& path, FileStat* stat, OperationError* error);
  *
  * @param path UTF-8 directory path on the agent machine.
  * @param recursive Whether missing parent directories should be created.
- * @param error Receives a human-readable error on failure.
+ * @param error Receives a structured diagnostic on failure.
  * @return true on success.
  */
 bool MakeDirectory(
@@ -124,7 +124,7 @@ bool MakeDirectory(
  *
  * @param path UTF-8 directory path on the agent machine.
  * @param entries Receives direct child entries.
- * @param error Receives a human-readable error on failure.
+ * @param error Receives a structured diagnostic on failure.
  * @return true on success.
  */
 bool ReadDirectoryEntries(
@@ -136,7 +136,7 @@ bool ReadDirectoryEntries(
  *
  * @param path UTF-8 directory path on the agent machine.
  * @param entries Receives recursive entries relative to path.
- * @param error Receives a human-readable error on failure.
+ * @param error Receives a structured diagnostic on failure.
  * @return true on success.
  */
 bool ReadDirectoryManifest(
@@ -148,7 +148,7 @@ bool ReadDirectoryManifest(
  *
  * @param path UTF-8 path on the agent machine.
  * @param recursive Whether directory contents may be removed recursively.
- * @param error Receives a human-readable error on failure.
+ * @param error Receives a structured diagnostic on failure.
  * @return true on success.
  */
 bool RemovePath(const std::string& path, bool recursive, OperationError* error);
@@ -157,7 +157,7 @@ bool RemovePath(const std::string& path, bool recursive, OperationError* error);
  *
  * @param from Existing UTF-8 path on the agent machine.
  * @param to Destination UTF-8 path on the agent machine.
- * @param error Receives a human-readable error on failure.
+ * @param error Receives a structured diagnostic on failure.
  * @return true on success.
  */
 bool RenamePath(
@@ -169,7 +169,7 @@ bool RenamePath(
  *
  * @param prefix UTF-8 path prefix used to create a unique directory.
  * @param path Receives the created directory path.
- * @param error Receives a human-readable error on failure.
+ * @param error Receives a structured diagnostic on failure.
  * @return true on success.
  */
 bool MakeTempDirectory(

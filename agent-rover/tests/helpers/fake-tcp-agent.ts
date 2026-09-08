@@ -30,6 +30,7 @@ import {
   parseBinaryTransferChunkPayload,
   parseProtocolMessage,
   type JsonValue,
+  type ProtocolErrorPayload,
 } from '../../src/protocol';
 import {
   protocolVersion,
@@ -48,6 +49,11 @@ import {
 } from '../../src/driver/tcp-frame';
 
 export interface FakeTcpAgentOptions {
+  readonly beforeRequest?: (
+    method: string,
+    params: JsonValue | undefined
+  ) => ProtocolErrorPayload | undefined;
+  readonly dropResponses?: Readonly<Record<string, number>>;
   readonly authToken?: string;
   readonly capabilities?: RemoteAgentCapabilities;
   readonly childrenByWindowId?: Readonly<
@@ -74,6 +80,7 @@ export interface FakeTcpAgentOptions {
 }
 
 export interface FakeTcpAgent {
+  readonly managedProcessCount: () => number;
   readonly close: () => Promise<void>;
   readonly host: string;
   readonly port: number;
@@ -399,6 +406,7 @@ export const startFakeTcpAgent = async (
   const files = new Map<string, Buffer>();
   const processes = new Map<number, RemoteProcessSnapshot>();
   const managedProcesses = new Map<number, number>();
+  const responsesToDrop = new Map(Object.entries(options.dropResponses ?? {}));
   const videoRecordings = new Map<
     string,
     {
@@ -580,6 +588,16 @@ export const startFakeTcpAgent = async (
       method: string,
       params: JsonValue | undefined
     ): void => {
+      const failure = options.beforeRequest?.(method, params);
+      if (failure !== undefined) {
+        sendTcpProtocolMessage(socket, {
+          id,
+          kind: 'response',
+          ok: false,
+          error: failure,
+        });
+        return;
+      }
       const recordParams = isRecord(params) ? params : {};
       switch (method) {
         case 'agent.capabilities':
@@ -886,6 +904,7 @@ export const startFakeTcpAgent = async (
             return;
           }
           options.killedManagedProcessIds?.push(managedProcessId);
+          options.killedProcessIds?.push(processId);
           const current = processes.get(processId);
           processes.set(processId, {
             createdAt: current?.createdAt ?? null,
@@ -929,6 +948,11 @@ export const startFakeTcpAgent = async (
           }
           managedProcesses.delete(managedProcessId);
           managedProcessOptions.delete(managedProcessId);
+          const dropped = responsesToDrop.get(method) ?? 0;
+          if (dropped > 0) {
+            responsesToDrop.set(method, dropped - 1);
+            return;
+          }
           sendSuccess(id, null);
           return;
         }
@@ -1412,6 +1436,7 @@ export const startFakeTcpAgent = async (
   }
 
   return {
+    managedProcessCount: () => managedProcesses.size,
     close: async (): Promise<void> => {
       for (const socket of sockets) {
         socket.destroy();
