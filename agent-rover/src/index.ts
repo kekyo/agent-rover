@@ -944,6 +944,10 @@ export interface RemoteMkdirOptions {
 
 /** Remove options. */
 export interface RemoteRemoveOptions {
+  /** Clear the read-only bit before removal. Defaults to fail for user paths. */
+  readonly onReadOnly?: 'fail' | 'clear';
+  /** Add current-user removal access; DACLs containing deny ACEs are refused. Defaults to fail. */
+  readonly onPermissionDenied?: 'fail' | 'grantDelete';
   /** Whether directory contents should be removed recursively. */
   readonly recursive?: boolean;
   /** Transient failure policy. Defaults to retry; never terminates processes. */
@@ -1253,6 +1257,7 @@ export interface RemoteOperationErrorDetails {
     | 'sharingViolation'
     | 'lockViolation'
     | 'accessDenied'
+    | 'permissionDenied'
     | 'readOnly'
     | 'notFound'
     | 'directoryNotEmpty'
@@ -1267,6 +1272,24 @@ export interface RemoteOperationErrorDetails {
   readonly elapsedMs?: number;
   /** Whether the operation's deadline was reached. */
   readonly timedOut?: boolean;
+  /** Attribute and permission repairs, including rollback of surviving objects. */
+  readonly repairs?: readonly RemoteCleanupRepair[];
+}
+
+/** Outcome of an attempted change to the original cleanup target. */
+export interface RemoteCleanupRepair {
+  /** Original target path. */
+  readonly path: string;
+  /** Attempted repair. */
+  readonly action: 'clearReadOnly' | 'grantDelete';
+  /** Whether the change was applied, failed, or refused for an unsafe boundary. */
+  readonly outcome: 'applied' | 'failed' | 'skipped';
+  /** Saved repair OS error, or zero. */
+  readonly osCode: number;
+  /** Rollback result if deletion failed after a change. */
+  readonly restoration: 'notNeeded' | 'restored' | 'failed';
+  /** Saved rollback OS error, or zero. */
+  readonly restoreOsCode: number;
 }
 
 /** Deadline options for process cleanup and completed-output reads. */

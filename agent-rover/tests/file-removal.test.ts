@@ -8,6 +8,50 @@ import { connectRemoteAgent } from '../src/index';
 import { startFakeTcpAgent } from './helpers/fake-tcp-agent';
 
 describe('bounded file removal', () => {
+  it('stops retrying when restoration of a changed object fails', async () => {
+    const fake = await startFakeTcpAgent({
+      beforeRequest: (method) =>
+        method === 'file.remove'
+          ? {
+              code: 'OPERATION_FAILED',
+              message: 'delete and rollback failed',
+              details: {
+                operation: method,
+                nativeOperation: 'SetFileInformationByHandle',
+                path: 'C:/file',
+                osCode: 32,
+                reason: 'sharingViolation',
+                repairs: [
+                  {
+                    path: 'C:/file',
+                    action: 'clearReadOnly',
+                    outcome: 'applied',
+                    osCode: 0,
+                    restoration: 'failed',
+                    restoreOsCode: 5,
+                  },
+                ],
+              },
+            }
+          : undefined,
+    });
+    const agent = await connectRemoteAgent({
+      host: fake.host,
+      port: fake.port,
+    });
+    try {
+      await expect(agent.files.remove('C:/file')).rejects.toMatchObject({
+        details: {
+          attempts: 1,
+          timedOut: false,
+          repairs: [{ restoration: 'failed', restoreOsCode: 5 }],
+        },
+      });
+    } finally {
+      agent.release();
+      await fake.close();
+    }
+  }, 20000);
   it('removes a file after a transient native lock is released', async () => {
     let failures = 2;
     const killed: number[] = [];

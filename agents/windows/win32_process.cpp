@@ -579,7 +579,9 @@ bool ReleaseManagedProcess(uint32_t managed_id, OperationError* error) {
     entry.exit_confirmed = true;
   }
   for (const auto& path : entry.capture_paths) {
-    const auto file = CreateFileW(Utf8ToWide(path).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    // Only test for outstanding writers here; reading permissions may need the
+    // subsequent owned-directory cleanup repair. The strict share mode detects writers.
+    const auto file = CreateFileW(Utf8ToWide(path).c_str(), 0, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) { *error = MakeOperationError("CreateFileW", path, GetLastError()); error->stage = "capture"; return false; }
     entry.capture_guard = file;
     if (!CloseHandle(file)) { *error = MakeOperationError("CloseHandle", path, GetLastError()); error->stage = "capture"; return false; }

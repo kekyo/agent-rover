@@ -8,6 +8,59 @@ import { connectRemoteAgent } from '../src/index';
 import { startFakeTcpAgent } from './helpers/fake-tcp-agent';
 
 describe('managed cleanup completion', () => {
+  it('rejects new waits after release has started', async () => {
+    const fake = await startFakeTcpAgent({});
+    const agent = await connectRemoteAgent({
+      host: fake.host,
+      port: fake.port,
+    });
+    try {
+      const child = await agent.processes.launchManaged({ path: 'test.exe' });
+      await child.releaseAsync();
+      await expect(child.waitForExit()).rejects.toMatchObject({
+        code: 'INVALID_ARGUMENT',
+      });
+    } finally {
+      agent.release();
+      await fake.close();
+    }
+  });
+  it('removes its capture directory when launching the process fails', async () => {
+    const fake = await startFakeTcpAgent({
+      beforeRequest: (method) =>
+        method === 'process.launchManaged'
+          ? {
+              code: 'OPERATION_FAILED',
+              message: 'launch failed',
+              details: {
+                operation: method,
+                nativeOperation: 'CreateProcessW',
+                path: 'missing.exe',
+                osCode: 2,
+                reason: 'notFound',
+              },
+            }
+          : undefined,
+    });
+    const agent = await connectRemoteAgent({
+      host: fake.host,
+      port: fake.port,
+    });
+    try {
+      await expect(
+        agent.processes.launchManaged({
+          path: 'missing.exe',
+          captureStdout: true,
+        })
+      ).rejects.toMatchObject({ code: 'OPERATION_FAILED' });
+      expect(
+        await agent.files.exists('C:/agent-rover-managed-process-fake')
+      ).toBe(false);
+    } finally {
+      agent.release();
+      await fake.close();
+    }
+  });
   it('keeps output alive until an in-flight completed-output read finishes', async () => {
     let allowRead = false;
     let sawRead: () => void = () => {};

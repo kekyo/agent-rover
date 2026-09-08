@@ -372,7 +372,10 @@ const buildLocalDirectoryManifest = async (
 };
 
 const isTransientFileFailure = (error: unknown): boolean => {
-  const reason = operationDetails(error)?.reason;
+  const details = operationDetails(error);
+  if (details?.repairs?.some((repair) => repair.restoration === 'failed'))
+    return false;
+  const reason = details?.reason;
   return (
     reason !== undefined &&
     [
@@ -2728,25 +2731,39 @@ export const connectRemoteAgent = async (
   const removeRemotePath = async (
     path: string,
     recursive: boolean,
-    ignoreMissing: boolean
+    ignoreMissing: boolean,
+    repairOptions: RemoteRemoveOptions | undefined,
+    managedCleanup: boolean
   ): Promise<void> => {
     await requestJson('file.remove', {
       path,
       recursive,
       ignoreMissing,
+      onReadOnly: repairOptions?.onReadOnly ?? 'fail',
+      onPermissionDenied: repairOptions?.onPermissionDenied ?? 'fail',
+      managedCleanup,
     });
   };
 
   const removeWithDeadline = async (
     path: string,
     options: RemoteRemoveOptions,
-    deadline: ResourceDeadline
+    deadline: ResourceDeadline,
+    managedCleanup: boolean
   ): Promise<void> => {
     const policy = options.onLockedFile ?? 'retry';
     if (policy !== 'fail' && policy !== 'retry')
       throw createRemoteAgentError(
         'INVALID_ARGUMENT',
         'onLockedFile must be fail or retry.'
+      );
+    if (
+      !['fail', 'clear'].includes(options.onReadOnly ?? 'fail') ||
+      !['fail', 'grantDelete'].includes(options.onPermissionDenied ?? 'fail')
+    )
+      throw createRemoteAgentError(
+        'INVALID_ARGUMENT',
+        'Invalid removal repair policy.'
       );
     await retryResourceOperation(
       deadline,
@@ -2755,7 +2772,9 @@ export const connectRemoteAgent = async (
         await removeRemotePath(
           path,
           options.recursive ?? false,
-          options.ignoreMissing ?? false
+          options.ignoreMissing ?? false,
+          options,
+          managedCleanup
         );
       }
     );
@@ -2850,7 +2869,9 @@ export const connectRemoteAgent = async (
       await removeRemotePath(
         joinRemotePath(remoteRoot, entry.path),
         entry.type === 'directory',
-        true
+        true,
+        undefined,
+        false
       );
     });
   };
@@ -3094,9 +3115,13 @@ export const connectRemoteAgent = async (
       };
     }
 
-    const tempDirectory = await makeRemoteTempDirectory(
-      'C:/agent-rover-managed-process-'
-    );
+    const tempDirectory = connectedFeatures.has(
+      'process.createCaptureDirectory'
+    )
+      ? parseTempDirectory(
+          await requestJson('process.createCaptureDirectory', {})
+        )
+      : await makeRemoteTempDirectory('C:/agent-rover-managed-process-');
     const normalizedDirectory = tempDirectory.replace(/[\\/]+$/u, '');
     return {
       stderrPath: captureStderr
@@ -3346,8 +3371,9 @@ export const connectRemoteAgent = async (
 
     const waitForExit = async (
       waitOptions?: RemoteWaitOptions
-    ): Promise<RemoteManagedProcessSnapshot> =>
-      await waitForResult(async () => {
+    ): Promise<RemoteManagedProcessSnapshot> => {
+      assertNotReleased();
+      return await waitForResult(async () => {
         const current = await snapshot();
         if (!current.running) {
           return current;
@@ -3356,6 +3382,7 @@ export const connectRemoteAgent = async (
           `Managed process is still running: ${String(options.process.id)}.`
         );
       }, waitOptions);
+    };
 
     const readCapturedText = async (
       label: 'stderr' | 'stdout',
@@ -3577,7 +3604,8 @@ export const connectRemoteAgent = async (
           await removeWithDeadline(
             options.tempDirectory,
             { recursive: true, ignoreMissing: true },
-            deadline
+            deadline,
+            connectedFeatures.has('process.createCaptureDirectory')
           );
         released = true;
       };
@@ -3624,56 +3652,75 @@ export const connectRemoteAgent = async (
     options: RemoteManagedProcessLaunchOptions
   ): Promise<RemoteManagedProcess> => {
     const capturePaths = await createManagedProcessCapturePaths(options);
-    const baselineWindowIds = new Set(
-      (await listTopLevelWindows()).map((window) => window.id)
-    );
-    const killTreeOnRelease = options.killTreeOnRelease ?? true;
-    const nativeManaged = connectedFeatures.has('process.launchManaged');
-    if (nativeManaged) {
-      const launched = parseManagedProcessLaunchResult(
+    try {
+      const baselineWindowIds = new Set(
+        (await listTopLevelWindows()).map((window) => window.id)
+      );
+      const killTreeOnRelease = options.killTreeOnRelease ?? true;
+      const nativeManaged = connectedFeatures.has('process.launchManaged');
+      if (nativeManaged) {
+        const launched = parseManagedProcessLaunchResult(
+          await requestJson(
+            'process.launchManaged',
+            managedProcessLaunchOptionsToJson(
+              options,
+              capturePaths.stdoutPath,
+              capturePaths.stderrPath
+            )
+          )
+        );
+        return createManagedProcessProxy({
+          baselineWindowIds,
+          killTreeOnRelease,
+          managedProcessId: launched.managedProcessId,
+          nativeManaged: true,
+          process: launched.process,
+          stderrPath: launched.stderrPath ?? capturePaths.stderrPath,
+          stdoutPath: launched.stdoutPath ?? capturePaths.stdoutPath,
+          tempDirectory: capturePaths.tempDirectory,
+        });
+      }
+
+      const process = parseApplicationProcess(
         await requestJson(
-          'process.launchManaged',
-          managedProcessLaunchOptionsToJson(
-            options,
-            capturePaths.stdoutPath,
-            capturePaths.stderrPath
+          'applications.launch',
+          applicationLaunchOptionsToJson(
+            managedLaunchOptionsToApplicationOptions(
+              options,
+              capturePaths.stdoutPath,
+              capturePaths.stderrPath
+            )
           )
         )
       );
       return createManagedProcessProxy({
         baselineWindowIds,
         killTreeOnRelease,
-        managedProcessId: launched.managedProcessId,
-        nativeManaged: true,
-        process: launched.process,
-        stderrPath: launched.stderrPath ?? capturePaths.stderrPath,
-        stdoutPath: launched.stdoutPath ?? capturePaths.stdoutPath,
+        managedProcessId: undefined,
+        nativeManaged: false,
+        process,
+        stderrPath: capturePaths.stderrPath,
+        stdoutPath: capturePaths.stdoutPath,
         tempDirectory: capturePaths.tempDirectory,
       });
+    } catch (error) {
+      if (capturePaths.tempDirectory !== undefined) {
+        try {
+          await removeWithDeadline(
+            capturePaths.tempDirectory,
+            { recursive: true, ignoreMissing: true },
+            createResourceDeadline(undefined),
+            connectedFeatures.has('process.createCaptureDirectory')
+          );
+        } catch (cleanupError) {
+          throw new AggregateError(
+            [error, cleanupError],
+            'Managed launch and capture cleanup failed.'
+          );
+        }
+      }
+      throw error;
     }
-
-    const process = parseApplicationProcess(
-      await requestJson(
-        'applications.launch',
-        applicationLaunchOptionsToJson(
-          managedLaunchOptionsToApplicationOptions(
-            options,
-            capturePaths.stdoutPath,
-            capturePaths.stderrPath
-          )
-        )
-      )
-    );
-    return createManagedProcessProxy({
-      baselineWindowIds,
-      killTreeOnRelease,
-      managedProcessId: undefined,
-      nativeManaged: false,
-      process,
-      stderrPath: capturePaths.stderrPath,
-      stdoutPath: capturePaths.stdoutPath,
-      tempDirectory: capturePaths.tempDirectory,
-    });
   };
 
   const captureDiagnosticsWindow = async (
@@ -3871,7 +3918,8 @@ export const connectRemoteAgent = async (
         await removeWithDeadline(
           path,
           options ?? {},
-          createResourceDeadline(options?.timeoutMs)
+          createResourceDeadline(options?.timeoutMs),
+          false
         );
       },
       rename: async (from, to): Promise<void> => {

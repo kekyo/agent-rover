@@ -255,6 +255,7 @@ describe('Windows cleanup integration', () => {
         const port = 39417;
         let agent: RemoteAgent | undefined;
         let agentId: number | undefined;
+        const failures: unknown[] = [];
         try {
           await bootstrap.request('file.mkdir', {
             path: root,
@@ -299,6 +300,10 @@ describe('Windows cleanup integration', () => {
             { timeoutMs: 15000, intervalMs: 50 }
           );
           const activeAgent = agent;
+          await agent.files.remove(`${root}/absent/child`, {
+            ignoreMissing: true,
+            onReadOnly: 'clear',
+          });
           await agent.files.writeFile(
             `${root}/lifecycle.exe`,
             await readFile(
@@ -329,6 +334,32 @@ describe('Windows cleanup integration', () => {
               await child.releaseAsync();
             }
           };
+          await agent.files.writeFile(
+            `${root}/repair.exe`,
+            await readFile(
+              join(agentDirectory, '.build', 'cleanup', abi, 'repair.exe')
+            )
+          );
+          const repair = await agent.processes.launchManaged({
+            path: `${root}/repair.exe`,
+            arguments: [root],
+            captureStderr: true,
+            createNoWindow: true,
+          });
+          try {
+            const exited = await repair.waitForExit();
+            expect(exited.root.exitCode, await repair.stderrText()).toBe(0);
+          } finally {
+            await repair.releaseAsync();
+          }
+          const damagedCapture = await agent.processes.launchManaged({
+            path: `${root}/helper.exe`,
+            arguments: ['damage-capture', 'unused'],
+            captureStdout: true,
+            createNoWindow: true,
+          });
+          expect((await damagedCapture.waitForExit()).root.exitCode).toBe(0);
+          await damagedCapture.releaseAsync();
           const file = `${root}/readonly.txt`;
           await agent.files.writeFile(file, Buffer.from('retained data'));
           await command(['readonly', file]);
@@ -348,6 +379,36 @@ describe('Windows cleanup integration', () => {
             );
           } finally {
             await command(['writable', file]);
+          }
+          await command(['readonly', file]);
+          try {
+            const clear = { recursive: false, onReadOnly: 'clear' as const };
+            await agent.files.remove(file, clear);
+            expect(await agent.files.exists(file)).toBe(false);
+          } finally {
+            if (await agent.files.exists(file))
+              await command(['writable', file]);
+          }
+          const denied = `${root}/denied`;
+          await agent.files.mkdir(denied);
+          await agent.files.writeFile(
+            `${denied}/data.txt`,
+            Buffer.from('private')
+          );
+          await command(['deny', denied]);
+          try {
+            await expect(
+              agent.files.remove(denied, { recursive: true, timeoutMs: 0 })
+            ).rejects.toMatchObject({ details: { reason: 'accessDenied' } });
+            const grant = {
+              recursive: true,
+              onPermissionDenied: 'grantDelete' as const,
+            };
+            await agent.files.remove(denied, grant);
+            expect(await agent.files.exists(denied)).toBe(false);
+          } finally {
+            if (await agent.files.exists(denied))
+              await command(['restore', denied]);
           }
           for (const mode of ['capture', 'capture-tree']) {
             const ready = `${root}/${mode}.ready`;
@@ -496,35 +557,56 @@ describe('Windows cleanup integration', () => {
             await command(['signal', event]);
             await noKill.releaseAsync();
           }
+        } catch (error) {
+          failures.push(error);
         } finally {
-          agent?.release();
-          if (agentId !== undefined) {
-            await bootstrap.request('process.kill', { processId: agentId });
-            await waitForResult(
-              async () => {
-                const state = (await bootstrap.request('process.snapshot', {
-                  processId: agentId!,
-                })) as { running: boolean };
-                expect(state.running).toBe(false);
-              },
-              { timeoutMs: 10000, intervalMs: 50 }
-            );
-          }
-          // The preinstalled deployment agent is outside the implementation under test.
           try {
-            await waitForResult(
-              async () => {
-                await bootstrap.request('file.remove', {
-                  path: root,
-                  recursive: true,
-                });
-              },
-              { timeoutMs: 10000, intervalMs: 50 }
-            );
+            agent?.release();
+            if (agentId !== undefined) {
+              await bootstrap.request('process.kill', { processId: agentId });
+              await waitForResult(
+                async () => {
+                  const state = (await bootstrap.request('process.snapshot', {
+                    processId: agentId!,
+                  })) as { running: boolean };
+                  expect(state.running).toBe(false);
+                },
+                { timeoutMs: 10000, intervalMs: 50 }
+              );
+            }
+            // The preinstalled deployment agent is outside the implementation under test.
+            try {
+              await waitForResult(
+                async () => {
+                  try {
+                    await bootstrap.request('file.remove', {
+                      path: root,
+                      recursive: true,
+                    });
+                  } catch (error) {
+                    // The old deployment protocol has no structured transient code.
+                    throw new Error(
+                      `Deployment directory is not removable yet: ${String(error)}`,
+                      { cause: error }
+                    );
+                  }
+                },
+                { timeoutMs: 10000, intervalMs: 50 }
+              );
+            } catch (error) {
+              failures.push(error);
+            }
+          } catch (error) {
+            failures.push(error);
           } finally {
             await bootstrap.close();
           }
         }
+        if (failures.length > 0)
+          throw new AggregateError(
+            failures,
+            'Windows cleanup scenario failed.'
+          );
       },
       120000
     );

@@ -21,6 +21,7 @@
 #include "win32_clipboard.h"
 #include "win32_eventlog.h"
 #include "win32_files.h"
+#include "win32_cleanup.h"
 #include "win32_input.h"
 #include "win32_process.h"
 #include "win32_video.h"
@@ -515,6 +516,7 @@ static std::string CapabilitiesJson() {
       "\"file.remove\","
       "\"file.rename\","
       "\"file.mkdtemp\","
+      "\"process.createCaptureDirectory\","
       "\"process.kill\","
       "\"process.killManaged\","
       "\"process.list\","
@@ -570,6 +572,16 @@ static std::string FailureResponseJson(
 static std::string OperationFailureJson(const std::string& id, const std::string& method, const OperationError& error) {
   std::string output = "{\"id\":\"" + JsonEscape(id) + "\",\"kind\":\"response\",\"ok\":false,\"error\":{\"code\":\"OPERATION_FAILED\",\"message\":\"" + JsonEscape(error.message) + "\",\"details\":{\"operation\":\"" + JsonEscape(method) + "\",\"nativeOperation\":\"" + JsonEscape(error.native_operation) + "\",\"path\":\"" + JsonEscape(error.path) + "\",\"osCode\":" + (error.os_code == 0 ? "null" : std::to_string(error.os_code)) + ",\"reason\":\"" + JsonEscape(error.reason) + "\"";
   if (!error.stage.empty()) output += ",\"stage\":\"" + JsonEscape(error.stage) + "\"";
+  if (!error.repairs.empty()) {
+    output += ",\"repairs\":[";
+    bool first = true;
+    for (const auto& repair : error.repairs) {
+      if (!first) output += ",";
+      first = false;
+      output += "{\"path\":\"" + JsonEscape(repair.path) + "\",\"action\":\"" + repair.action + "\",\"outcome\":\"" + repair.outcome + "\",\"osCode\":" + std::to_string(repair.os_code) + ",\"restoration\":\"" + repair.restoration + "\",\"restoreOsCode\":" + std::to_string(repair.restore_os_code) + "}";
+    }
+    output += "]";
+  }
   return output + "}}}";
 }
 
@@ -1592,7 +1604,17 @@ std::string HandleJsonRequest(
     OperationError error;
     bool ignore_missing = false;
     FindJsonBoolField(payload, "ignoreMissing", &ignore_missing);
-    if (!RemovePath(path, recursive, ignore_missing, &error)) {
+    CleanupPolicy policy;
+    policy.recursive = recursive;
+    policy.ignore_missing = ignore_missing;
+    std::string read_only = "fail", permission = "fail";
+    FindJsonStringField(payload, "onReadOnly", &read_only);
+    FindJsonStringField(payload, "onPermissionDenied", &permission);
+    if ((read_only != "fail" && read_only != "clear") || (permission != "fail" && permission != "grantDelete")) return FailureResponseJson(id, "Invalid removal repair policy.");
+    policy.clear_read_only = read_only == "clear";
+    policy.grant_delete = permission == "grantDelete";
+    FindJsonBoolField(payload, "managedCleanup", &policy.managed_cleanup);
+    if (!RemoveWithPolicy(path, policy, &error)) {
       return OperationFailureJson(id, method, error);
     }
     return SuccessResponseJson(id, "null");
@@ -1610,14 +1632,14 @@ std::string HandleJsonRequest(
     }
     return SuccessResponseJson(id, "null");
   }
-  if (method == "file.mkdtemp") {
+  if (method == "file.mkdtemp" || method == "process.createCaptureDirectory") {
     std::string prefix;
-    if (!FindJsonStringField(payload, "prefix", &prefix)) {
+    if (method == "file.mkdtemp" && !FindJsonStringField(payload, "prefix", &prefix)) {
       return FailureResponseJson(id, "file.mkdtemp requires prefix.");
     }
     std::string path;
     OperationError error;
-    if (!MakeTempDirectory(prefix, &path, &error)) {
+    if (!(method == "process.createCaptureDirectory" ? CreateCaptureDirectory(&path, &error) : MakeTempDirectory(prefix, &path, &error))) {
       return OperationFailureJson(id, method, error);
     }
     std::string output = "{\"path\":";

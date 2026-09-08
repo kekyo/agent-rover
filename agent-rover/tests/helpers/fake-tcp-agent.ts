@@ -115,6 +115,7 @@ export const defaultFakeCapabilities: RemoteAgentCapabilities = {
     'file.exists',
     'file.mkdir',
     'file.mkdtemp',
+    'process.createCaptureDirectory',
     'file.manifest',
     'file.read',
     'file.readdir',
@@ -1259,8 +1260,12 @@ export const startFakeTcpAgent = async (
           sendSuccess(id, null);
           return;
         }
+        case 'process.createCaptureDirectory':
         case 'file.mkdtemp': {
-          const prefix = recordParams.prefix;
+          const prefix =
+            method === 'process.createCaptureDirectory'
+              ? 'C:/agent-rover-managed-process-'
+              : recordParams.prefix;
           if (typeof prefix !== 'string') {
             sendFailure(id, 'file.mkdtemp requires prefix.');
             return;

@@ -365,6 +365,7 @@ const readErrorPayload = (value: unknown): ProtocolErrorPayload => {
         'sharingViolation',
         'lockViolation',
         'accessDenied',
+        'permissionDenied',
         'readOnly',
         'notFound',
         'directoryNotEmpty',
@@ -386,6 +387,38 @@ const readErrorPayload = (value: unknown): ProtocolErrorPayload => {
       osCode: raw.osCode as number | null,
       reason: reason as import('./index').RemoteOperationErrorDetails['reason'],
       ...(typeof raw.stage === 'string' ? { stage: raw.stage } : {}),
+      ...(Array.isArray(raw.repairs)
+        ? {
+            repairs: raw.repairs.map((repair) => {
+              if (
+                !isRecord(repair) ||
+                !['clearReadOnly', 'grantDelete'].includes(
+                  String(repair.action)
+                ) ||
+                !['applied', 'failed', 'skipped'].includes(
+                  String(repair.outcome)
+                ) ||
+                !['notNeeded', 'restored', 'failed'].includes(
+                  String(repair.restoration)
+                ) ||
+                typeof repair.osCode !== 'number' ||
+                typeof repair.restoreOsCode !== 'number'
+              )
+                throw createProtocolRuntimeError(
+                  'PROTOCOL_ERROR',
+                  'Invalid cleanup repair details.'
+                );
+              return {
+                path: requireString(repair, 'path'),
+                action: repair.action,
+                outcome: repair.outcome,
+                osCode: repair.osCode,
+                restoration: repair.restoration,
+                restoreOsCode: repair.restoreOsCode,
+              } as import('./index').RemoteCleanupRepair;
+            }),
+          }
+        : {}),
     };
   }
   return {

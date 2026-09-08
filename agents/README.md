@@ -1119,12 +1119,7 @@ Params:
 }
 ```
 
-`recursive` and `ignoreMissing` are sent as booleans. An absent target fails unless
-`ignoreMissing` is true. Recursive removal does not follow directory reparse points.
-Each RPC performs one attempt; the driver owns the shared removal deadline
-(default 10000 ms) and bounded backoff. `onLockedFile: "fail"` disables retries.
-Failures carry structured OS details and driver retry results; diagnostic text is
-not used to decide whether to retry. Removal never terminates a process.
+`recursive` is always sent by the current driver as a boolean.
 
 Result: `null`.
 
@@ -1147,15 +1142,56 @@ Params:
 ```json
 {
   "path": "C:\\Temp\\example.txt",
-  "recursive": false
+  "recursive": false,
+  "ignoreMissing": false,
+  "onReadOnly": "fail",
+  "onPermissionDenied": "fail",
+  "managedCleanup": false
 }
 ```
 
-`recursive` is always sent by the current driver as a boolean.
+`recursive`, `ignoreMissing` and `managedCleanup` are booleans. An absent target
+fails unless `ignoreMissing` is true. Recursive removal does not follow directory
+reparse points. Each RPC performs one attempt; the driver owns the shared removal
+deadline (default 10000 ms) and bounded backoff. Public `onLockedFile: 'fail'`
+disables retries. Removal never terminates a process.
+
+`onReadOnly` accepts `fail` or `clear`; `onPermissionDenied` accepts `fail` or
+`grantDelete`. Both default to `fail` for user paths. Repair is restricted to local
+absolute filesystem paths, pins ancestors, and refuses to traverse reparse points
+or modify multiply linked files. `grantDelete` adds a non-inherited current-user
+ACE without replacing other entries or the owner. DACLs containing deny ACEs are
+not repaired. No privileges are enabled and ownership is not taken.
+
+Failed deletion restores changes on the original surviving object. Error
+`details.repairs` entries contain `path`, `action` (`clearReadOnly` or `grantDelete`),
+`outcome` (`applied`, `failed`, `skipped`), `osCode`, `restoration` (`notNeeded`,
+`restored`, `failed`) and `restoreOsCode`. A rollback failure stops driver retries.
+Previously deleted entries are not restored.
+
+Internal `managedCleanup: true` requires a registered capture directory whose
+file identity still matches, and enables both repairs. Arbitrary temporary paths
+and public `file.mkdtemp` results do not establish this ownership.
 
 Result: `null`.
 
 Agents should reject dangerous paths such as an empty string or drive roots.
+
+### `process.createCaptureDirectory`
+
+Params: `{}`. Result: `{ "path": "..." }`.
+
+Creates a new directory with current-user access and registers its file identity.
+Names are not reused during the agent lifetime. The driver uses this directory for
+managed stdout/stderr and removes it after native process release. Failed launches
+also clean up the directory. Registration is checked again when opening the target
+for deletion so a replacement cannot acquire the original directory's repair policy.
+
+Repair uses dynamically resolved
+[SetFileInformationByHandle](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileinformationbyhandle)
+and [GetFinalPathNameByHandleW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew).
+If unavailable, ordinary deletion is attempted and failures requiring repair are
+reported as `unsupported`. The baseline executable does not import these APIs.
 
 ### `file.rename`
 

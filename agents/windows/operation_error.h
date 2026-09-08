@@ -8,8 +8,25 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace agent_rover {
+
+/** One attempted attribute or permission repair and its rollback result. */
+struct CleanupRepair {
+  /** Object on which repair was attempted. */
+  std::string path;
+  /** clearReadOnly or grantDelete. */
+  std::string action;
+  /** applied, failed, or skipped. */
+  std::string outcome;
+  /** Saved repair error, or zero. */
+  uint32_t os_code = 0;
+  /** notNeeded, restored, or failed. */
+  std::string restoration = "notNeeded";
+  /** Saved restoration error, or zero. */
+  uint32_t restore_os_code = 0;
+};
 
 /** Failure captured at the operating-system operation boundary. */
 struct OperationError {
@@ -25,6 +42,8 @@ struct OperationError {
   std::string reason = "unknown";
   /** Incomplete resource-release stage, or empty for other operations. */
   std::string stage;
+  /** Repairs made before the operation failed, including rollback failures. */
+  std::vector<CleanupRepair> repairs;
 
   /** Assigns a non-OS diagnostic and clears stale native information. */
   OperationError& operator=(const std::string& diagnostic) {
@@ -34,6 +53,7 @@ struct OperationError {
     os_code = 0;
     reason = "unknown";
     stage.clear();
+    repairs.clear();
     return *this;
   }
 };
