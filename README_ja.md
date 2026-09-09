@@ -92,7 +92,7 @@ agent-roverは、GUIアプリケーション自体の監視や操作以外にも
   ファイル操作（送受信）も可能。
 - 画面またはアプリケーションウインドウをPNG画像として、対応するWindowsエージェントでは
   H.264 MP4動画としてキャプチャ可能。
-- プリビルドエージェントは Windows (Windows 10 version 1703以降のi686/amd64)・Linux X11 (i686/amd64/armv7l/arm64/riscv64) を使用可能。
+- プリビルドエージェントは Windows (XP SP2以降を対象とするi686/amd64)・Linux X11 (i686/amd64/armv7l/arm64/riscv64) を使用可能。
 - エージェントとの通信はTCP独自プロトコル。認証はダイジェストハンドシェーク（但し通信電文自体は非暗号化）。
 - 画像認識（一致または近しい）・OCR解析アサーション。
 
@@ -181,7 +181,9 @@ describe('remote agent smoke test', () => {
 最も望ましいのは、同じマシンに配置された仮想マシン上で動作させることです。
 
 > 通信経路をHTTPSなどではなく、TCP＋独自のプロトコルとしている理由は、エージェントのライブラリ依存性を極限まで下げるためです。
-> Windowsエージェントは、物理座標とモニターごとのDPIを扱うため、Windows 10 version 1703以降が対象です。DPI非対応のアプリケーションもテストできます。使用するPer-Monitor V2については[MicrosoftのDPI仕様](https://learn.microsoft.com/en-us/windows/win32/hidpi/dpi-awareness-context)を参照してください。
+> WindowsエージェントはOSが対応するDPI対応方式を選択します。基本的なウインドウ・デスクトップ操作に新しいDPI取得APIは不要で、取得できないDPI情報は`null`を返します。このエージェントでモニターごと・ウインドウごとのDPIを取得できるのはWindows 10 version 1607以降です。[WindowsのDPI対応方式](https://learn.microsoft.com/en-us/windows/win32/hidpi/high-dpi-desktop-application-development-on-windows)と[GetDpiForWindowの対応OS](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getdpiforwindow)を参照してください。
+>
+> XPで起動時に`GetThreadId`のエントリポイントが見つからないと表示される場合は、XP互換ランタイムで作成したエージェントが必要です。このAPIはVista以降のもので、DPI設定では解決できません。現在のMinGW 13によるビルドにはこの依存が残り、XPでは起動できません。XP互換のビルドと実行確認が必要です。[GetThreadIdの対応OS](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadid)
 > 但し、今後の強化でこの問題を改善させる可能性はあります。
 
 ---
@@ -251,6 +253,25 @@ try {
 
 ### デスクトップ配置とDPIを使ったテスト
 
+テストドライバーを使うためにDPIの設定や知識は必要ありません。96 DPI（100%）を
+想定したテストでは、座標・サイズをピクセル値のまま指定できます。ドライバーは値を
+自動で拡大縮小せず、対象アプリがDPI awareであることも要求しません。倍率の異なる
+モニターでUI配置が変わることは、そのテストで許容するかどうかを判断してください。
+取得済みの表示中ウインドウなら、次の操作で済みます。
+
+```typescript
+const bounds = { x: 100, y: 100, width: 800, height: 600 };
+const moved = await window.setBounds(bounds);
+const placed = await moved.waitForPlacement({ bounds });
+```
+
+この例は指定した外周矩形だけを検証します。モニターID、DPI、DPI対応方式が取得不能でも
+成功できます。取得したDPIは実際の観測値または`null`であり、96を想定する使い方でも
+観測値を96へ書き換えません。マウス入力やスクリーンショットもピクセル座標を使います。
+
+モニターを選択する、表示倍率を検証する、配置の違いを調査するといった場合には、
+以下の情報を利用できます。
+
 `agent.desktop()`は、デスクトップ全体の`bounds`、各モニターの情報を持つ
 `monitors`、構成を比較するための`revision`をまとめて返します。
 `agent.bounds()`と`agent.monitors()`も利用できますが、配置先を決めるときは
@@ -287,10 +308,12 @@ try {
 描画方法を踏まえてください。`null`を96 DPIや100%と読み替えないでください。
 [GetDpiForWindowの仕様](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getdpiforwindow)
 
-次は、接続済みの`agent`と検索済みの`window`を使って配置・検証する例です。
+次は、接続済みの`agent`と検索済みの`window`を使い、モニター・DPI・画面構成も検証する例です。
 テストに特定の倍率が必要なら、配置前に`monitor.dpi`も前提条件として検証します。
+配置先モニターだけが重要なら、`dpi`の指定とDPI情報の前提条件チェックは省略できます。
 
 ```typescript
+// モニター・DPI・画面構成を検証する場合の例です。
 const desktop = await agent.desktop();
 const monitor = desktop.monitors.find((entry) => entry.primary);
 if (!monitor || monitor.dpi === null) {
@@ -328,12 +351,22 @@ expect((await agent.desktop()).revision).toBe(desktop.revision);
 ```
 
 `waitForPlacement()`には`bounds`、`monitorId`、`dpi`のうち少なくとも一つを指定します。
-指定した条件への到達を確認した後、外周・表示枠・内容領域・DPI・DPI対応方式・
-所属モニター・デスクトップ構成が連続して一致するまで待機します。
-`stableIterations`は既定で2、`intervalMs`は50、`timeoutMs`は10000です。
-途中の取得失敗や条件不一致で安定回数を数え直します。非表示・最小化・所属モニターが
-不明なウインドウは成功扱いにしません。`setBounds()`の成功だけでは、アプリ独自の
-最小サイズ制限やDPI変更処理の後に要求した位置・サイズが保たれるとは限りません。
+指定した条件だけが連続して一致することを確認します。指定していない表示枠・内容領域、
+モニター、DPI、DPI対応方式の変化で待機は延びません。`desktopRevision`を指定した場合だけ、
+ウインドウ観測の前後でデスクトップ構成も取得・検証します。
+既定値は`stableIterations: 2`、`intervalMs: 50`、`timeoutMs: 10000`です。
+観測の失敗や条件の不一致で連続一致回数はリセットされます。非表示・最小化状態では
+成功しません。モニターIDを指定した場合は一致が必要で、`dpi`を指定した場合は
+DPIが不明な状態では成功しません。情報を取得できない状態が続くと、タイムアウトに
+検証できなかった条件の説明が含まれます。
+
+`setBounds()`の成功だけでは、アプリケーションの最小サイズ制限やDPI変更処理の後にも
+要求した配置が保たれることは保証されません。Windowsによるビットマップ拡大では、
+DPI非対応・System awareのウインドウに丸めも生じます。実機テストでは150%のモニター上で
+要求幅400が401として観測されました。`bounds`の厳密な一致判定はこの差を検出します。
+寸法の厳密な一致が不要なら`monitorId`や`dpi`だけを条件にし、返された`bounds`、
+`frameBounds`、`clientBounds`をその後の入力・判定に使用してください。
+[WindowsのDPI仮想化とビットマップ拡大](https://learn.microsoft.com/en-us/windows/win32/hidpi/high-dpi-desktop-application-development-on-windows)
 
 `waitForStableBounds()`は外周矩形が変化しないことだけを確認します。
 意図した配置の確認には`waitForPlacement()`を使ってください。

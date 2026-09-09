@@ -39,7 +39,9 @@ struct DesktopInfo {
 };
 
 /**
- * Reads geometry and effective DPI using a per-monitor aware calling thread.
+ * Reads desktop geometry and available effective DPI.
+ * @remarks DPI remains unknown when the OS lacks the APIs or the caller is not
+ * per-monitor aware. Missing DPI does not prevent geometry observations.
  * @param desktop Receives a complete observation on success.
  * @param error Receives a diagnostic on failure.
  * @return true after two consecutive matching observations, false after three

@@ -97,7 +97,7 @@ As shown in the example above, you can send and receive files and launch applica
   File operations, such as sending and receiving files, are also supported.
 - Capture the screen or an application window as a PNG image, or as an H.264
   MP4 video on a supported Windows agent.
-- Prebuilt agents are available for Windows (i686/amd64 on Windows 10 version 1703 or later) and Linux X11 (i686/amd64/armv7l/arm64/riscv64).
+- Prebuilt agents are available for Windows (i686/amd64 targeting XP SP2 or later) and Linux X11 (i686/amd64/armv7l/arm64/riscv64).
 - Agent communication uses a custom TCP protocol.
   Authentication uses a digest handshake, although the protocol messages themselves are not encrypted.
 - Image recognition assertions for exact or close matches, and OCR-based assertions.
@@ -192,7 +192,9 @@ Be especially careful if you perform operations that would be problematic if lea
 The preferred setup is to run the agent inside a virtual machine placed on the same host.
 
 > The communication path uses TCP with a custom protocol, rather than HTTPS or a similar protocol, to reduce the agent's library dependencies as much as possible.
-> The Windows agent requires Windows 10 version 1703 or later for physical coordinates and per-monitor DPI. Applications without DPI awareness can also be tested. See the [Microsoft DPI specification](https://learn.microsoft.com/en-us/windows/win32/hidpi/dpi-awareness-context) for the Per-Monitor V2 mode it uses.
+> The Windows agent selects the DPI awareness supported by the OS. Basic window and desktop operations do not require modern DPI query APIs; unavailable DPI information is returned as `null`. Per-monitor and window DPI queries require Windows 10 version 1607 or later in this agent. See [Windows awareness modes](https://learn.microsoft.com/en-us/windows/win32/hidpi/high-dpi-desktop-application-development-on-windows) and [GetDpiForWindow availability](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getdpiforwindow).
+>
+> If an XP machine reports a missing `GetThreadId` entry point at startup, that executable requires an XP-compatible runtime build. The API is available from Vista, and DPI settings cannot resolve this loader error. The current MinGW 13 build still imports this API and cannot start on XP; an XP-compatible build and runtime validation remain necessary. [GetThreadId requirements](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadid)
 > Future improvements may address this limitation.
 
 ---
@@ -262,6 +264,26 @@ try {
 
 ### Desktop placement and DPI in tests
 
+DPI configuration is optional for driver users. If your tests assume 96 DPI
+(100%), pass pixel coordinates directly. The driver does not automatically scale
+these values or require the application under test to be DPI aware. Differences
+in UI layout on differently scaled monitors remain the test's responsibility.
+For an already found, visible window:
+
+```typescript
+const bounds = { x: 100, y: 100, width: 800, height: 600 };
+const moved = await window.setBounds(bounds);
+const placed = await moved.waitForPlacement({ bounds });
+```
+
+This waits only for the requested outer rectangle. Monitor IDs, DPI, and awareness
+may be unavailable without preventing success. Reported DPI values are always
+observations or `null`; assuming 96 DPI does not replace unknown or measured values.
+Mouse input and screenshots also keep their pixel coordinates.
+
+The following information is available when tests need to select a monitor,
+check display scaling, or diagnose placement differences.
+
 `agent.desktop()` returns desktop `bounds`, `monitors`, and a configuration
 `revision` together. `agent.bounds()` and `agent.monitors()` are also available;
 use one `desktop()` observation when choosing a placement.
@@ -300,8 +322,10 @@ behavior; multiplying all coordinates by one scale factor is not generally valid
 Do not interpret `null` as 96 DPI or 100%.
 [GetDpiForWindow specification](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getdpiforwindow)
 
-The following example assumes a connected `agent` and a previously found `window`.
-If a test requires a specific scale, also assert `monitor.dpi` as a prerequisite.
+The following example opts into monitor, DPI, and desktop-configuration checks.
+It assumes a connected `agent` and a previously found `window`. If a test requires
+a specific scale, also assert `monitor.dpi` as a prerequisite. Omit `dpi` and its
+precondition checks when only monitor placement matters.
 
 ```typescript
 const desktop = await agent.desktop();
@@ -341,13 +365,23 @@ expect((await agent.desktop()).revision).toBe(desktop.revision);
 ```
 
 Supply at least one of `bounds`, `monitorId`, or `dpi` to `waitForPlacement()`.
-After reaching those conditions, it waits for consecutive matching outer, frame,
-and client rectangles, DPI, awareness, monitor association, and desktop
-configuration. Defaults are `stableIterations: 2`, `intervalMs: 50`, and
-`timeoutMs: 10000`. A failed observation or unmet condition resets the stable
-count. Hidden, minimized, or unassociated windows cannot satisfy this wait.
+Only supplied conditions must match in consecutive observations. Unrequested
+frame/client rectangles, monitor association, DPI, and awareness do not prolong
+the wait. Desktop configuration is read before and after each window snapshot
+only when `desktopRevision` is supplied. Defaults are `stableIterations: 2`,
+`intervalMs: 50`, and `timeoutMs: 10000`. A failed observation or unmet condition
+resets the stable count. Hidden or minimized windows cannot satisfy this wait.
+A requested monitor ID must match; unknown window DPI cannot satisfy a requested
+`dpi`. If the information remains unavailable, the timeout explains which
+condition could not be verified.
 A successful `setBounds()` alone does not establish the final placement after an
-application enforces its minimum size or handles a DPI change.
+application enforces its minimum size or handles a DPI change. Windows bitmap
+scaling can also round dimensions of unaware/system-aware windows: for example,
+a requested width of 400 was observed as 401 on a 150% monitor in our tests.
+Exact `bounds` matching deliberately detects that difference. If exact dimensions
+are irrelevant, specify only `monitorId` and/or `dpi`, then use the returned
+`bounds`, `frameBounds`, and `clientBounds` for subsequent input and assertions.
+[Windows DPI virtualization and bitmap scaling](https://learn.microsoft.com/en-us/windows/win32/hidpi/high-dpi-desktop-application-development-on-windows)
 
 `waitForStableBounds()` only checks that the outer rectangle stops changing.
 Use `waitForPlacement()` to verify an intended placement. Neither wait establishes

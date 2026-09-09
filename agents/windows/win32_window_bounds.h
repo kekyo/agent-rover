@@ -35,7 +35,7 @@ bool ReadWindowFrameBounds(
  * @param window Window handle.
  * @param bounds Receives physical screen coordinates.
  * @param error Receives a diagnostic on failure, or nullptr.
- * @return true on success. The caller must be per-monitor DPI aware.
+ * @return true on success. The caller must use the manifest-selected DPI awareness.
  */
 bool ReadWindowOuterBounds(HWND window, WindowRect* bounds, std::string* error);
 
@@ -44,7 +44,7 @@ bool ReadWindowOuterBounds(HWND window, WindowRect* bounds, std::string* error);
  * @param window Window handle.
  * @param bounds Receives the client rectangle, including empty rectangles.
  * @param error Receives a diagnostic on failure, or nullptr.
- * @return true on success. The caller must be per-monitor DPI aware.
+ * @return true on success. The caller must use the manifest-selected DPI awareness.
  */
 bool ReadWindowClientBounds(HWND window, WindowRect* bounds, std::string* error);
 
