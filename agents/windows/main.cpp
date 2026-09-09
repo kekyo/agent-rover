@@ -4,6 +4,7 @@
 // https://github.com/kekyo/agent-rover
 
 #include <cstdio>
+#include <windows.h>
 
 #include "auth.h"
 #include "command_line.h"

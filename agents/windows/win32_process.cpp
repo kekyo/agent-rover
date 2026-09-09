@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "command_line.h"
+#include "win32_files.h"
 #include "win32_util.h"
 
 namespace agent_rover {
@@ -28,6 +29,12 @@ struct ManagedProcessEntry {
   HANDLE process;
   HANDLE job;
   bool kill_tree_on_release;
+  bool termination_requested = false;
+  bool exit_confirmed = false;
+  std::vector<std::string> capture_paths = {};
+  HANDLE capture_guard = nullptr;
+  std::string stdout_path = {};
+  std::string stderr_path = {};
 };
 
 static std::map<uint32_t, ManagedProcessEntry> g_managed_processes;
@@ -125,7 +132,7 @@ static std::wstring BuildEnvironmentBlock(
 static bool OpenRedirectFile(
     const std::string& path,
     HANDLE* handle,
-    std::string* error) {
+    OperationError* error) {
   *handle = nullptr;
   if (path.empty()) {
     return true;
@@ -143,7 +150,7 @@ static bool OpenRedirectFile(
       CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (*handle == INVALID_HANDLE_VALUE) {
     *handle = nullptr;
-    *error = "CreateFileW for process redirect failed.";
+    *error = MakeOperationError("CreateFileW", path, GetLastError());
     return false;
   }
   return true;
@@ -204,10 +211,10 @@ static bool SnapshotProcessHandle(
     bool has_parent_process_id,
     uint32_t parent_process_id,
     ProcessSnapshot* snapshot,
-    std::string* error) {
+    OperationError* error) {
   DWORD exit_code = 0;
   if (!GetExitCodeProcess(process, &exit_code)) {
-    *error = "GetExitCodeProcess failed.";
+    *error = MakeOperationError("GetExitCodeProcess", fallback_path, GetLastError());
     return false;
   }
   const bool running = exit_code == STILL_ACTIVE;
@@ -238,7 +245,7 @@ static bool CreateApplicationProcess(
     DWORD extra_creation_flags,
     PROCESS_INFORMATION* process_information,
     ApplicationProcess* process,
-    std::string* error) {
+    OperationError* error) {
   const std::wstring executable = Utf8ToWide(options.path);
   if (executable.empty()) {
     *error = "applications.launch requires a non-empty path.";
@@ -293,6 +300,7 @@ static bool CreateApplicationProcess(
                                 : const_cast<wchar_t*>(environment_block.c_str()),
       working_directory.empty() ? nullptr : working_directory.c_str(),
       &startup, process_information);
+  const DWORD create_error = created ? ERROR_SUCCESS : GetLastError();
   if (stdout_handle != nullptr) {
     CloseHandle(stdout_handle);
   }
@@ -300,7 +308,7 @@ static bool CreateApplicationProcess(
     CloseHandle(stderr_handle);
   }
   if (!created) {
-    *error = "CreateProcessW failed.";
+    *error = MakeOperationError("CreateProcessW", options.path, create_error);
     return false;
   }
 
@@ -312,7 +320,7 @@ static bool CreateApplicationProcess(
 bool LaunchApplication(
     const ApplicationLaunchOptions& options,
     ApplicationProcess* process,
-    std::string* error) {
+    OperationError* error) {
   PROCESS_INFORMATION process_information = {};
   if (!CreateApplicationProcess(options, 0, &process_information, process, error)) {
     return false;
@@ -325,41 +333,22 @@ bool LaunchApplication(
 bool LaunchManagedProcess(
     const ManagedProcessLaunchOptions& options,
     ManagedProcess* process,
-    std::string* error) {
-  HANDLE job = nullptr;
-  DWORD extra_creation_flags = 0;
-  if (options.kill_tree_on_release) {
-    job = CreateJobObjectW(nullptr, nullptr);
-    if (job != nullptr) {
-      extra_creation_flags |= CREATE_SUSPENDED;
-    }
-  }
-
+    OperationError* error) {
+  HANDLE job = CreateJobObjectW(nullptr, nullptr);
+  if (job == nullptr) { *error = MakeOperationError("CreateJobObjectW", options.launch.path, GetLastError()); return false; }
   PROCESS_INFORMATION process_information = {};
   ApplicationProcess application_process = {};
-  if (!CreateApplicationProcess(
-          options.launch, extra_creation_flags, &process_information,
-          &application_process, error)) {
-    if (job != nullptr) {
-      CloseHandle(job);
-    }
-    return false;
-  }
-
-  if (job != nullptr && !AssignProcessToJobObject(
-                             job, process_information.hProcess)) {
-    CloseHandle(job);
-    job = nullptr;
-  }
-  if (extra_creation_flags != 0 &&
-      ResumeThread(process_information.hThread) == static_cast<DWORD>(-1)) {
+  if (!CreateApplicationProcess(options.launch, CREATE_SUSPENDED, &process_information, &application_process, error)) { CloseHandle(job); return false; }
+  const bool assigned = AssignProcessToJobObject(job, process_information.hProcess);
+  if (!assigned || ResumeThread(process_information.hThread) == static_cast<DWORD>(-1)) {
+    const DWORD code = GetLastError();
+    *error = MakeOperationError(assigned ? "ResumeThread" : "AssignProcessToJobObject", options.launch.path, code);
+    error->stage = "launchRollback";
     TerminateProcess(process_information.hProcess, 1);
+    WaitForSingleObject(process_information.hProcess, 5000);
     CloseHandle(process_information.hThread);
     CloseHandle(process_information.hProcess);
-    if (job != nullptr) {
-      CloseHandle(job);
-    }
-    *error = "ResumeThread failed.";
+    CloseHandle(job);
     return false;
   }
 
@@ -384,6 +373,10 @@ bool LaunchManagedProcess(
       job,
       options.kill_tree_on_release,
   };
+  if (!options.launch.stdout_path.empty()) entry.capture_paths.push_back(options.launch.stdout_path);
+  if (!options.launch.stderr_path.empty()) entry.capture_paths.push_back(options.launch.stderr_path);
+  entry.stdout_path = options.launch.stdout_path;
+  entry.stderr_path = options.launch.stderr_path;
   g_managed_processes[managed_id] = entry;
 
   *process = {
@@ -398,7 +391,7 @@ bool LaunchManagedProcess(
 bool SnapshotProcess(
     uint32_t process_id,
     ProcessSnapshot* snapshot,
-    std::string* error) {
+    OperationError* error) {
   HANDLE process =
       OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE,
                   static_cast<DWORD>(process_id));
@@ -426,7 +419,7 @@ static bool SnapshotProcessWithKnownParent(
     bool has_parent_process_id,
     uint32_t parent_process_id,
     ProcessSnapshot* snapshot,
-    std::string* error) {
+    OperationError* error) {
   HANDLE process =
       OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE,
                   static_cast<DWORD>(process_id));
@@ -449,7 +442,7 @@ static bool SnapshotProcessWithKnownParent(
 bool ListProcesses(
     const ProcessListOptions& options,
     std::vector<ProcessSnapshot>* processes,
-    std::string* error) {
+    OperationError* error) {
   HANDLE process_snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
   if (process_snapshot == INVALID_HANDLE_VALUE) {
     *error = "CreateToolhelp32Snapshot failed.";
@@ -470,7 +463,7 @@ bool ListProcesses(
     }
     const uint32_t process_id = static_cast<uint32_t>(entry.th32ProcessID);
     ProcessSnapshot snapshot = {};
-    std::string snapshot_error;
+    OperationError snapshot_error;
     if (!SnapshotProcessWithKnownParent(
             process_id, true,
             static_cast<uint32_t>(entry.th32ParentProcessID), &snapshot,
@@ -490,7 +483,7 @@ bool ListProcesses(
 bool SnapshotManagedProcess(
     uint32_t managed_id,
     ProcessSnapshot* snapshot,
-    std::string* error) {
+    OperationError* error) {
   const auto iterator = g_managed_processes.find(managed_id);
   if (iterator == g_managed_processes.end()) {
     *error = "Unknown managed process id.";
@@ -505,7 +498,7 @@ bool SnapshotManagedProcess(
       has_parent_process_id, parent_process_id, snapshot, error);
 }
 
-bool KillProcess(uint32_t process_id, std::string* error) {
+bool KillProcess(uint32_t process_id, OperationError* error) {
   HANDLE process =
       OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(process_id));
   if (process == nullptr) {
@@ -521,66 +514,89 @@ bool KillProcess(uint32_t process_id, std::string* error) {
   return true;
 }
 
-bool KillManagedProcess(uint32_t managed_id, std::string* error) {
+bool KillManagedProcess(uint32_t managed_id, OperationError* error) {
   const auto iterator = g_managed_processes.find(managed_id);
-  if (iterator == g_managed_processes.end()) {
-    *error = "Unknown managed process id.";
+  if (iterator == g_managed_processes.end()) { *error = "Unknown managed process id."; return false; }
+  auto& entry = iterator->second;
+  if (entry.termination_requested) return true;
+  if (!TerminateJobObject(entry.job, 1)) {
+    *error = MakeOperationError("TerminateJobObject", entry.path, GetLastError());
+    error->stage = "terminate";
     return false;
   }
-  const ManagedProcessEntry& entry = iterator->second;
-  if (entry.job != nullptr && entry.kill_tree_on_release) {
-    if (!TerminateJobObject(entry.job, 1)) {
-      *error = "TerminateJobObject failed.";
-      return false;
-    }
-    return true;
-  }
-  if (!TerminateProcess(entry.process, 1)) {
-    *error = "TerminateProcess failed.";
-    return false;
-  }
+  entry.termination_requested = true;
   return true;
 }
 
-bool ReleaseManagedProcess(uint32_t managed_id, std::string* error) {
+bool ManagedProcessRunning(uint32_t managed_id, bool* running, OperationError* error) {
   const auto iterator = g_managed_processes.find(managed_id);
-  if (iterator == g_managed_processes.end()) {
-    return true;
+  if (iterator == g_managed_processes.end()) { *error = "Unknown managed process id."; return false; }
+  const auto& entry = iterator->second;
+  JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting = {};
+  if (!QueryInformationJobObject(entry.job, JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), nullptr)) {
+    *error = MakeOperationError("QueryInformationJobObject", entry.path, GetLastError()); return false;
   }
-  ManagedProcessEntry entry = iterator->second;
-  g_managed_processes.erase(iterator);
+  *running = accounting.ActiveProcesses != 0;
+  return true;
+}
 
-  if (entry.kill_tree_on_release) {
-    if (entry.job != nullptr) {
-      if (!TerminateJobObject(entry.job, 1)) {
-        CloseHandle(entry.process);
-        CloseHandle(entry.job);
-        *error = "TerminateJobObject failed.";
-        return false;
-      }
-    } else {
-      ProcessSnapshot snapshot = {};
-      uint32_t parent_process_id = 0;
-      const bool has_parent_process_id =
-          ReadParentProcessId(entry.process_id, &parent_process_id);
-      if (!SnapshotProcessHandle(
-              entry.process_id, entry.process, entry.name, entry.path,
-              has_parent_process_id, parent_process_id, &snapshot, error)) {
-        CloseHandle(entry.process);
-        return false;
-      }
-      if (snapshot.running && !TerminateProcess(entry.process, 1)) {
-        CloseHandle(entry.process);
-        *error = "TerminateProcess failed.";
-        return false;
-      }
+bool ReadManagedCapture(uint32_t managed_id, bool stderr_stream,
+                         std::vector<unsigned char>* data, OperationError* error) {
+  const auto iterator = g_managed_processes.find(managed_id);
+  if (iterator == g_managed_processes.end()) { *error = "Unknown managed process id."; return false; }
+  const auto& entry = iterator->second;
+  const auto& path = stderr_stream ? entry.stderr_path : entry.stdout_path;
+  if (path.empty()) { *error = "The requested output was not captured."; error->reason = "invalidArgument"; return false; }
+  const auto state = WaitForSingleObject(entry.process, 0);
+  if (state == WAIT_FAILED) { *error = MakeOperationError("WaitForSingleObject", path, GetLastError()); return false; }
+  if (state == WAIT_OBJECT_0) {
+    bool running = false;
+    if (!ManagedProcessRunning(managed_id, &running, error)) return false;
+    if (running) { *error = MakeOperationError("QueryInformationJobObject", path, ERROR_BUSY); error->stage = "capture"; return false; }
+  }
+  return ReadCaptureFileBytes(path, state != WAIT_OBJECT_0, data, error);
+}
+
+bool ReleaseManagedProcess(uint32_t managed_id, OperationError* error) {
+  const auto iterator = g_managed_processes.find(managed_id);
+  if (iterator == g_managed_processes.end()) return true;
+  auto& entry = iterator->second;
+  if (entry.capture_guard != nullptr) {
+    if (!CloseHandle(entry.capture_guard)) { *error = MakeOperationError("CloseHandle", entry.path, GetLastError()); error->stage = "capture"; return false; }
+    entry.capture_guard = nullptr;
+  }
+  if (!entry.exit_confirmed && (entry.kill_tree_on_release || !entry.capture_paths.empty())) {
+    if (entry.kill_tree_on_release && !KillManagedProcess(managed_id, error)) return false;
+    const DWORD waited = WaitForSingleObject(entry.process, 25);
+    if (waited == WAIT_FAILED) { *error = MakeOperationError("WaitForSingleObject", entry.path, GetLastError()); error->stage = "processExit"; return false; }
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting = {};
+    if (!QueryInformationJobObject(entry.job, JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), nullptr)) {
+      *error = MakeOperationError("QueryInformationJobObject", entry.path, GetLastError()); error->stage = "processExit"; return false;
     }
+    if (waited != WAIT_OBJECT_0 || accounting.ActiveProcesses != 0) {
+      *error = MakeOperationError("QueryInformationJobObject", entry.path, ERROR_BUSY); error->stage = "processExit"; return false;
+    }
+    entry.exit_confirmed = true;
   }
-
-  CloseHandle(entry.process);
+  for (const auto& path : entry.capture_paths) {
+    // Only test for outstanding writers here; reading permissions may need the
+    // subsequent owned-directory cleanup repair. The strict share mode detects writers.
+    const auto file = CreateFileW(Utf8ToWide(path).c_str(), 0, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) { *error = MakeOperationError("CreateFileW", path, GetLastError()); error->stage = "capture"; return false; }
+    entry.capture_guard = file;
+    if (!CloseHandle(file)) { *error = MakeOperationError("CloseHandle", path, GetLastError()); error->stage = "capture"; return false; }
+    entry.capture_guard = nullptr;
+  }
+  entry.capture_paths.clear();
+  if (entry.process != nullptr) {
+    if (!CloseHandle(entry.process)) { *error = MakeOperationError("CloseHandle", entry.path, GetLastError()); error->stage = "processHandle"; return false; }
+    entry.process = nullptr;
+  }
   if (entry.job != nullptr) {
-    CloseHandle(entry.job);
+    if (!CloseHandle(entry.job)) { *error = MakeOperationError("CloseHandle", entry.path, GetLastError()); error->stage = "jobHandle"; return false; }
+    entry.job = nullptr;
   }
+  g_managed_processes.erase(iterator);
   return true;
 }
 

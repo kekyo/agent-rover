@@ -11,8 +11,6 @@
 
 namespace agent_rover {
 
-namespace {
-
 constexpr DWORD kDwmwaExtendedFrameBounds = 9;
 constexpr wchar_t kDwmApiDllName[] = L"dwmapi.dll";
 
@@ -81,8 +79,6 @@ static bool TryReadDwmExtendedFrameBounds(HWND window, RECT* rect) {
   return true;
 }
 
-}  // namespace
-
 bool ReadWindowFrameBounds(
     HWND window,
     WindowRect* bounds,
@@ -109,6 +105,86 @@ bool ReadWindowFrameBounds(
   }
 
   *bounds = RectToWindowRect(selected_rect);
+  return true;
+}
+
+bool ReadWindowOuterBounds(HWND window, WindowRect* bounds, std::string* error) {
+  RECT rect = {};
+  if (bounds == nullptr || !GetWindowRect(window, &rect)) {
+    if (error != nullptr) *error = "GetWindowRect failed.";
+    return false;
+  }
+  *bounds = RectToWindowRect(rect);
+  return true;
+}
+
+bool ReadWindowClientBounds(HWND window, WindowRect* bounds, std::string* error) {
+  RECT rect = {};
+  if (bounds == nullptr || !GetClientRect(window, &rect)) {
+    if (error != nullptr) *error = "GetClientRect failed.";
+    return false;
+  }
+  // Mapping a rectangle also handles mirrored (RTL) client coordinates.
+  SetLastError(0);
+  if (MapWindowPoints(window, nullptr, reinterpret_cast<POINT*>(&rect), 2) == 0 &&
+      GetLastError() != 0) {
+    if (error != nullptr) *error = "MapWindowPoints failed.";
+    return false;
+  }
+  *bounds = RectToWindowRect(rect);
+  return true;
+}
+
+// Restore the agent's awareness on every return path, including API failures.
+struct ThreadDpiScope {
+  DPI_AWARENESS_CONTEXT (WINAPI* set_context)(DPI_AWARENESS_CONTEXT) = nullptr;
+  DPI_AWARENESS_CONTEXT previous = nullptr;
+  ~ThreadDpiScope() { if (previous != nullptr) set_context(previous); }
+};
+
+bool MoveWindowPhysical(HWND window, const WindowRect& bounds, std::string* error) {
+  RECT rect = {bounds.x, bounds.y, bounds.x + bounds.width, bounds.y + bounds.height};
+  ThreadDpiScope scope;
+  if ((GetWindowLongPtrW(window, GWL_STYLE) & WS_CHILD) != 0) {
+    const auto parent = GetParent(window);
+    const auto user32 = GetModuleHandleW(L"user32.dll");
+    using ContextProc = DPI_AWARENESS_CONTEXT (WINAPI*)(HWND);
+    using ConvertProc = BOOL (WINAPI*)(HWND, POINT*);
+    const auto context = user32 == nullptr ? nullptr : reinterpret_cast<ContextProc>(
+        GetProcAddress(user32, "GetWindowDpiAwarenessContext"));
+    const auto convert = user32 == nullptr ? nullptr : reinterpret_cast<ConvertProc>(
+        GetProcAddress(user32, "PhysicalToLogicalPointForPerMonitorDPI"));
+    scope.set_context = user32 == nullptr ? nullptr : reinterpret_cast<decltype(scope.set_context)>(
+        GetProcAddress(user32, "SetThreadDpiAwarenessContext"));
+    if (context != nullptr && convert != nullptr && scope.set_context != nullptr) {
+      // Child MoveWindow arguments use the parent's client units. Convert the
+      // physical screen corners to that parent's logical screen coordinates,
+      // then map and move while observing the same DPI coordinate space.
+      // https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-physicaltologicalpointforpermonitordpi
+      auto* points = reinterpret_cast<POINT*>(&rect);
+      if (!convert(parent, &points[0]) || !convert(parent, &points[1])) {
+        if (error != nullptr) *error = "PhysicalToLogicalPointForPerMonitorDPI failed.";
+        return false;
+      }
+      scope.previous = scope.set_context(context(parent));
+      if (scope.previous == nullptr) {
+        if (error != nullptr) *error = "SetThreadDpiAwarenessContext failed.";
+        return false;
+      }
+    }
+    SetLastError(0);
+    if (MapWindowPoints(nullptr, GetParent(window),
+                        reinterpret_cast<POINT*>(&rect), 2) == 0 &&
+        GetLastError() != 0) {
+      if (error != nullptr) *error = "MapWindowPoints failed.";
+      return false;
+    }
+  }
+  if (!MoveWindow(window, rect.left, rect.top, rect.right - rect.left,
+                  rect.bottom - rect.top, TRUE)) {
+    if (error != nullptr) *error = "MoveWindow failed.";
+    return false;
+  }
   return true;
 }
 

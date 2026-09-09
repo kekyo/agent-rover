@@ -4,7 +4,7 @@
   "private": true,
   "description": "Windows native agent for agent-rover",
   "scripts": {
-    "build": "make -j",
+    "build": "make -j4",
     "clean": "make clean",
     "pack": "npm run build && ./pack.sh",
     "test": "vitest run"

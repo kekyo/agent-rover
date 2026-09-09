@@ -97,7 +97,7 @@ As shown in the example above, you can send and receive files and launch applica
   File operations, such as sending and receiving files, are also supported.
 - Capture the screen or an application window as a PNG image, or as an H.264
   MP4 video on a supported Windows agent.
-- Prebuilt agents are available for Windows (i686/amd64 on XP SP2 or later) and Linux X11 (i686/amd64/armv7l/arm64/riscv64).
+- Prebuilt agents are available for Windows (i686/amd64 targeting XP SP2 or later) and Linux X11 (i686/amd64/armv7l/arm64/riscv64).
 - Agent communication uses a custom TCP protocol.
   Authentication uses a digest handshake, although the protocol messages themselves are not encrypted.
 - Image recognition assertions for exact or close matches, and OCR-based assertions.
@@ -210,6 +210,7 @@ In code examples, an already connected `RemoteAgent` is referred to as `agent` w
 | `connectRemoteAgent(options)` | Connects to the remote agent and returns a `RemoteAgent`. |
 | `RemoteAgent.capabilities()` | Gets the connected agent's protocol version, platform, and feature list. |
 | `RemoteAgent.release()` | Closes the connection to the remote agent. |
+| `RemoteAgent.desktop()` | Reads desktop placement, monitor DPI, and a configuration revision together. |
 | `RemoteAgent.bounds()` | Gets the rectangle of the entire virtual screen. |
 | `RemoteAgent.monitors()` | Gets the connected session's monitor list, work areas, and scale factors. |
 | `RemoteAgent.cursor()` | Gets the current cursor position and visibility state. |
@@ -258,6 +259,148 @@ try {
   agent.release();
 }
 ```
+
+### Desktop placement and DPI in tests
+
+DPI configuration is optional for driver users. If your tests assume 96 DPI
+(100%), pass pixel coordinates directly. The driver does not automatically scale
+these values or require the application under test to be DPI aware. Differences
+in UI layout on differently scaled monitors remain the test's responsibility.
+For an already found, visible window:
+
+```typescript
+const bounds = { x: 100, y: 100, width: 800, height: 600 };
+const moved = await window.setBounds(bounds);
+const placed = await moved.waitForPlacement({ bounds });
+```
+
+This waits only for the requested outer rectangle. Monitor IDs, DPI, and awareness
+may be unavailable without preventing success. Reported DPI values are always
+observations or `null`; assuming 96 DPI does not replace unknown or measured values.
+Mouse input and screenshots also keep their pixel coordinates.
+
+The following information is available when tests need to select a monitor,
+check display scaling, or diagnose placement differences.
+
+`agent.desktop()` returns desktop `bounds`, `monitors`, and a configuration
+`revision` together. `agent.bounds()` and `agent.monitors()` are also available;
+use one `desktop()` observation when choosing a placement.
+
+All coordinates are physical pixels. On Windows, `(0, 0)` is the primary monitor's
+top-left corner. Monitors to its left or above have negative coordinates. Right
+and bottom edges are exclusive. The desktop bounding rectangle can include gaps
+without any display pixels. Choose a monitor's `workArea` to avoid taskbars and
+other reserved space.
+[Windows virtual screen specification](https://learn.microsoft.com/en-us/windows/win32/gdi/the-virtual-screen)
+
+| Information | Use in tests |
+| --- | --- |
+| `monitor.id` / `primary` | Select and verify the destination. Do not rely on array order or IDs remaining valid after reconnecting. |
+| `monitor.bounds` / `workArea` | The complete monitor rectangle and the usable rectangle excluding taskbars and system toolbars. |
+| `monitor.dpi` / `scaleFactor` | Configured effective DPI and `dpi / 96`; 144 DPI means 150%. These describe display scaling, not physical panel density. Both are `null` when unavailable. |
+| `window.bounds` | Outer rectangle, including invisible resize borders. `setBounds()` accepts this rectangle. |
+| `window.frameBounds` | Visible frame rectangle used by window PNG and video capture. |
+| `window.clientBounds` | Content rectangle in screen coordinates, including for child windows. It may be empty. |
+| `window.monitorId` | The monitor associated by Windows; `null` when offscreen or unavailable. |
+| `window.dpi` / `dpiAwareness` | DPI applied to the target window and its awareness mode; `null` when unavailable. |
+
+For a window spanning monitors, Windows chooses its associated monitor by the
+largest intersection with the outer rectangle. Association does not establish
+that the entire window fits. Minimized windows use their pre-minimize rectangle
+for association, so also check `visible` and `minimized`.
+[MonitorFromWindow specification](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-monitorfromwindow)
+
+Monitor and window DPI can differ. Windows reports 96 for `unaware` and
+`unaware-gdi-scaled` windows, system DPI for `system`, and the destination monitor's
+DPI for `per-monitor` and `per-monitor-v2`. An unaware application on a 150% monitor
+can therefore report `window.dpi === 96`; this does not mean it appears at 100%.
+Use observed physical coordinates for input. Converting application-local logical
+coordinates requires knowledge of that application's DPI awareness and rendering
+behavior; multiplying all coordinates by one scale factor is not generally valid.
+Do not interpret `null` as 96 DPI or 100%.
+[GetDpiForWindow specification](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getdpiforwindow)
+
+The following example opts into monitor, DPI, and desktop-configuration checks.
+It assumes a connected `agent` and a previously found `window`. If a test requires
+a specific scale, also assert `monitor.dpi` as a prerequisite. Omit `dpi` and its
+precondition checks when only monitor placement matters.
+
+```typescript
+const desktop = await agent.desktop();
+const monitor = desktop.monitors.find((entry) => entry.primary);
+if (!monitor || monitor.dpi === null) {
+  throw new Error('The destination monitor or its DPI is unavailable.');
+}
+const restored = await window.restore();
+if (restored.dpi === null || restored.dpiAwareness === null) {
+  throw new Error('The target window DPI information is unavailable.');
+}
+
+// This test needs 800x600 physical pixels with a 32-pixel margin.
+if (monitor.workArea.width < 864 || monitor.workArea.height < 664) {
+  throw new Error('The work area is too small for this test.');
+}
+const bounds = {
+  x: monitor.workArea.x + 32,
+  y: monitor.workArea.y + 32,
+  width: 800,
+  height: 600,
+};
+const perMonitor = restored.dpiAwareness === 'per-monitor' ||
+  restored.dpiAwareness === 'per-monitor-v2';
+const expectedDpi = perMonitor ? monitor.dpi : restored.dpi;
+const moved = await restored.setBounds(bounds);
+const placed = await moved.waitForPlacement(
+  { bounds, monitorId: monitor.id, dpi: expectedDpi, desktopRevision: desktop.revision },
+  { stableIterations: 3, timeoutMs: 10000 }
+);
+
+// Compare captures with the visible frame, not the outer rectangle.
+const screenshot = await placed.screenshot();
+expect(screenshot.bounds).toEqual(placed.frameBounds);
+expect(screenshot.clipped).toBe(false);
+expect((await agent.desktop()).revision).toBe(desktop.revision);
+```
+
+Supply at least one of `bounds`, `monitorId`, or `dpi` to `waitForPlacement()`.
+Only supplied conditions must match in consecutive observations. Unrequested
+frame/client rectangles, monitor association, DPI, and awareness do not prolong
+the wait. Desktop configuration is read before and after each window snapshot
+only when `desktopRevision` is supplied. Defaults are `stableIterations: 2`,
+`intervalMs: 50`, and `timeoutMs: 10000`. A failed observation or unmet condition
+resets the stable count. Hidden or minimized windows cannot satisfy this wait.
+A requested monitor ID must match; unknown window DPI cannot satisfy a requested
+`dpi`. If the information remains unavailable, the timeout explains which
+condition could not be verified.
+A successful `setBounds()` alone does not establish the final placement after an
+application enforces its minimum size or handles a DPI change. Windows bitmap
+scaling can also round dimensions of unaware/system-aware windows: for example,
+a requested width of 400 was observed as 401 on a 150% monitor in our tests.
+Exact `bounds` matching deliberately detects that difference. If exact dimensions
+are irrelevant, specify only `monitorId` and/or `dpi`, then use the returned
+`bounds`, `frameBounds`, and `clientBounds` for subsequent input and assertions.
+[Windows DPI virtualization and bitmap scaling](https://learn.microsoft.com/en-us/windows/win32/hidpi/high-dpi-desktop-application-development-on-windows)
+
+`waitForStableBounds()` only checks that the outer rectangle stops changing.
+Use `waitForPlacement()` to verify an intended placement. Neither wait establishes
+application rendering completion, animation completion, or absence of occlusion.
+Likewise, `screenshot.clipped === false` does not establish absence of occlusion
+or gaps between monitors. Assert the required UI state and captured content
+separately.
+
+When supplied, `desktopRevision` makes a configuration mismatch fail with
+`DESKTOP_CHANGED`. Re-read desktop information and reassess prerequisites and
+placement after reconnecting or changing monitors, resolution, DPI, or work areas.
+The revision identifies observed settings; it is not a monotonically increasing
+event counter. Returning to an earlier configuration returns the same revision,
+so equal revisions cannot rule out an intervening change.
+
+The Windows agent compares consecutive observations and returns `OPERATION_FAILED`
+if the configuration keeps changing. Desktop, window, and capture operations are
+not one atomic observation. `agent.diagnostics.capture()` includes `desktop` from
+before acquisition and `desktopAfter` from after acquisition. `saveDiagnostics()`
+also stores both in its manifest. Compare their revisions and inspect window DPI
+metadata when investigating test failures.
 
 ### Video Recording
 
@@ -339,6 +482,7 @@ and the [Media Foundation H.264 encoder](https://learn.microsoft.com/en-us/windo
 | `AppWindow.recordVideo(durationMs, options?)` | Captures the window area as a temporary-file-backed readable stream. |
 | `AppWindow.waitForVisible(options?)` | Waits until the window becomes visible. |
 | `AppWindow.waitForHidden(options?)` / `AppWindow.waitForClosed(options?)` | Waits until the window becomes hidden, or until it closes. |
+| `AppWindow.waitForPlacement(expected, options?)` | Waits for the requested rectangle, monitor, and DPI to be reached and stable. |
 | `AppWindow.waitForStableBounds(options?)` | Waits until the window rectangle stabilizes. |
 | `AppWindow.close()` | Sends a close request to the window. |
 
@@ -520,10 +664,10 @@ const notepadWindow = await agent.waitForWindow({
 });
 
 // Bring the window to the foreground and click the input position.
-await notepadWindow.activate();
+const activeWindow = await notepadWindow.activate();
 const inputPoint = {
-  x: notepadWindow.bounds.x + 24,
-  y: notepadWindow.bounds.y + 96,
+  x: activeWindow.clientBounds.x + 24,
+  y: activeWindow.clientBounds.y + 96,
 };
 await agent.mouse.move(inputPoint);
 await agent.mouse.click(inputPoint, {
@@ -702,6 +846,65 @@ await withDiagnostics(
 // Remove the remote directory created for the test.
 await agent.files.remove(remoteDirectory, {
   recursive: true,
+});
+```
+
+### Process Cleanup And File Removal
+
+`await process.releaseAsync({ timeoutMs: 10000 })` waits for the managed process
+tree to exit, closes its capture resources, and removes its internal output
+directory. Concurrent release calls share the work. A failed call keeps its
+unfinished state so you can call it again; a successful release is idempotent.
+New process operations are rejected once release starts. `Symbol.asyncDispose`
+uses the same operation with the default deadline.
+
+With `killTreeOnRelease: false`, release does not terminate the process. Without
+capture it closes monitoring resources immediately. With capture it waits for
+the writers to finish and fails if the deadline expires. After stopping the
+process yourself, call release again. During execution, `stdoutText()` and
+`stderrText()` return snapshots. After the root exits they wait for managed
+descendants and return complete output, including the tail. Both accept
+`{ timeoutMs }`. Release waits for reads already in progress.
+
+`files.remove(path, options)` accepts these options:
+
+| Option | Default | Behavior |
+| :-- | :-- | :-- |
+| `recursive` | `false` | Remove directory contents. |
+| `onLockedFile` | `'retry'` | Retry transient conflicts; `'fail'` makes one attempt. |
+| `timeoutMs` | `10000` | One deadline for the entire removal; `0` makes one attempt. |
+| `ignoreMissing` | `false` | Accept an already absent target when `true`. |
+| `onReadOnly` | `'fail'` | `'clear'` permits clearing the read-only bit. |
+| `onPermissionDenied` | `'fail'` | `'grantDelete'` permits adding current-user removal access. |
+
+Internal capture directories created and registered by the agent use attribute
+and permission repair automatically. User paths, including `files.mkdtemp`
+results, require the explicit options above. Repair is limited to local absolute
+paths. It does not traverse reparse points, modify multiply linked files, replace
+the owner, or enable privileges. DACLs containing deny ACEs are refused.
+These restrictions do not guarantee that every locked or inaccessible file can
+be removed. The removal contract concerns the requested directory entry, not
+other hard links or physical storage reclamation.
+
+Failed deletion restores changed attributes and ACLs on surviving original
+objects. Files already deleted by a recursive attempt stay deleted. Errors have
+`code: 'OPERATION_FAILED'` and `details` containing the operation, actual failing
+path, OS code and reason. Cleanup failures also report attempts, elapsed time and
+deadline exhaustion; `details.repairs` records repairs and restoration failures.
+Restoration failure stops automatic retries. Use these fields rather than parsing
+the diagnostic message. Deadlines bound retries, not an OS call that stops responding.
+
+`files.remove` never discovers or terminates processes. The existing explicit
+`syncDirectory` policy `killRelatedProcessesAndRetry` remains separate.
+
+```typescript
+await process.waitForExit();
+const output = await process.stdoutText();
+await process.releaseAsync();
+await agent.files.remove(remoteDirectory, {
+  recursive: true,
+  timeoutMs: 10000,
+  ignoreMissing: true,
 });
 ```
 

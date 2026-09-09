@@ -45,15 +45,6 @@ static bool IdToHandle(const std::string& value, HWND* window) {
   return true;
 }
 
-static WindowRect RectToWindowRect(const RECT& rect) {
-  return {
-      rect.left,
-      rect.top,
-      std::max<int>(1, static_cast<int>(rect.right - rect.left)),
-      std::max<int>(1, static_cast<int>(rect.bottom - rect.top)),
-  };
-}
-
 static WindowRect VirtualScreenRect() {
   return {
       GetSystemMetrics(SM_XVIRTUALSCREEN),
@@ -193,65 +184,6 @@ bool CaptureWindowScreenshot(
     return false;
   }
   return CaptureScreenRect(bounds, screenshot, error);
-}
-
-bool GetScreenBounds(WindowRect* bounds, std::string* error) {
-  if (bounds == nullptr) {
-    *error = "Screen bounds output is null.";
-    return false;
-  }
-  *bounds = VirtualScreenRect();
-  return true;
-}
-
-struct MonitorEnumState {
-  std::vector<ScreenMonitor>* monitors;
-  std::string* error;
-};
-
-static BOOL CALLBACK AppendMonitorInfo(
-    HMONITOR monitor,
-    HDC,
-    LPRECT,
-    LPARAM data) {
-  MonitorEnumState* state = reinterpret_cast<MonitorEnumState*>(data);
-  MONITORINFOEXW info = {};
-  info.cbSize = sizeof(info);
-  if (!GetMonitorInfoW(monitor, reinterpret_cast<LPMONITORINFO>(&info))) {
-    *state->error = "GetMonitorInfoW failed.";
-    return FALSE;
-  }
-  const std::string fallback_id =
-      "monitor-" + std::to_string(state->monitors->size() + 1);
-  const std::string name = WideToUtf8(std::wstring(info.szDevice));
-  ScreenMonitor entry = {};
-  entry.id = name.empty() ? fallback_id : name;
-  entry.name = name;
-  entry.bounds = RectToWindowRect(info.rcMonitor);
-  entry.work_area = RectToWindowRect(info.rcWork);
-  entry.primary = (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
-  entry.scale_factor = 1.0;
-  state->monitors->push_back(entry);
-  return TRUE;
-}
-
-bool ListScreenMonitors(
-    std::vector<ScreenMonitor>* monitors,
-    std::string* error) {
-  if (monitors == nullptr) {
-    *error = "Screen monitors output is null.";
-    return false;
-  }
-  monitors->clear();
-  MonitorEnumState state = {monitors, error};
-  if (!EnumDisplayMonitors(
-          nullptr, nullptr, AppendMonitorInfo, reinterpret_cast<LPARAM>(&state))) {
-    if (error->empty()) {
-      *error = "EnumDisplayMonitors failed.";
-    }
-    return false;
-  }
-  return true;
 }
 
 bool ReadScreenCursor(ScreenCursor* cursor, std::string* error) {

@@ -30,8 +30,8 @@ export interface AsyncReleaseable extends AsyncDisposable {
 
 /**
  * Screen-relative rectangle in physical screen pixels.
- * @remarks The origin is the virtual screen origin, so multi-monitor setups may
- * report negative x or y coordinates.
+ * @remarks On Windows, (0, 0) is the primary monitor origin. Monitors to its
+ * left or above have negative coordinates. Right and bottom edges are exclusive.
  */
 export interface ScreenRect {
   /** Left coordinate in physical pixels. */
@@ -321,6 +321,14 @@ export interface RemoteAgentCapabilities {
   readonly features: readonly string[];
 }
 
+/** Windows DPI awareness, reported for the target window rather than its process. */
+export type WindowDpiAwareness =
+  | 'unaware'
+  | 'unaware-gdi-scaled'
+  | 'system'
+  | 'per-monitor'
+  | 'per-monitor-v2';
+
 /** Remote top-level or descendant application window. */
 export interface AppWindowSnapshot {
   /** Stable agent-side identifier for this window. */
@@ -329,8 +337,18 @@ export interface AppWindowSnapshot {
   readonly title: string;
   /** Platform window class name. */
   readonly className: string;
-  /** Current window bounds. */
+  /** Outer bounds, including invisible resize borders, in physical screen pixels. */
   readonly bounds: ScreenRect;
+  /** Visible frame bounds used by window screenshots and video. */
+  readonly frameBounds: ScreenRect;
+  /** Client rectangle in physical screen coordinates; may be empty. */
+  readonly clientBounds: ScreenRect;
+  /** Associated monitor, or null when offscreen or unavailable. Minimized windows use their previous placement. */
+  readonly monitorId: string | null;
+  /** DPI applied to this window, or null when unavailable. May differ from monitor DPI. */
+  readonly dpi: number | null;
+  /** Target window DPI awareness, or null when unavailable. */
+  readonly dpiAwareness: WindowDpiAwareness | null;
   /** Whether the platform reports the window as visible. */
   readonly visible: boolean;
   /** Whether this window or its root owner is currently active. */
@@ -422,6 +440,13 @@ export interface RemoteManagedProcessSnapshot {
 /** Managed remote process handle. */
 export interface RemoteManagedProcess
   extends RemoteApplicationProcess, AsyncReleaseable {
+  /**
+   * Completes owned cleanup, preserving unfinished stages after failure.
+   * @param options Overall cleanup deadline, defaulting to 10000 milliseconds.
+   * @returns Completion of process termination, owned handle release and temporary cleanup.
+   * @remarks Concurrent calls join the current release. A failed release can be retried.
+   */
+  readonly releaseAsync: (options?: RemoteCleanupOptions) => Promise<void>;
   /** Reads the current root process state. */
   readonly rootSnapshot: () => Promise<RemoteProcessSnapshot>;
   /** Reads the current logical application state. */
@@ -448,10 +473,18 @@ export interface RemoteManagedProcess
   readonly waitForExit: (
     options?: RemoteWaitOptions
   ) => Promise<RemoteManagedProcessSnapshot>;
-  /** Reads captured standard output as UTF-8 text. */
-  readonly stdoutText: () => Promise<string>;
-  /** Reads captured standard error as UTF-8 text. */
-  readonly stderrText: () => Promise<string>;
+  /**
+   * Reads a live snapshot, or complete UTF-8 stdout after the root exits.
+   * @param options Deadline for descendant writers and capture availability.
+   * @returns Captured output, including the final bytes after completion.
+   */
+  readonly stdoutText: (options?: RemoteCleanupOptions) => Promise<string>;
+  /**
+   * Reads a live snapshot, or complete UTF-8 stderr after the root exits.
+   * @param options Deadline for descendant writers and capture availability.
+   * @returns Captured error output, including the final bytes after completion.
+   */
+  readonly stderrText: (options?: RemoteCleanupOptions) => Promise<string>;
 }
 
 /** Remote process snapshot. */
@@ -532,6 +565,22 @@ export interface RemoteStableBoundsWaitOptions extends RemoteWaitOptions {
   readonly stableIterations?: number;
 }
 
+/**
+ * Expected placement in physical screen pixels.
+ * @remarks Specify at least one of bounds, monitorId, or dpi. Omitted conditions
+ * are not checked. Fixed-pixel tests can specify bounds alone without querying DPI.
+ */
+export interface RemoteWindowPlacement {
+  /** Required outer rectangle, including invisible resize borders. */
+  readonly bounds?: ScreenRect;
+  /** Required associated monitor identifier; omit when monitor selection is irrelevant. */
+  readonly monitorId?: string;
+  /** Required target window DPI; omit to ignore DPI. Monitor DPI applies only to per-monitor aware targets. */
+  readonly dpi?: number;
+  /** Expected desktop revision; a mismatch fails immediately with DESKTOP_CHANGED. */
+  readonly desktopRevision?: string;
+}
+
 /** Options for recursively listing window descendants. */
 export interface AppWindowDescendantsOptions {
   /** Maximum descendant depth to include. */
@@ -583,7 +632,7 @@ export interface AppWindow extends AppWindowSnapshot {
   readonly findDescendants: (
     query: RemoteWindowQuery
   ) => Promise<readonly AppWindow[]>;
-  /** Captures this window bounds as a PNG screenshot. */
+  /** Captures this window visible frame as a PNG screenshot. */
   readonly screenshot: () => Promise<AppWindowScreenshot>;
   /** Captures this window as an H.264 MP4 video. */
   readonly recordVideo: {
@@ -634,6 +683,20 @@ export interface AppWindow extends AppWindowSnapshot {
   readonly waitForStableBounds: (
     options?: RemoteStableBoundsWaitOptions
   ) => Promise<AppWindow>;
+  /**
+   * Waits for a visible, non-minimized window to reach and retain its placement.
+   * @param expected At least one of bounds, monitorId, or dpi; optionally a desktop revision.
+   * @param options Polling deadline, interval, and consecutive stable observations (default 2).
+   * @returns A new snapshot matching the expected placement.
+   * @remarks Only supplied conditions participate in stability. A bounds-only wait
+   * requires no monitor or DPI metadata. Desktop configuration is read before and
+   * after each snapshot only when desktopRevision is supplied.
+   * This does not establish application readiness, rendering completion, or absence of occlusion.
+   */
+  readonly waitForPlacement: (
+    expected: RemoteWindowPlacement,
+    options?: RemoteStableBoundsWaitOptions
+  ) => Promise<AppWindow>;
   /** Requests that this window closes. */
   readonly close: () => Promise<void>;
 }
@@ -642,7 +705,7 @@ export interface AppWindow extends AppWindowSnapshot {
 export interface AppWindowScreenshot {
   /** PNG image buffer. */
   readonly image: Buffer;
-  /** Window bounds used for capture. */
+  /** Visible frame bounds used for capture. */
   readonly bounds: ScreenRect;
   /** Visible bounds included in the screenshot. */
   readonly visibleBounds: ScreenRect;
@@ -737,7 +800,7 @@ export interface CapturedVideoStream
 
 /** Remote monitor geometry. */
 export interface RemoteMonitor {
-  /** Stable monitor identifier within the current screen session. */
+  /** Monitor identifier for the current display configuration; not persistent across reconnects. */
   readonly id: string;
   /** Platform monitor name when available. */
   readonly name: string;
@@ -747,8 +810,25 @@ export interface RemoteMonitor {
   readonly workArea: ScreenRect;
   /** Whether this monitor is the primary monitor. */
   readonly primary: boolean;
-  /** Monitor scale factor relative to 96 DPI. */
-  readonly scaleFactor: number;
+  /** Configured effective DPI, or null when unavailable. Not physical panel density. */
+  readonly dpi: number | null;
+  /** Monitor scale factor relative to 96 DPI, or null when DPI is unavailable. */
+  readonly scaleFactor: number | null;
+}
+
+/** Desktop geometry and DPI observed together. */
+export interface RemoteDesktop {
+  /** Bounding rectangle of all monitors, including gaps without display pixels. */
+  readonly bounds: ScreenRect;
+  /** Monitors in this configuration; select by id or primary rather than array index. */
+  readonly monitors: readonly RemoteMonitor[];
+  /**
+   * Opaque identity of the observed geometry, work areas, monitor IDs, and DPI.
+   * @remarks Equal revisions mean equal observed configurations, not that no
+   * intervening change occurred. Acquisition checks consecutive observations;
+   * it cannot make desktop and window operations atomic.
+   */
+  readonly revision: string;
 }
 
 /** Remote cursor state. */
@@ -929,8 +1009,18 @@ export interface RemoteMkdirOptions {
 
 /** Remove options. */
 export interface RemoteRemoveOptions {
+  /** Clear the read-only bit before removal. Defaults to fail for user paths. */
+  readonly onReadOnly?: 'fail' | 'clear';
+  /** Add current-user removal access; DACLs containing deny ACEs are refused. Defaults to fail. */
+  readonly onPermissionDenied?: 'fail' | 'grantDelete';
   /** Whether directory contents should be removed recursively. */
   readonly recursive?: boolean;
+  /** Transient failure policy. Defaults to retry; never terminates processes. */
+  readonly onLockedFile?: 'fail' | 'retry';
+  /** Deadline for the entire removal in milliseconds. Defaults to 10000; zero tries once. */
+  readonly timeoutMs?: number;
+  /** Whether an already absent target counts as success. Defaults to false. */
+  readonly ignoreMissing?: boolean;
 }
 
 /** Event log severity label. */
@@ -1006,7 +1096,11 @@ export interface RemoteDiagnosticsCaptureOptions {
 export interface RemoteDiagnosticsCapture {
   /** Capture timestamp as an ISO string. */
   readonly capturedAt: string;
-  /** Remote agent bounds. */
+  /** Desktop observation before screenshot and window acquisition. */
+  readonly desktop: RemoteDesktop;
+  /** Desktop observation after acquisition; compare revisions to detect a changed configuration. */
+  readonly desktopAfter: RemoteDesktop;
+  /** Remote agent bounds from the initial desktop observation. */
   readonly bounds: ScreenRect;
   /** Screen screenshot. */
   readonly screenshot: RemoteScreenshot;
@@ -1016,7 +1110,7 @@ export interface RemoteDiagnosticsCapture {
   readonly activeWindow: AppWindowSnapshot | null;
   /** Cursor state at capture time. */
   readonly cursor: RemoteCursor;
-  /** Monitor list at capture time. */
+  /** Monitor list from the initial desktop observation. */
   readonly monitors: readonly RemoteMonitor[];
   /** Event log entries collected during capture. */
   readonly eventLogs: readonly EventLogEntry[];
@@ -1166,6 +1260,12 @@ export interface RemoteAgent extends Releaseable {
   };
   /** Reads the virtual screen bounds. */
   readonly bounds: () => Promise<ScreenRect>;
+  /**
+   * Reads desktop geometry, monitor DPI, and an opaque configuration revision.
+   * @returns Two consecutive matching native observations, or an operation error
+   * if the configuration keeps changing. Re-read after reconnecting or moving windows.
+   */
+  readonly desktop: () => Promise<RemoteDesktop>;
   /** Lists monitors in the current screen session. */
   readonly monitors: () => Promise<readonly RemoteMonitor[]>;
   /** Reads the current cursor state. */
@@ -1200,8 +1300,10 @@ export interface ConnectRemoteAgentOptions {
 
 /** Stable error codes raised by the remote agent driver. */
 export type RemoteAgentErrorCode =
+  | 'OPERATION_FAILED'
   | 'AUTHENTICATION_FAILED'
   | 'CONNECTION_FAILED'
+  | 'DESKTOP_CHANGED'
   | 'DISCONNECTED'
   | 'HANDSHAKE_FAILED'
   | 'INVALID_ARGUMENT'
@@ -1211,6 +1313,65 @@ export type RemoteAgentErrorCode =
 export interface RemoteAgentError extends Error {
   /** Stable machine-readable error code. */
   readonly code: RemoteAgentErrorCode;
+  /** Structured process or file failure, when reported by the operation. */
+  readonly details?: RemoteOperationErrorDetails;
+}
+
+/** Native process or file failure information, independent of the message language. */
+export interface RemoteOperationErrorDetails {
+  /** Requested protocol operation. */
+  readonly operation: string;
+  /** Failing operating-system API. */
+  readonly nativeOperation: string;
+  /** Actual failing file or directory, or empty for a non-file operation. */
+  readonly path: string;
+  /** Native error code, or null when the failure has no OS code. */
+  readonly osCode: number | null;
+  /** Observed cause; accessDenied does not by itself identify a lock or a permanent denial. */
+  readonly reason:
+    | 'unknown'
+    | 'sharingViolation'
+    | 'lockViolation'
+    | 'accessDenied'
+    | 'permissionDenied'
+    | 'readOnly'
+    | 'notFound'
+    | 'directoryNotEmpty'
+    | 'busy'
+    | 'unsupported'
+    | 'invalidArgument';
+  /** Incomplete cleanup stage, when applicable. */
+  readonly stage?: string;
+  /** Attempts made by the current retry operation. */
+  readonly attempts?: number;
+  /** Milliseconds elapsed since the outermost operation started. */
+  readonly elapsedMs?: number;
+  /** Whether the operation's deadline was reached. */
+  readonly timedOut?: boolean;
+  /** Attribute and permission repairs, including rollback of surviving objects. */
+  readonly repairs?: readonly RemoteCleanupRepair[];
+}
+
+/** Outcome of an attempted change to the original cleanup target. */
+export interface RemoteCleanupRepair {
+  /** Original target path. */
+  readonly path: string;
+  /** Attempted repair. */
+  readonly action: 'clearReadOnly' | 'grantDelete';
+  /** Whether the change was applied, failed, or refused for an unsafe boundary. */
+  readonly outcome: 'applied' | 'failed' | 'skipped';
+  /** Saved repair OS error, or zero. */
+  readonly osCode: number;
+  /** Rollback result if deletion failed after a change. */
+  readonly restoration: 'notNeeded' | 'restored' | 'failed';
+  /** Saved rollback OS error, or zero. */
+  readonly restoreOsCode: number;
+}
+
+/** Deadline options for process cleanup and completed-output reads. */
+export interface RemoteCleanupOptions {
+  /** Overall deadline in milliseconds; zero permits one immediate attempt. Default is 10000. */
+  readonly timeoutMs?: number;
 }
 
 export { connectRemoteAgent } from './driver/connection';

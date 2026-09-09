@@ -46,6 +46,7 @@ describe('native authentication helpers', () => {
 #include "binary_codec.h"
 
 #include <cstdio>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -126,6 +127,102 @@ int main() {
   if (agent_rover::AuthResponseEquals(response, wrong_challenge_response)) {
     std::fprintf(stderr, "different challenge response matched\n");
     return 1;
+  }
+  {
+    const std::vector<unsigned char> data(0, 'a');
+    auto state = agent_rover::CreateSha256();
+    for (size_t offset = 0; offset < data.size();) {
+      const size_t count = std::min(size_t(37), data.size() - offset);
+      agent_rover::UpdateSha256(&state, data.data() + offset, count);
+      offset += count;
+    }
+    agent_rover::UpdateSha256(&state, nullptr, 0);
+    if (Hex(agent_rover::FinishSha256(state)) != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ||
+        agent_rover::Sha256Hex(data) != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") return 2;
+  }
+  {
+    const std::vector<unsigned char> data(55, 'a');
+    auto state = agent_rover::CreateSha256();
+    for (size_t offset = 0; offset < data.size();) {
+      const size_t count = std::min(size_t(37), data.size() - offset);
+      agent_rover::UpdateSha256(&state, data.data() + offset, count);
+      offset += count;
+    }
+    agent_rover::UpdateSha256(&state, nullptr, 0);
+    if (Hex(agent_rover::FinishSha256(state)) != "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318" ||
+        agent_rover::Sha256Hex(data) != "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318") return 2;
+  }
+  {
+    const std::vector<unsigned char> data(56, 'a');
+    auto state = agent_rover::CreateSha256();
+    for (size_t offset = 0; offset < data.size();) {
+      const size_t count = std::min(size_t(37), data.size() - offset);
+      agent_rover::UpdateSha256(&state, data.data() + offset, count);
+      offset += count;
+    }
+    agent_rover::UpdateSha256(&state, nullptr, 0);
+    if (Hex(agent_rover::FinishSha256(state)) != "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a" ||
+        agent_rover::Sha256Hex(data) != "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a") return 2;
+  }
+  {
+    const std::vector<unsigned char> data(63, 'a');
+    auto state = agent_rover::CreateSha256();
+    for (size_t offset = 0; offset < data.size();) {
+      const size_t count = std::min(size_t(37), data.size() - offset);
+      agent_rover::UpdateSha256(&state, data.data() + offset, count);
+      offset += count;
+    }
+    agent_rover::UpdateSha256(&state, nullptr, 0);
+    if (Hex(agent_rover::FinishSha256(state)) != "7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34" ||
+        agent_rover::Sha256Hex(data) != "7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34") return 2;
+  }
+  {
+    const std::vector<unsigned char> data(64, 'a');
+    auto state = agent_rover::CreateSha256();
+    for (size_t offset = 0; offset < data.size();) {
+      const size_t count = std::min(size_t(37), data.size() - offset);
+      agent_rover::UpdateSha256(&state, data.data() + offset, count);
+      offset += count;
+    }
+    agent_rover::UpdateSha256(&state, nullptr, 0);
+    if (Hex(agent_rover::FinishSha256(state)) != "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb" ||
+        agent_rover::Sha256Hex(data) != "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb") return 2;
+  }
+  {
+    const std::vector<unsigned char> data(65, 'a');
+    auto state = agent_rover::CreateSha256();
+    for (size_t offset = 0; offset < data.size();) {
+      const size_t count = std::min(size_t(37), data.size() - offset);
+      agent_rover::UpdateSha256(&state, data.data() + offset, count);
+      offset += count;
+    }
+    agent_rover::UpdateSha256(&state, nullptr, 0);
+    if (Hex(agent_rover::FinishSha256(state)) != "635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0" ||
+        agent_rover::Sha256Hex(data) != "635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0") return 2;
+  }
+  {
+    const std::vector<unsigned char> data(65553, 'a');
+    auto state = agent_rover::CreateSha256();
+    for (size_t offset = 0; offset < data.size();) {
+      const size_t count = std::min(size_t(37), data.size() - offset);
+      agent_rover::UpdateSha256(&state, data.data() + offset, count);
+      offset += count;
+    }
+    agent_rover::UpdateSha256(&state, nullptr, 0);
+    if (Hex(agent_rover::FinishSha256(state)) != "4f14f01ab3b4bc8f52b69d802bd6de25f49880d9591bb6c8068fca684fcd8a1d" ||
+        agent_rover::Sha256Hex(data) != "4f14f01ab3b4bc8f52b69d802bd6de25f49880d9591bb6c8068fca684fcd8a1d") return 2;
+  }
+  {
+    const std::vector<unsigned char> data(1000000, 'a');
+    auto state = agent_rover::CreateSha256();
+    for (size_t offset = 0; offset < data.size();) {
+      const size_t count = std::min(size_t(37), data.size() - offset);
+      agent_rover::UpdateSha256(&state, data.data() + offset, count);
+      offset += count;
+    }
+    agent_rover::UpdateSha256(&state, nullptr, 0);
+    if (Hex(agent_rover::FinishSha256(state)) != "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0" ||
+        agent_rover::Sha256Hex(data) != "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0") return 2;
   }
   return 0;
 }

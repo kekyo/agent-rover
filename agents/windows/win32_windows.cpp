@@ -13,6 +13,7 @@
 #include <string>
 
 #include "win32_util.h"
+#include "win32_desktop.h"
 #include "win32_window_bounds.h"
 
 namespace agent_rover {
@@ -164,7 +165,7 @@ static WindowProcess ReadWindowProcess(DWORD process_id) {
 
 static WindowRect ReadWindowRect(HWND window) {
   WindowRect bounds = {};
-  if (!ReadWindowFrameBounds(window, &bounds, nullptr)) {
+  if (!ReadWindowOuterBounds(window, &bounds, nullptr)) {
     return {0, 0, 0, 0};
   }
   return bounds;
@@ -175,7 +176,7 @@ static WindowInfo ReadWindowInfo(HWND window, const std::string& parent_id) {
   GetWindowThreadProcessId(window, &process_id);
   WINDOWPLACEMENT placement = {};
   const bool has_placement = ReadWindowPlacement(window, &placement, nullptr);
-  return {
+  WindowInfo info = {
       HandleToId(window),
       parent_id,
       ReadWindowTitle(window),
@@ -189,7 +190,15 @@ static WindowInfo ReadWindowInfo(HWND window, const std::string& parent_id) {
       has_placement && placement.showCmd == SW_SHOWMAXIMIZED,
       ReadWindowRect(window),
       ReadWindowProcess(process_id),
+      {},
+      {},
+      ReadWindowMonitorId(window),
+      ReadWindowDpi(window),
+      ReadWindowDpiAwareness(window),
   };
+  ReadWindowFrameBounds(window, &info.frame_bounds, nullptr);
+  ReadWindowClientBounds(window, &info.client_bounds, nullptr);
+  return info;
 }
 
 static bool SnapshotWindow(
@@ -360,8 +369,7 @@ bool SetWindowBoundsById(
     *error = "window.setBounds requires positive width and height.";
     return false;
   }
-  if (!MoveWindow(handle, bounds.x, bounds.y, bounds.width, bounds.height, TRUE)) {
-    *error = "MoveWindow failed.";
+  if (!MoveWindowPhysical(handle, bounds, error)) {
     return false;
   }
   return SnapshotWindow(handle, window, error);

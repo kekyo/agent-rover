@@ -95,6 +95,12 @@ describe.concurrent('diagnostics artifacts', () => {
           readonly path: string;
         }[];
       };
+      expect(manifest).toMatchObject({
+        screen: {
+          desktop: capture.desktop,
+          desktopAfter: capture.desktopAfter,
+        },
+      });
       expect(manifest.artifacts).toContainEqual({
         contentType: 'image/png',
         kind: 'screenScreenshot',

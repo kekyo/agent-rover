@@ -92,7 +92,7 @@ agent-roverは、GUIアプリケーション自体の監視や操作以外にも
   ファイル操作（送受信）も可能。
 - 画面またはアプリケーションウインドウをPNG画像として、対応するWindowsエージェントでは
   H.264 MP4動画としてキャプチャ可能。
-- プリビルドエージェントは Windows (XP SP2以降のi686/amd64)・Linux X11 (i686/amd64/armv7l/arm64/riscv64) を使用可能。
+- プリビルドエージェントは Windows (XP SP2以降を対象とするi686/amd64)・Linux X11 (i686/amd64/armv7l/arm64/riscv64) を使用可能。
 - エージェントとの通信はTCP独自プロトコル。認証はダイジェストハンドシェーク（但し通信電文自体は非暗号化）。
 - 画像認識（一致または近しい）・OCR解析アサーション。
 
@@ -199,6 +199,7 @@ agent-roverは特定のテストフレームワークに依存しません。
 | `connectRemoteAgent(options)` | リモートエージェントへ接続し、`RemoteAgent`を返します。 |
 | `RemoteAgent.capabilities()` | 接続先エージェントのプロトコルバージョン、プラットフォーム、機能一覧を取得します。 |
 | `RemoteAgent.release()` | リモートエージェントとの接続を閉じます。 |
+| `RemoteAgent.desktop()` | デスクトップ配置、モニターDPI、構成リビジョンをまとめて取得します。 |
 | `RemoteAgent.bounds()` | 仮想画面全体の矩形を取得します。 |
 | `RemoteAgent.monitors()` | 接続先セッションのモニター一覧、作業領域、スケール係数を取得します。 |
 | `RemoteAgent.cursor()` | 現在のカーソル位置と表示状態を取得します。 |
@@ -247,6 +248,141 @@ try {
   agent.release();
 }
 ```
+
+### デスクトップ配置とDPIを使ったテスト
+
+テストドライバーを使うためにDPIの設定や知識は必要ありません。96 DPI（100%）を
+想定したテストでは、座標・サイズをピクセル値のまま指定できます。ドライバーは値を
+自動で拡大縮小せず、対象アプリがDPI awareであることも要求しません。倍率の異なる
+モニターでUI配置が変わることは、そのテストで許容するかどうかを判断してください。
+取得済みの表示中ウインドウなら、次の操作で済みます。
+
+```typescript
+const bounds = { x: 100, y: 100, width: 800, height: 600 };
+const moved = await window.setBounds(bounds);
+const placed = await moved.waitForPlacement({ bounds });
+```
+
+この例は指定した外周矩形だけを検証します。モニターID、DPI、DPI対応方式が取得不能でも
+成功できます。取得したDPIは実際の観測値または`null`であり、96を想定する使い方でも
+観測値を96へ書き換えません。マウス入力やスクリーンショットもピクセル座標を使います。
+
+モニターを選択する、表示倍率を検証する、配置の違いを調査するといった場合には、
+以下の情報を利用できます。
+
+`agent.desktop()`は、デスクトップ全体の`bounds`、各モニターの情報を持つ
+`monitors`、構成を比較するための`revision`をまとめて返します。
+`agent.bounds()`と`agent.monitors()`も利用できますが、配置先を決めるときは
+一度の`desktop()`呼び出しで取得した情報を使ってください。
+
+座標はすべて物理ピクセルです。Windowsではプライマリモニターの左上が`(0, 0)`で、
+左側・上側のモニターは負の座標になります。右端・下端は矩形に含みません。
+デスクトップ全体の矩形には、モニター間の画面がない隙間も含まれます。
+配置先には各モニターの`workArea`を使い、タスクバー等を避けてください。
+[Windowsの仮想画面仕様](https://learn.microsoft.com/en-us/windows/win32/gdi/the-virtual-screen)
+
+| 情報 | テストでの使い方 |
+| --- | --- |
+| `monitor.id` / `primary` | 配置先の選択と配置後の照合に使用します。配列の順序や再接続後のIDの永続性は前提にしません。 |
+| `monitor.bounds` / `workArea` | モニター全体と、タスクバー等を除いた配置可能な矩形です。 |
+| `monitor.dpi` / `scaleFactor` | 表示倍率に対応する設定DPIと`dpi / 96`です。144 DPIは150%です。パネルの物理的な画素密度ではありません。取得不能なら両方`null`です。 |
+| `window.bounds` | 不可視のリサイズ枠を含む外周矩形です。`setBounds()`もこの矩形を受け取ります。 |
+| `window.frameBounds` | 見えているウインドウ枠の矩形です。ウインドウのPNG・動画撮影はこちらを使います。 |
+| `window.clientBounds` | 内容領域の矩形です。子ウインドウを含めて画面座標で返します。空の矩形になる場合もあります。 |
+| `window.monitorId` | Windowsが関連付けたモニターです。画面外または取得不能なら`null`です。 |
+| `window.dpi` / `dpiAwareness` | 対象ウインドウに適用されるDPIとDPI対応方式です。取得不能なら`null`です。 |
+
+複数モニターにまたがるウインドウの`monitorId`は、Windowsが外周矩形との交差面積で
+選択したモニターを表します。モニター内に全体が収まっていることを保証しません。
+最小化中は最小化前の矩形で関連付けられるため、`visible`と`minimized`も確認してください。
+[MonitorFromWindowの仕様](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-monitorfromwindow)
+
+モニターのDPIとウインドウのDPIは異なる場合があります。
+`dpiAwareness`が`unaware`または`unaware-gdi-scaled`ならウインドウDPIは96、
+`system`ならシステムDPI、`per-monitor`または`per-monitor-v2`なら配置先のモニターDPIです。
+例えば150%のモニターにあるDPI非対応アプリでも`window.dpi`は96ですが、表示が
+100%であることを意味しません。アプリ内部の論理座標へ一律に倍率を掛けると誤ります。
+入力には観測した物理座標を使い、論理座標との変換が必要なら対象アプリのDPI対応方式と
+描画方法を踏まえてください。`null`を96 DPIや100%と読み替えないでください。
+[GetDpiForWindowの仕様](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getdpiforwindow)
+
+次は、接続済みの`agent`と検索済みの`window`を使い、モニター・DPI・画面構成も検証する例です。
+テストに特定の倍率が必要なら、配置前に`monitor.dpi`も前提条件として検証します。
+配置先モニターだけが重要なら、`dpi`の指定とDPI情報の前提条件チェックは省略できます。
+
+```typescript
+// モニター・DPI・画面構成を検証する場合の例です。
+const desktop = await agent.desktop();
+const monitor = desktop.monitors.find((entry) => entry.primary);
+if (!monitor || monitor.dpi === null) {
+  throw new Error('配置先のモニターまたはDPIを取得できません。');
+}
+const restored = await window.restore();
+if (restored.dpi === null || restored.dpiAwareness === null) {
+  throw new Error('対象ウインドウのDPI情報を取得できません。');
+}
+
+// このテストでは800×600物理ピクセルと周囲32ピクセルを必要とする
+if (monitor.workArea.width < 864 || monitor.workArea.height < 664) {
+  throw new Error('テストに必要な作業領域がありません。');
+}
+const bounds = {
+  x: monitor.workArea.x + 32,
+  y: monitor.workArea.y + 32,
+  width: 800,
+  height: 600,
+};
+const perMonitor = restored.dpiAwareness === 'per-monitor' ||
+  restored.dpiAwareness === 'per-monitor-v2';
+const expectedDpi = perMonitor ? monitor.dpi : restored.dpi;
+const moved = await restored.setBounds(bounds);
+const placed = await moved.waitForPlacement(
+  { bounds, monitorId: monitor.id, dpi: expectedDpi, desktopRevision: desktop.revision },
+  { stableIterations: 3, timeoutMs: 10000 }
+);
+
+// 撮影矩形は外周ではなく表示枠と照合する
+const screenshot = await placed.screenshot();
+expect(screenshot.bounds).toEqual(placed.frameBounds);
+expect(screenshot.clipped).toBe(false);
+expect((await agent.desktop()).revision).toBe(desktop.revision);
+```
+
+`waitForPlacement()`には`bounds`、`monitorId`、`dpi`のうち少なくとも一つを指定します。
+指定した条件だけが連続して一致することを確認します。指定していない表示枠・内容領域、
+モニター、DPI、DPI対応方式の変化で待機は延びません。`desktopRevision`を指定した場合だけ、
+ウインドウ観測の前後でデスクトップ構成も取得・検証します。
+既定値は`stableIterations: 2`、`intervalMs: 50`、`timeoutMs: 10000`です。
+観測の失敗や条件の不一致で連続一致回数はリセットされます。非表示・最小化状態では
+成功しません。モニターIDを指定した場合は一致が必要で、`dpi`を指定した場合は
+DPIが不明な状態では成功しません。情報を取得できない状態が続くと、タイムアウトに
+検証できなかった条件の説明が含まれます。
+
+`setBounds()`の成功だけでは、アプリケーションの最小サイズ制限やDPI変更処理の後にも
+要求した配置が保たれることは保証されません。Windowsによるビットマップ拡大では、
+DPI非対応・System awareのウインドウに丸めも生じます。実機テストでは150%のモニター上で
+要求幅400が401として観測されました。`bounds`の厳密な一致判定はこの差を検出します。
+寸法の厳密な一致が不要なら`monitorId`や`dpi`だけを条件にし、返された`bounds`、
+`frameBounds`、`clientBounds`をその後の入力・判定に使用してください。
+[WindowsのDPI仮想化とビットマップ拡大](https://learn.microsoft.com/en-us/windows/win32/hidpi/high-dpi-desktop-application-development-on-windows)
+
+`waitForStableBounds()`は外周矩形が変化しないことだけを確認します。
+意図した配置の確認には`waitForPlacement()`を使ってください。
+いずれの待機もアプリ内部の描画完了やアニメーション終了、他ウインドウによる遮蔽の
+有無までは判定しません。`screenshot.clipped === false`も遮蔽やモニター間の隙間が
+ないことの保証ではありません。必要なUI状態や撮影内容を別途検証してください。
+
+`desktopRevision`を指定した待機で構成が異なる場合は`DESKTOP_CHANGED`になります。
+再接続、モニター増減、解像度・DPI・作業領域の変更後はデスクトップ情報を取り直し、
+テストの前提条件と配置を再評価してください。リビジョンは設定内容の識別値で、
+単調増加するイベント番号ではありません。同じ構成に戻れば同じ値になるため、
+その間に変更が一度もなかったことは保証しません。
+
+Windowsエージェントは連続する取得結果を照合し、構成が変化し続ける場合は
+`OPERATION_FAILED`を返します。デスクトップ・ウインドウ・撮影の各操作全体を
+原子的に取得することはできません。`agent.diagnostics.capture()`には取得前の
+`desktop`と取得後の`desktopAfter`が含まれ、`saveDiagnostics()`のマニフェストにも
+保存されます。リビジョンの比較とウインドウのDPI情報を、失敗原因の判定に利用できます。
 
 ### 動画撮影
 
@@ -326,6 +462,7 @@ try {
 | `AppWindow.recordVideo(durationMs, options?)` | ウインドウ領域をテンポラリファイルを元にしたReadableStreamとしてキャプチャします。 |
 | `AppWindow.waitForVisible(options?)` | ウインドウが表示状態になるまで待機します。 |
 | `AppWindow.waitForHidden(options?)` / `AppWindow.waitForClosed(options?)` | ウインドウが非表示、または閉じられるまで待機します。 |
+| `AppWindow.waitForPlacement(expected, options?)` | 指定した矩形・モニター・DPIへの到達と安定を確認します。 |
 | `AppWindow.waitForStableBounds(options?)` | ウインドウ矩形が安定するまで待機します。 |
 | `AppWindow.close()` | ウインドウにクローズ要求を送ります。 |
 
@@ -507,10 +644,10 @@ const notepadWindow = await agent.waitForWindow({
 });
 
 // ウインドウを前面化し、入力したい位置をクリック
-await notepadWindow.activate();
+const activeWindow = await notepadWindow.activate();
 const inputPoint = {
-  x: notepadWindow.bounds.x + 24,
-  y: notepadWindow.bounds.y + 96,
+  x: activeWindow.clientBounds.x + 24,
+  y: activeWindow.clientBounds.y + 96,
 };
 await agent.mouse.move(inputPoint);
 await agent.mouse.click(inputPoint, {
@@ -689,6 +826,62 @@ await withDiagnostics(
 // テスト用に作成したリモート側ディレクトリを削除
 await agent.files.remove(remoteDirectory, {
   recursive: true,
+});
+```
+
+### プロセスの解放とファイル削除
+
+`await process.releaseAsync({ timeoutMs: 10000 })` は管理対象のプロセス木の終了、
+captureリソースの解放、内部出力ディレクトリの削除を確認して完了します。
+同時に呼び出した解放は処理を共有します。失敗後は未完了の状態を保持するため、
+再度呼び出して残りの処理を完了できます。成功後の再呼出しは何もしません。
+解放開始後の新しいプロセス操作は拒否されます。
+`Symbol.asyncDispose` も既定の期限で同じ解放処理を行います。
+
+`killTreeOnRelease: false` ではプロセスを終了しません。captureなしなら監視リソースを
+直ちに解放し、captureありなら書込み終了を待ち、期限を超えると失敗します。
+利用者がプロセスを終了させてから再度解放してください。
+実行中の `stdoutText()` / `stderrText()` はその時点の出力を返します。
+ルート終了後は管理対象の子孫と書込み終了を待ち、末尾を含む出力を返します。
+どちらも `{ timeoutMs }` を指定できます。解放処理は既に開始した読取りの完了を待ちます。
+
+`files.remove(path, options)` には次を指定できます。
+
+| オプション | 既定値 | 動作 |
+| :-- | :-- | :-- |
+| `recursive` | `false` | ディレクトリ内も削除します。 |
+| `onLockedFile` | `'retry'` | 一時的な競合を再試行します。`'fail'` では1回だけ試します。 |
+| `timeoutMs` | `10000` | 削除全体で共有する期限です。`0` では1回だけ試します。 |
+| `ignoreMissing` | `false` | `true` では対象が既に存在しない場合も成功にします。 |
+| `onReadOnly` | `'fail'` | `'clear'` でread-onlyビットの解除を許可します。 |
+| `onPermissionDenied` | `'fail'` | `'grantDelete'` で実行ユーザーの削除用権限の追加を許可します。 |
+
+agentが内部で作成・登録したcapture領域では属性・権限を自動対処します。
+`files.mkdtemp` の結果を含む利用者のパスでは、上記オプションの明示指定が必要です。
+修復対象はローカルの絶対パスに限定します。reparse pointをたどる修復や、複数の
+ハードリンクを持つファイルの変更、所有者の置換、特権の有効化は行いません。
+拒否ACEを含むDACLは修復を拒否します。すべてのロックや権限不足を解消できるわけではありません。
+削除の契約は指定した名前の除去であり、別のハードリンクの削除や記憶領域の回収までは保証しません。
+
+削除に失敗すると、残存する元の対象の属性・ACLを復元します。
+再帰処理で既に削除したファイルは復元しません。
+エラーの `code` は `'OPERATION_FAILED'` で、`details` に操作、実際の失敗パス、
+OSコード、原因分類を含みます。cleanupでは試行回数、経過時間、期限切れも報告します。
+`details.repairs` で属性・権限の対処結果と復元失敗を確認できます。
+復元に失敗した場合は自動再試行を停止します。メッセージの文字列解析は不要です。
+期限は再試行の上限であり、応答しないOS呼出しを強制終了するものではありません。
+
+`files.remove` はプロセスの探索・終了を行いません。既存の `syncDirectory` で
+明示指定できる `killRelatedProcessesAndRetry` とは別の方針です。
+
+```typescript
+await process.waitForExit();
+const output = await process.stdoutText();
+await process.releaseAsync();
+await agent.files.remove(remoteDirectory, {
+  recursive: true,
+  timeoutMs: 10000,
+  ignoreMissing: true,
 });
 ```
 

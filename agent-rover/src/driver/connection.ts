@@ -62,6 +62,7 @@ import type {
   RemoteDirectorySyncOptions,
   RemoteDirectorySyncResult,
   RemoteFileStat,
+  RemoteRemoveOptions,
   RemoteFileType,
   RemoteInteractionSession,
   RemoteInteractionSessionOptions,
@@ -69,10 +70,14 @@ import type {
   RemoteInputOperation,
   RemoteKeyboardPressOptions,
   RemoteMonitor,
+  RemoteDesktop,
+  RemoteWindowPlacement,
+  WindowDpiAwareness,
   RemoteMouseButtonOptions,
   RemoteMouseClickOptions,
   RemoteMouseDragOptions,
   RemoteMouseWheelOptions,
+  RemoteCleanupOptions,
   RemoteManagedProcess,
   RemoteManagedProcessLaunchOptions,
   RemoteManagedProcessSnapshot,
@@ -85,6 +90,12 @@ import type {
 } from '../index';
 import { resolveAuthToken } from '../auth';
 import { waitForResult } from '../wait';
+import {
+  type ResourceDeadline,
+  createResourceDeadline,
+  operationDetails,
+  retryResourceOperation,
+} from './resource-operation';
 import {
   createBinaryTransferChunks,
   createBinaryTransferReceiver,
@@ -182,8 +193,6 @@ const defaultTimeoutMs = 30000;
 const defaultPasteRestoreDelayMs = 500;
 const binaryTransferChunkSize = 64 * 1024;
 const maxRecentDiagnosticsOperations = 100;
-const lockedFileRetryAttempts = 5;
-const lockedFileRetryDelayMs = 100;
 
 const sha256Hex = (data: Buffer): string =>
   createHash('sha256').update(data).digest('hex');
@@ -365,19 +374,20 @@ const buildLocalDirectoryManifest = async (
   return entries.sort((left, right) => left.path.localeCompare(right.path));
 };
 
-const isLockedFileError = (error: unknown): boolean => {
-  if (!(error instanceof Error)) {
+const isTransientFileFailure = (error: unknown): boolean => {
+  const details = operationDetails(error);
+  if (details?.repairs?.some((repair) => repair.restoration === 'failed'))
     return false;
-  }
-  const message = error.message.toLowerCase();
+  const reason = details?.reason;
   return (
-    message.includes('win32error=32') ||
-    message.includes('win32error=33') ||
-    message.includes('win32error=5') ||
-    message.includes('sharing violation') ||
-    message.includes('lock violation') ||
-    message.includes('access is denied') ||
-    message.includes('access denied')
+    reason !== undefined &&
+    [
+      'sharingViolation',
+      'lockViolation',
+      'accessDenied',
+      'directoryNotEmpty',
+      'busy',
+    ].includes(reason)
   );
 };
 
@@ -395,6 +405,11 @@ const pathIsUnderRemotePrefix = (path: string, prefix: string): boolean => {
 const copyWindowSnapshot = (window: AppWindowSnapshot): AppWindowSnapshot => ({
   active: window.active,
   bounds: window.bounds,
+  frameBounds: window.frameBounds,
+  clientBounds: window.clientBounds,
+  monitorId: window.monitorId,
+  dpi: window.dpi,
+  dpiAwareness: window.dpiAwareness,
   className: window.className,
   controlId: window.controlId,
   enabled: window.enabled,
@@ -518,6 +533,43 @@ const parseProcess = (value: unknown): AppWindowProcess => {
   };
 };
 
+const parseNullableIdentifier = (value: unknown): string | null => {
+  if (value === null || (typeof value === 'string' && value.length > 0))
+    return value;
+  throw createRemoteAgentError(
+    'PROTOCOL_ERROR',
+    'Expected a nonempty identifier or null.'
+  );
+};
+
+const parseDpi = (value: unknown): number | null => {
+  if (
+    value === null ||
+    (typeof value === 'number' && Number.isSafeInteger(value) && value > 0)
+  )
+    return value;
+  throw createRemoteAgentError(
+    'PROTOCOL_ERROR',
+    'DPI must be a positive integer or null.'
+  );
+};
+
+const parseDpiAwareness = (value: unknown): WindowDpiAwareness | null => {
+  if (
+    value === null ||
+    value === 'unaware' ||
+    value === 'unaware-gdi-scaled' ||
+    value === 'system' ||
+    value === 'per-monitor' ||
+    value === 'per-monitor-v2'
+  )
+    return value;
+  throw createRemoteAgentError(
+    'PROTOCOL_ERROR',
+    'Window DPI awareness is invalid.'
+  );
+};
+
 const parseWindowSnapshot = (value: unknown): AppWindowSnapshot => {
   if (!isRecord(value)) {
     throw createRemoteAgentError(
@@ -552,6 +604,11 @@ const parseWindowSnapshot = (value: unknown): AppWindowSnapshot => {
   return {
     active,
     bounds: parseRect(value.bounds),
+    frameBounds: parseRect(value.frameBounds),
+    clientBounds: parseRect(value.clientBounds),
+    monitorId: parseNullableIdentifier(value.monitorId),
+    dpi: parseDpi(value.dpi),
+    dpiAwareness: parseDpiAwareness(value.dpiAwareness),
     className: readString(value, 'className'),
     controlId: readNumber(value, 'controlId'),
     enabled,
@@ -834,6 +891,23 @@ const persistCapturedVideo = async (
   };
 };
 
+const parseMonitorScale = (value: Record<string, unknown>): number | null => {
+  const dpi = parseDpi(value.dpi);
+  if (dpi === null && value.scaleFactor === null) return null;
+  if (
+    dpi !== null &&
+    typeof value.scaleFactor === 'number' &&
+    Number.isFinite(value.scaleFactor) &&
+    value.scaleFactor > 0 &&
+    Math.abs(value.scaleFactor - dpi / 96) < 0.000001
+  )
+    return dpi / 96;
+  throw createRemoteAgentError(
+    'PROTOCOL_ERROR',
+    'Monitor scaleFactor must agree with its DPI or both must be null.'
+  );
+};
+
 const parseMonitor = (value: unknown): RemoteMonitor => {
   if (!isRecord(value)) {
     throw createRemoteAgentError(
@@ -853,7 +927,8 @@ const parseMonitor = (value: unknown): RemoteMonitor => {
     id: readString(value, 'id'),
     name: readString(value, 'name'),
     primary,
-    scaleFactor: readNumber(value, 'scaleFactor'),
+    dpi: parseDpi(value.dpi),
+    scaleFactor: parseMonitorScale(value),
     workArea: parseRect(value.workArea),
   };
 };
@@ -868,6 +943,27 @@ const parseMonitorArray = (
     );
   }
   return value.map((entry) => parseMonitor(entry));
+};
+
+const parseDesktop = (value: JsonValue | undefined): RemoteDesktop => {
+  if (!isRecord(value))
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'Desktop must be an object.'
+    );
+  const revision = readString(value, 'revision');
+  const monitors = parseMonitorArray(value.monitors as JsonValue);
+  if (
+    revision.length === 0 ||
+    monitors.length === 0 ||
+    new Set(monitors.map((monitor) => monitor.id)).size !== monitors.length
+  ) {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'Desktop requires a revision and distinct monitors.'
+    );
+  }
+  return { bounds: parseRect(value.bounds), monitors, revision };
 };
 
 const parseCursor = (value: JsonValue | undefined): RemoteCursor => {
@@ -1295,6 +1391,52 @@ const agentScreenshotOptionsToJson = (
     : {
         rect: rectToJson(options.rect),
       };
+
+const validatePlacement = (expected: RemoteWindowPlacement): void => {
+  if (
+    expected.bounds === undefined &&
+    expected.monitorId === undefined &&
+    expected.dpi === undefined
+  ) {
+    throw createRemoteAgentError(
+      'INVALID_ARGUMENT',
+      'Placement requires bounds, monitorId, or dpi.'
+    );
+  }
+  for (const value of [expected.monitorId, expected.desktopRevision]) {
+    if (
+      value !== undefined &&
+      (typeof value !== 'string' || value.length === 0)
+    ) {
+      throw createRemoteAgentError(
+        'INVALID_ARGUMENT',
+        'Placement identifiers must be nonempty strings.'
+      );
+    }
+  }
+  if (
+    expected.dpi !== undefined &&
+    (!Number.isSafeInteger(expected.dpi) || expected.dpi <= 0)
+  ) {
+    throw createRemoteAgentError(
+      'INVALID_ARGUMENT',
+      'Placement DPI must be a positive integer.'
+    );
+  }
+  if (expected.bounds !== undefined) {
+    const rect = expected.bounds;
+    if (
+      ![rect.x, rect.y, rect.width, rect.height].every(Number.isSafeInteger) ||
+      rect.width <= 0 ||
+      rect.height <= 0
+    ) {
+      throw createRemoteAgentError(
+        'INVALID_ARGUMENT',
+        'Placement bounds require integer coordinates and positive dimensions.'
+      );
+    }
+  }
+};
 
 const rectKey = (rect: ScreenRect): string =>
   `${String(rect.x)},${String(rect.y)},${String(rect.width)},${String(
@@ -2147,6 +2289,80 @@ export const connectRemoteAgent = async (
         throw new Error(`Window is still visible: ${snapshot.id}.`);
       }, options);
     },
+    waitForPlacement: async (expected, options): Promise<AppWindow> => {
+      validatePlacement(expected);
+      const requiredIterations = options?.stableIterations ?? 2;
+      if (
+        !Number.isSafeInteger(requiredIterations) ||
+        requiredIterations <= 0
+      ) {
+        throw createRemoteAgentError(
+          'INVALID_ARGUMENT',
+          'stableIterations must be a positive safe integer.'
+        );
+      }
+      let stableIterations = 0;
+      const readDesktop = async (): Promise<RemoteDesktop> => {
+        const desktop = parseDesktop(
+          await requestJson('agent.desktop', undefined)
+        );
+        if (
+          expected.desktopRevision !== undefined &&
+          desktop.revision !== expected.desktopRevision
+        ) {
+          throw createRemoteAgentError(
+            'DESKTOP_CHANGED',
+            'Desktop configuration differs from the placement revision. Re-read the desktop and choose a new placement.'
+          );
+        }
+        return desktop;
+      };
+      return await waitForResult(async () => {
+        let current: AppWindowSnapshot;
+        try {
+          if (expected.desktopRevision !== undefined) await readDesktop();
+          current = parseWindowSnapshot(
+            await requestJson('window.snapshot', { windowId: snapshot.id })
+          );
+          if (expected.desktopRevision !== undefined) await readDesktop();
+          if (!current.visible || current.minimized) {
+            throw new Error('Window is hidden or minimized.');
+          }
+          if (expected.dpi !== undefined && current.dpi === null) {
+            throw new Error(
+              'Window DPI is unavailable; cannot verify the requested DPI.'
+            );
+          }
+          if (
+            (expected.bounds !== undefined &&
+              rectKey(expected.bounds) !== rectKey(current.bounds)) ||
+            (expected.monitorId !== undefined &&
+              expected.monitorId !== current.monitorId) ||
+            (expected.dpi !== undefined && expected.dpi !== current.dpi)
+          ) {
+            throw new Error(
+              'Window has not reached the requested placement: ' +
+                JSON.stringify({
+                  bounds: current.bounds,
+                  monitorId: current.monitorId,
+                  dpi: current.dpi,
+                })
+            );
+          }
+        } catch (error) {
+          // A failed observation breaks consecutiveness, including transport and
+          // native observation failures that the shared wait helper can retry.
+          stableIterations = 0;
+          throw error;
+        }
+        // Every supplied condition equals a fixed expected value here. Other
+        // metadata may change without breaking consecutiveness.
+        stableIterations += 1;
+        if (stableIterations >= requiredIterations)
+          return createWindowProxy(current);
+        throw new Error('Window placement has not remained stable yet.');
+      }, options);
+    },
     waitForStableBounds: async (
       options?: RemoteStableBoundsWaitOptions
     ): Promise<AppWindow> => {
@@ -2723,12 +2939,54 @@ export const connectRemoteAgent = async (
 
   const removeRemotePath = async (
     path: string,
-    recursive: boolean
+    recursive: boolean,
+    ignoreMissing: boolean,
+    repairOptions: RemoteRemoveOptions | undefined,
+    managedCleanup: boolean
   ): Promise<void> => {
     await requestJson('file.remove', {
       path,
       recursive,
+      ignoreMissing,
+      onReadOnly: repairOptions?.onReadOnly ?? 'fail',
+      onPermissionDenied: repairOptions?.onPermissionDenied ?? 'fail',
+      managedCleanup,
     });
+  };
+
+  const removeWithDeadline = async (
+    path: string,
+    options: RemoteRemoveOptions,
+    deadline: ResourceDeadline,
+    managedCleanup: boolean
+  ): Promise<void> => {
+    const policy = options.onLockedFile ?? 'retry';
+    if (policy !== 'fail' && policy !== 'retry')
+      throw createRemoteAgentError(
+        'INVALID_ARGUMENT',
+        'onLockedFile must be fail or retry.'
+      );
+    if (
+      !['fail', 'clear'].includes(options.onReadOnly ?? 'fail') ||
+      !['fail', 'grantDelete'].includes(options.onPermissionDenied ?? 'fail')
+    )
+      throw createRemoteAgentError(
+        'INVALID_ARGUMENT',
+        'Invalid removal repair policy.'
+      );
+    await retryResourceOperation(
+      deadline,
+      (error) => policy === 'retry' && isTransientFileFailure(error),
+      async () => {
+        await removeRemotePath(
+          path,
+          options.recursive ?? false,
+          options.ignoreMissing ?? false,
+          options,
+          managedCleanup
+        );
+      }
+    );
   };
 
   const renameRemotePath = async (from: string, to: string): Promise<void> => {
@@ -2768,30 +3026,25 @@ export const connectRemoteAgent = async (
     operation: () => Promise<T>
   ): Promise<T> => {
     let killedProcesses = false;
-    for (let attempt = 0; attempt < lockedFileRetryAttempts; attempt += 1) {
-      try {
-        return await operation();
-      } catch (error) {
-        if (
-          retryOptions.policy === 'fail' ||
-          !isLockedFileError(error) ||
-          attempt === lockedFileRetryAttempts - 1
-        ) {
+    return await retryResourceOperation(
+      createResourceDeadline(undefined),
+      (error) =>
+        retryOptions.policy !== 'fail' && isTransientFileFailure(error),
+      async () => {
+        try {
+          return await operation();
+        } catch (error) {
+          if (
+            retryOptions.policy === 'killRelatedProcessesAndRetry' &&
+            !killedProcesses &&
+            isTransientFileFailure(error)
+          ) {
+            await killRelatedProcesses(retryOptions.relatedProcessPaths);
+            killedProcesses = true;
+          }
           throw error;
         }
-        if (
-          retryOptions.policy === 'killRelatedProcessesAndRetry' &&
-          !killedProcesses
-        ) {
-          await killRelatedProcesses(retryOptions.relatedProcessPaths);
-          killedProcesses = true;
-        }
-        await waitForDelay(lockedFileRetryDelayMs);
       }
-    }
-    throw createRemoteAgentError(
-      'PROTOCOL_ERROR',
-      'Locked file retry exhausted.'
     );
   };
 
@@ -2824,7 +3077,10 @@ export const connectRemoteAgent = async (
     await withLockedFileRetry(retryOptions, async () => {
       await removeRemotePath(
         joinRemotePath(remoteRoot, entry.path),
-        entry.type === 'directory'
+        entry.type === 'directory',
+        true,
+        undefined,
+        false
       );
     });
   };
@@ -3068,9 +3324,13 @@ export const connectRemoteAgent = async (
       };
     }
 
-    const tempDirectory = await makeRemoteTempDirectory(
-      'C:/agent-rover-managed-process-'
-    );
+    const tempDirectory = connectedFeatures.has(
+      'process.createCaptureDirectory'
+    )
+      ? parseTempDirectory(
+          await requestJson('process.createCaptureDirectory', {})
+        )
+      : await makeRemoteTempDirectory('C:/agent-rover-managed-process-');
     const normalizedDirectory = tempDirectory.replace(/[\\/]+$/u, '');
     return {
       stderrPath: captureStderr
@@ -3116,10 +3376,15 @@ export const connectRemoteAgent = async (
     readonly tempDirectory: string | undefined;
   }): RemoteManagedProcess => {
     let released = false;
+    let releaseStarted = false;
+    let nativeReleased = false;
+    let treeReleased = false;
+    let releasing: Promise<void> | undefined;
+    const activeReads = new Set<Promise<string>>();
     const knownProcessIds = new Set<number>([options.process.id]);
 
     const assertNotReleased = (): void => {
-      if (released) {
+      if (released || releaseStarted) {
         throw createRemoteAgentError(
           'INVALID_ARGUMENT',
           'Managed process has already been released.'
@@ -3152,7 +3417,6 @@ export const connectRemoteAgent = async (
     };
 
     const rootSnapshot = async (): Promise<RemoteProcessSnapshot> => {
-      assertNotReleased();
       if (!options.nativeManaged) {
         return await snapshotProcess(options.process.id);
       }
@@ -3231,11 +3495,23 @@ export const connectRemoteAgent = async (
     const snapshot = async (): Promise<RemoteManagedProcessSnapshot> => {
       const root = await rootSnapshot();
       const trackedProcesses = await collectTrackedProcesses(root);
+      const nativeRunning = options.nativeManaged
+        ? await requestJson('process.managedRunning', {
+            managedProcessId: nativeManagedProcessId(),
+          })
+        : false;
+      if (typeof nativeRunning !== 'boolean')
+        throw createRemoteAgentError(
+          'PROTOCOL_ERROR',
+          'Invalid managed process running state.'
+        );
       return {
         processes: trackedProcesses,
         root,
         running:
-          root.running || trackedProcesses.some((process) => process.running),
+          nativeRunning ||
+          root.running ||
+          trackedProcesses.some((process) => process.running),
       };
     };
 
@@ -3293,13 +3569,20 @@ export const connectRemoteAgent = async (
 
     const kill = async (): Promise<void> => {
       assertNotReleased();
-      await killTrackedProcessTree();
+      if (options.nativeManaged) {
+        await requestJson('process.killManaged', {
+          managedProcessId: nativeManagedProcessId(),
+        });
+      } else {
+        await killTrackedProcessTree();
+      }
     };
 
     const waitForExit = async (
       waitOptions?: RemoteWaitOptions
-    ): Promise<RemoteManagedProcessSnapshot> =>
-      await waitForResult(async () => {
+    ): Promise<RemoteManagedProcessSnapshot> => {
+      assertNotReleased();
+      return await waitForResult(async () => {
         const current = await snapshot();
         if (!current.running) {
           return current;
@@ -3308,13 +3591,41 @@ export const connectRemoteAgent = async (
           `Managed process is still running: ${String(options.process.id)}.`
         );
       }, waitOptions);
+    };
 
     const readCapturedText = async (
       label: 'stderr' | 'stdout',
-      path: string | undefined
+      path: string | undefined,
+      readOptions: RemoteCleanupOptions | undefined
     ): Promise<string> => {
       assertNotReleased();
-      return (await readRemoteFile(capturedPath(label, path))).toString('utf8');
+      const resolvedPath = capturedPath(label, path);
+      const deadline = createResourceDeadline(readOptions?.timeoutMs);
+      const reading = retryResourceOperation(
+        deadline,
+        (error) =>
+          ['busy', 'sharingViolation', 'lockViolation'].includes(
+            operationDetails(error)?.reason ?? ''
+          ),
+        async () => {
+          const data = options.nativeManaged
+            ? await parseFileReadResult(
+                await requestJson('process.readCaptured', {
+                  managedProcessId: nativeManagedProcessId(),
+                  stream: label,
+                }),
+                readBinaryTransfer
+              )
+            : await readRemoteFile(resolvedPath);
+          return data.toString('utf8');
+        }
+      );
+      activeReads.add(reading);
+      try {
+        return await reading;
+      } finally {
+        activeReads.delete(reading);
+      }
     };
 
     const releaseNative = async (): Promise<void> => {
@@ -3417,35 +3728,101 @@ export const connectRemoteAgent = async (
       }, waitOptions);
     };
 
-    const releaseAsync = async (): Promise<void> => {
-      if (released) {
+    const releaseAsync = async (
+      releaseOptions?: RemoteCleanupOptions
+    ): Promise<void> => {
+      if (released) return;
+      if (releasing !== undefined) {
+        await releasing;
         return;
       }
-
-      let firstError: unknown = undefined;
-      try {
-        if (options.killTreeOnRelease) {
-          await killTrackedProcessTree();
+      const deadline = createResourceDeadline(releaseOptions?.timeoutMs);
+      releaseStarted = true;
+      const attempt = async (): Promise<void> => {
+        if (activeReads.size > 0) {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const timeout = new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () =>
+                reject(
+                  Object.assign(
+                    new Error('Capture read is still in progress.'),
+                    {
+                      code: 'OPERATION_FAILED',
+                      details: {
+                        operation: 'process.releaseManaged',
+                        nativeOperation: '',
+                        path: options.tempDirectory ?? '',
+                        osCode: null,
+                        reason: 'busy',
+                        stage: 'captureRead',
+                        timedOut: true,
+                      },
+                    }
+                  )
+                ),
+              Math.max(0, deadline.expiresAt - performance.now())
+            );
+          });
+          try {
+            await Promise.race([Promise.allSettled([...activeReads]), timeout]);
+          } finally {
+            clearTimeout(timer);
+          }
         }
         if (options.nativeManaged) {
-          await releaseNative();
+          if (!nativeReleased) {
+            await retryResourceOperation(
+              deadline,
+              (error) =>
+                ['busy', 'sharingViolation', 'lockViolation'].includes(
+                  operationDetails(error)?.reason ?? ''
+                ),
+              releaseNative
+            );
+            nativeReleased = true;
+          }
+        } else if (!treeReleased) {
+          if (options.killTreeOnRelease) {
+            await killTrackedProcessTree();
+            await retryResourceOperation(
+              deadline,
+              (error) => operationDetails(error)?.reason === 'busy',
+              async () => {
+                if ((await snapshot()).running)
+                  throw Object.assign(
+                    new Error('Managed process tree has not exited.'),
+                    {
+                      code: 'OPERATION_FAILED',
+                      details: {
+                        operation: 'process.releaseManaged',
+                        nativeOperation: '',
+                        path: options.process.name,
+                        osCode: null,
+                        reason: 'busy',
+                        stage: 'processExit',
+                      },
+                    }
+                  );
+              }
+            );
+          }
+          treeReleased = true;
         }
-      } catch (error) {
-        firstError = error;
-      }
-
-      try {
-        if (options.tempDirectory !== undefined) {
-          await removeRemotePath(options.tempDirectory, true);
-        }
-      } catch (error) {
-        firstError = firstError ?? error;
-      } finally {
+        if (options.tempDirectory !== undefined)
+          await removeWithDeadline(
+            options.tempDirectory,
+            { recursive: true, ignoreMissing: true },
+            deadline,
+            connectedFeatures.has('process.createCaptureDirectory')
+          );
         released = true;
-      }
-
-      if (firstError !== undefined) {
-        throw firstError;
+      };
+      releasing = attempt();
+      try {
+        await releasing;
+      } finally {
+        releasing = undefined;
       }
     };
 
@@ -3453,20 +3830,30 @@ export const connectRemoteAgent = async (
       id: options.process.id,
       kill,
       name: options.process.name,
-      processes: async (): Promise<readonly RemoteProcessSnapshot[]> =>
-        (await snapshot()).processes,
+      processes: async (): Promise<readonly RemoteProcessSnapshot[]> => {
+        assertNotReleased();
+        return (await snapshot()).processes;
+      },
       releaseAsync,
-      rootSnapshot,
-      snapshot,
-      stderrText: async (): Promise<string> =>
-        await readCapturedText('stderr', options.stderrPath),
-      stdoutText: async (): Promise<string> =>
-        await readCapturedText('stdout', options.stdoutPath),
+      rootSnapshot: async () => {
+        assertNotReleased();
+        return await rootSnapshot();
+      },
+      snapshot: async () => {
+        assertNotReleased();
+        return await snapshot();
+      },
+      stderrText: async (readOptions): Promise<string> =>
+        await readCapturedText('stderr', options.stderrPath, readOptions),
+      stdoutText: async (readOptions): Promise<string> =>
+        await readCapturedText('stdout', options.stdoutPath, readOptions),
       waitForNoWindow,
       waitForWindow,
       waitForExit,
       windows: managedWindows,
-      [Symbol.asyncDispose]: releaseAsync,
+      [Symbol.asyncDispose]: async () => {
+        await releaseAsync();
+      },
     };
   };
 
@@ -3474,56 +3861,75 @@ export const connectRemoteAgent = async (
     options: RemoteManagedProcessLaunchOptions
   ): Promise<RemoteManagedProcess> => {
     const capturePaths = await createManagedProcessCapturePaths(options);
-    const baselineWindowIds = new Set(
-      (await listTopLevelWindows()).map((window) => window.id)
-    );
-    const killTreeOnRelease = options.killTreeOnRelease ?? true;
-    const nativeManaged = connectedFeatures.has('process.launchManaged');
-    if (nativeManaged) {
-      const launched = parseManagedProcessLaunchResult(
+    try {
+      const baselineWindowIds = new Set(
+        (await listTopLevelWindows()).map((window) => window.id)
+      );
+      const killTreeOnRelease = options.killTreeOnRelease ?? true;
+      const nativeManaged = connectedFeatures.has('process.launchManaged');
+      if (nativeManaged) {
+        const launched = parseManagedProcessLaunchResult(
+          await requestJson(
+            'process.launchManaged',
+            managedProcessLaunchOptionsToJson(
+              options,
+              capturePaths.stdoutPath,
+              capturePaths.stderrPath
+            )
+          )
+        );
+        return createManagedProcessProxy({
+          baselineWindowIds,
+          killTreeOnRelease,
+          managedProcessId: launched.managedProcessId,
+          nativeManaged: true,
+          process: launched.process,
+          stderrPath: launched.stderrPath ?? capturePaths.stderrPath,
+          stdoutPath: launched.stdoutPath ?? capturePaths.stdoutPath,
+          tempDirectory: capturePaths.tempDirectory,
+        });
+      }
+
+      const process = parseApplicationProcess(
         await requestJson(
-          'process.launchManaged',
-          managedProcessLaunchOptionsToJson(
-            options,
-            capturePaths.stdoutPath,
-            capturePaths.stderrPath
+          'applications.launch',
+          applicationLaunchOptionsToJson(
+            managedLaunchOptionsToApplicationOptions(
+              options,
+              capturePaths.stdoutPath,
+              capturePaths.stderrPath
+            )
           )
         )
       );
       return createManagedProcessProxy({
         baselineWindowIds,
         killTreeOnRelease,
-        managedProcessId: launched.managedProcessId,
-        nativeManaged: true,
-        process: launched.process,
-        stderrPath: launched.stderrPath ?? capturePaths.stderrPath,
-        stdoutPath: launched.stdoutPath ?? capturePaths.stdoutPath,
+        managedProcessId: undefined,
+        nativeManaged: false,
+        process,
+        stderrPath: capturePaths.stderrPath,
+        stdoutPath: capturePaths.stdoutPath,
         tempDirectory: capturePaths.tempDirectory,
       });
+    } catch (error) {
+      if (capturePaths.tempDirectory !== undefined) {
+        try {
+          await removeWithDeadline(
+            capturePaths.tempDirectory,
+            { recursive: true, ignoreMissing: true },
+            createResourceDeadline(undefined),
+            connectedFeatures.has('process.createCaptureDirectory')
+          );
+        } catch (cleanupError) {
+          throw new AggregateError(
+            [error, cleanupError],
+            'Managed launch and capture cleanup failed.'
+          );
+        }
+      }
+      throw error;
     }
-
-    const process = parseApplicationProcess(
-      await requestJson(
-        'applications.launch',
-        applicationLaunchOptionsToJson(
-          managedLaunchOptionsToApplicationOptions(
-            options,
-            capturePaths.stdoutPath,
-            capturePaths.stderrPath
-          )
-        )
-      )
-    );
-    return createManagedProcessProxy({
-      baselineWindowIds,
-      killTreeOnRelease,
-      managedProcessId: undefined,
-      nativeManaged: false,
-      process,
-      stderrPath: capturePaths.stderrPath,
-      stdoutPath: capturePaths.stdoutPath,
-      tempDirectory: capturePaths.tempDirectory,
-    });
   };
 
   const captureDiagnosticsWindow = async (
@@ -3591,7 +3997,8 @@ export const connectRemoteAgent = async (
     const maxDescendantDepth = validateDiagnosticsOptions(options);
     const includeDescendants = options?.includeDescendants ?? false;
     const capturedAt = new Date().toISOString();
-    const bounds = parseRect(await requestJson('agent.bounds', undefined));
+    const desktop = parseDesktop(await requestJson('agent.desktop', undefined));
+    const bounds = desktop.bounds;
     const screenshot = await parseScreenshot(
       await requestJson(
         'agent.screenshot',
@@ -3611,9 +4018,7 @@ export const connectRemoteAgent = async (
       )
     );
     const cursor = parseCursor(await requestJson('agent.cursor', undefined));
-    const monitors = parseMonitorArray(
-      await requestJson('agent.monitors', undefined)
-    );
+    const monitors = desktop.monitors;
     const eventLogs = parseEventLogArray(
       await requestJson(
         'eventLogs.read',
@@ -3622,6 +4027,8 @@ export const connectRemoteAgent = async (
     );
 
     return {
+      desktop,
+      desktopAfter: parseDesktop(await requestJson('agent.desktop', undefined)),
       activeWindow: findActiveDiagnosticsWindow(windows),
       bounds,
       capturedAt,
@@ -3718,7 +4125,12 @@ export const connectRemoteAgent = async (
           })
         ),
       remove: async (path, options): Promise<void> => {
-        await removeRemotePath(path, options?.recursive ?? false);
+        await removeWithDeadline(
+          path,
+          options ?? {},
+          createResourceDeadline(options?.timeoutMs),
+          false
+        );
       },
       rename: async (from, to): Promise<void> => {
         await renameRemotePath(from, to);
@@ -3787,6 +4199,8 @@ export const connectRemoteAgent = async (
         });
       },
     },
+    desktop: async (): Promise<RemoteDesktop> =>
+      parseDesktop(await requestJson('agent.desktop', undefined)),
     monitors: async (): Promise<readonly RemoteMonitor[]> =>
       parseMonitorArray(await requestJson('agent.monitors', undefined)),
     mouse: {

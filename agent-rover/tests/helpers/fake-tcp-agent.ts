@@ -30,6 +30,7 @@ import {
   parseBinaryTransferChunkPayload,
   parseProtocolMessage,
   type JsonValue,
+  type ProtocolErrorPayload,
 } from '../../src/protocol';
 import {
   protocolVersion,
@@ -48,6 +49,11 @@ import {
 } from '../../src/driver/tcp-frame';
 
 export interface FakeTcpAgentOptions {
+  readonly beforeRequest?: (
+    method: string,
+    params: JsonValue | undefined
+  ) => ProtocolErrorPayload | undefined;
+  readonly dropResponses?: Readonly<Record<string, number>>;
   readonly authToken?: string;
   readonly capabilities?: RemoteAgentCapabilities;
   readonly childrenByWindowId?: Readonly<
@@ -71,14 +77,19 @@ export interface FakeTcpAgentOptions {
   readonly videoData?: Buffer;
   readonly videoRequests?: Record<string, unknown>[];
   readonly windows?: readonly AppWindowSnapshot[];
+  readonly monitors?: readonly (RemoteMonitor & {
+    readonly dpi: number | null;
+  })[];
 }
 
 export interface FakeTcpAgent {
+  readonly managedProcessCount: () => number;
   readonly close: () => Promise<void>;
   readonly host: string;
   readonly port: number;
   readonly requestUsedBase64: () => boolean;
   readonly setProcesses: (processes: readonly RemoteProcessSnapshot[]) => void;
+  readonly setMonitors: (monitors: readonly RemoteMonitor[]) => void;
   readonly setWindows: (windows: readonly AppWindowSnapshot[]) => void;
 }
 
@@ -91,6 +102,7 @@ export const defaultFakeCapabilities: RemoteAgentCapabilities = {
     'agent.bounds',
     'agent.cursor',
     'agent.monitors',
+    'agent.desktop',
     'agent.screenshot',
     'agent.recordVideo',
     'windows',
@@ -108,6 +120,7 @@ export const defaultFakeCapabilities: RemoteAgentCapabilities = {
     'file.exists',
     'file.mkdir',
     'file.mkdtemp',
+    'process.createCaptureDirectory',
     'file.manifest',
     'file.read',
     'file.readdir',
@@ -120,6 +133,8 @@ export const defaultFakeCapabilities: RemoteAgentCapabilities = {
     'process.list',
     'process.launchManaged',
     'process.managedSnapshot',
+    'process.managedRunning',
+    'process.readCaptured',
     'process.releaseManaged',
     'process.snapshot',
     'eventLogs.read',
@@ -138,6 +153,11 @@ export const defaultFakeWindow: AppWindowSnapshot = {
     x: 10,
     y: 20,
   },
+  frameBounds: { x: 10, y: 20, width: 640, height: 480 },
+  clientBounds: { x: 18, y: 51, width: 624, height: 441 },
+  monitorId: 'monitor-1',
+  dpi: 96,
+  dpiAwareness: 'unaware',
   className: 'Notepad',
   controlId: 0,
   enabled: true,
@@ -162,6 +182,11 @@ export const defaultFakeChildWindow: AppWindowSnapshot = {
     x: 18,
     y: 52,
   },
+  frameBounds: { x: 18, y: 52, width: 120, height: 24 },
+  clientBounds: { x: 18, y: 52, width: 120, height: 24 },
+  monitorId: 'monitor-1',
+  dpi: 96,
+  dpiAwareness: 'unaware',
   className: 'Button',
   controlId: 1,
   enabled: true,
@@ -191,6 +216,7 @@ const defaultScreenMonitor: RemoteMonitor = {
   name: 'DISPLAY1',
   primary: true,
   scaleFactor: 1,
+  dpi: 96,
   workArea: {
     height: 728,
     width: 1024,
@@ -387,6 +413,34 @@ export const startFakeTcpAgent = async (
       : { protocolVersion: options.protocolVersionOverride }),
   };
   const windows = [...(options.windows ?? [defaultFakeWindow])];
+  let monitors = [...(options.monitors ?? [defaultScreenMonitor])];
+  const desktop = () => {
+    const sorted = [...monitors].sort((a, b) => a.id.localeCompare(b.id));
+    const x = Math.min(...monitors.map((monitor) => monitor.bounds.x));
+    const y = Math.min(...monitors.map((monitor) => monitor.bounds.y));
+    return {
+      bounds: {
+        x,
+        y,
+        width:
+          Math.max(
+            ...monitors.map(
+              (monitor) => monitor.bounds.x + monitor.bounds.width
+            )
+          ) - x,
+        height:
+          Math.max(
+            ...monitors.map(
+              (monitor) => monitor.bounds.y + monitor.bounds.height
+            )
+          ) - y,
+      },
+      monitors: sorted,
+      revision: createHash('sha256')
+        .update(JSON.stringify(sorted))
+        .digest('hex'),
+    };
+  };
   const childrenByWindowId = Object.fromEntries(
     Object.entries(
       options.childrenByWindowId ?? {
@@ -399,6 +453,7 @@ export const startFakeTcpAgent = async (
   const files = new Map<string, Buffer>();
   const processes = new Map<number, RemoteProcessSnapshot>();
   const managedProcesses = new Map<number, number>();
+  const responsesToDrop = new Map(Object.entries(options.dropResponses ?? {}));
   const videoRecordings = new Map<
     string,
     {
@@ -580,6 +635,16 @@ export const startFakeTcpAgent = async (
       method: string,
       params: JsonValue | undefined
     ): void => {
+      const failure = options.beforeRequest?.(method, params);
+      if (failure !== undefined) {
+        sendTcpProtocolMessage(socket, {
+          id,
+          kind: 'response',
+          ok: false,
+          error: failure,
+        });
+        return;
+      }
       const recordParams = isRecord(params) ? params : {};
       switch (method) {
         case 'agent.capabilities':
@@ -604,11 +669,14 @@ export const startFakeTcpAgent = async (
           clipboardText = '';
           sendSuccess(id, null);
           return;
+        case 'agent.desktop':
+          sendSuccess(id, toJson(desktop()));
+          return;
         case 'agent.bounds':
-          sendSuccess(id, toJson(defaultScreenBounds));
+          sendSuccess(id, toJson(desktop().bounds));
           return;
         case 'agent.monitors':
-          sendSuccess(id, toJson([defaultScreenMonitor]));
+          sendSuccess(id, toJson(monitors));
           return;
         case 'agent.cursor':
           sendSuccess(id, toJson(defaultScreenCursor));
@@ -841,6 +909,17 @@ export const startFakeTcpAgent = async (
             });
           }
           return;
+        case 'process.managedRunning': {
+          const processId = managedProcesses.get(
+            Number(recordParams.managedProcessId)
+          );
+          sendSuccess(
+            id,
+            processId !== undefined &&
+              processes.get(processId)?.running === true
+          );
+          return;
+        }
         case 'process.managedSnapshot': {
           const managedProcessId = recordParams.managedProcessId;
           if (typeof managedProcessId !== 'number') {
@@ -886,6 +965,7 @@ export const startFakeTcpAgent = async (
             return;
           }
           options.killedManagedProcessIds?.push(managedProcessId);
+          options.killedProcessIds?.push(processId);
           const current = processes.get(processId);
           processes.set(processId, {
             createdAt: current?.createdAt ?? null,
@@ -929,6 +1009,11 @@ export const startFakeTcpAgent = async (
           }
           managedProcesses.delete(managedProcessId);
           managedProcessOptions.delete(managedProcessId);
+          const dropped = responsesToDrop.get(method) ?? 0;
+          if (dropped > 0) {
+            responsesToDrop.set(method, dropped - 1);
+            return;
+          }
           sendSuccess(id, null);
           return;
         }
@@ -1189,10 +1274,22 @@ export const startFakeTcpAgent = async (
             lockedRenameFailures.get(normalizedTo) ?? 0;
           if (remainingLockedFailures > 0) {
             lockedRenameFailures.set(normalizedTo, remainingLockedFailures - 1);
-            sendFailure(
+            sendTcpProtocolMessage(socket, {
               id,
-              `MoveFileExW failed. path=${normalizedTo} win32Error=32`
-            );
+              kind: 'response',
+              ok: false,
+              error: {
+                code: 'OPERATION_FAILED',
+                message: 'The target is locked.',
+                details: {
+                  operation: method,
+                  nativeOperation: 'MoveFileExW',
+                  path: normalizedTo,
+                  osCode: 32,
+                  reason: 'sharingViolation',
+                },
+              },
+            });
             return;
           }
           const file = files.get(normalizedFrom);
@@ -1210,8 +1307,12 @@ export const startFakeTcpAgent = async (
           sendSuccess(id, null);
           return;
         }
+        case 'process.createCaptureDirectory':
         case 'file.mkdtemp': {
-          const prefix = recordParams.prefix;
+          const prefix =
+            method === 'process.createCaptureDirectory'
+              ? 'C:/agent-rover-managed-process-'
+              : recordParams.prefix;
           if (typeof prefix !== 'string') {
             sendFailure(id, 'file.mkdtemp requires prefix.');
             return;
@@ -1231,6 +1332,29 @@ export const startFakeTcpAgent = async (
             return;
           }
           const normalized = normalizePath(path);
+          if (
+            !files.has(normalized) &&
+            !directories.has(normalized) &&
+            recordParams.ignoreMissing !== true
+          ) {
+            sendTcpProtocolMessage(socket, {
+              id,
+              kind: 'response',
+              ok: false,
+              error: {
+                code: 'OPERATION_FAILED',
+                message: 'The target is absent.',
+                details: {
+                  operation: method,
+                  nativeOperation: 'GetFileAttributesW',
+                  path,
+                  osCode: 2,
+                  reason: 'notFound',
+                },
+              },
+            });
+            return;
+          }
           if (files.delete(normalized)) {
             sendSuccess(id, null);
             return;
@@ -1262,8 +1386,17 @@ export const startFakeTcpAgent = async (
           sendSuccess(id, null);
           return;
         }
+        case 'process.readCaptured':
         case 'file.read': {
-          const path = recordParams.path;
+          const launch = managedProcessOptions.get(
+            Number(recordParams.managedProcessId)
+          );
+          const path =
+            method === 'file.read'
+              ? recordParams.path
+              : recordParams.stream === 'stderr'
+                ? launch?.stderrPath
+                : launch?.stdoutPath;
           const data =
             typeof path === 'string'
               ? (files.get(normalizePath(path)) ?? Buffer.alloc(0))
@@ -1412,6 +1545,7 @@ export const startFakeTcpAgent = async (
   }
 
   return {
+    managedProcessCount: () => managedProcesses.size,
     close: async (): Promise<void> => {
       for (const socket of sockets) {
         socket.destroy();
@@ -1434,6 +1568,9 @@ export const startFakeTcpAgent = async (
       for (const process of nextProcesses) {
         processes.set(process.id, process);
       }
+    },
+    setMonitors: (nextMonitors): void => {
+      monitors = [...nextMonitors];
     },
     setWindows: (nextWindows): void => {
       windows.splice(0, windows.length, ...nextWindows);

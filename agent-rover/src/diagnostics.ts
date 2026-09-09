@@ -97,6 +97,8 @@ const manifestFromCapture = (
   capturedAt: capture.capturedAt,
   cursor: capture.cursor,
   screen: {
+    desktop: capture.desktop,
+    desktopAfter: capture.desktopAfter,
     bounds: capture.bounds,
     monitors: capture.monitors,
     screenshot: {

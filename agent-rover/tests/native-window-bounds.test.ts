@@ -53,11 +53,16 @@ describe('native window bounds helpers', () => {
 #define MAX_PATH 260
 #define WINAPI
 
+#define GWL_STYLE -16
+#define WS_CHILD 0x40000000
+struct POINT { long x; long y; };
+typedef long LONG_PTR;
 typedef int BOOL;
 typedef unsigned long DWORD;
 typedef void* HMODULE;
 typedef long HRESULT;
 typedef void* HWND;
+typedef void* DPI_AWARENESS_CONTEXT;
 typedef const char* LPCSTR;
 typedef const wchar_t* LPCWSTR;
 typedef void* PVOID;
@@ -72,8 +77,16 @@ struct RECT {
 };
 
 extern "C" BOOL GetWindowRect(HWND window, RECT* rect);
+extern "C" BOOL GetClientRect(HWND window, RECT* rect);
+extern "C" int MapWindowPoints(HWND from, HWND to, POINT* points, UINT count);
+extern "C" void SetLastError(DWORD error);
+extern "C" DWORD GetLastError();
+extern "C" LONG_PTR GetWindowLongPtrW(HWND window, int index);
+extern "C" HWND GetParent(HWND window);
+extern "C" BOOL MoveWindow(HWND window, int x, int y, int width, int height, BOOL repaint);
 extern "C" UINT GetSystemDirectoryW(wchar_t* buffer, UINT size);
 extern "C" HMODULE LoadLibraryW(LPCWSTR path);
+extern "C" HMODULE GetModuleHandleW(LPCWSTR name);
 extern "C" FARPROC GetProcAddress(HMODULE module, LPCSTR name);
 extern "C" BOOL FreeLibrary(HMODULE module);
 
@@ -105,6 +118,9 @@ DWORD requested_size = 0;
 int dwm_call_count = 0;
 int free_library_count = 0;
 std::wstring loaded_library_path;
+bool is_child = false;
+DWORD last_error = 0;
+RECT moved_rect = {};
 
 void Reset() {
   fallback_rect = {10, 20, 210, 120};
@@ -158,6 +174,24 @@ extern "C" BOOL GetWindowRect(HWND, RECT* rect) {
   return TRUE;
 }
 
+extern "C" BOOL GetClientRect(HWND, RECT* rect) {
+  *rect = {0, 0, 180, 70}; return TRUE;
+}
+extern "C" int MapWindowPoints(HWND from, HWND, POINT* points, UINT count) {
+  for (UINT i = 0; i < count; ++i) {
+    points[i].x += from == nullptr ? 300 : -300;
+    points[i].y += from == nullptr ? -50 : 50;
+  }
+  return 1;
+}
+extern "C" void SetLastError(DWORD value) { last_error = value; }
+extern "C" DWORD GetLastError() { return last_error; }
+extern "C" LONG_PTR GetWindowLongPtrW(HWND, int) { return is_child ? WS_CHILD : 0; }
+extern "C" HWND GetParent(HWND) { return kWindow; }
+extern "C" BOOL MoveWindow(HWND, int x, int y, int width, int height, BOOL) {
+  moved_rect = {x, y, x + width, y + height}; return TRUE;
+}
+
 extern "C" UINT GetSystemDirectoryW(wchar_t* buffer, UINT size) {
   const wchar_t* path = L"C:\\Windows\\System32";
   const UINT length = static_cast<UINT>(std::wcslen(path));
@@ -167,6 +201,8 @@ extern "C" UINT GetSystemDirectoryW(wchar_t* buffer, UINT size) {
   std::wmemcpy(buffer, path, length + 1);
   return length;
 }
+
+extern "C" HMODULE GetModuleHandleW(LPCWSTR) { return nullptr; }
 
 extern "C" HMODULE LoadLibraryW(LPCWSTR path) {
   loaded_library_path = path;
@@ -188,6 +224,19 @@ extern "C" BOOL FreeLibrary(HMODULE) {
 int main() {
   agent_rover::WindowRect bounds = {};
   std::string error;
+
+  Reset();
+  if (!agent_rover::ReadWindowOuterBounds(kWindow, &bounds, &error) ||
+      !ExpectRect(bounds, 10, 20, 200, 100, "outer")) return 1;
+  if (!agent_rover::ReadWindowClientBounds(kWindow, &bounds, &error) ||
+      !ExpectRect(bounds, -300, 50, 180, 70, "client screen")) return 1;
+  if (!agent_rover::MoveWindowPhysical(kWindow, {-280, 80, 120, 60}, &error) ||
+      moved_rect.left != -280 || moved_rect.top != 80) return 1;
+  is_child = true;
+  if (!agent_rover::MoveWindowPhysical(kWindow, {-280, 80, 120, 60}, &error) ||
+      moved_rect.left != 20 || moved_rect.top != 30 ||
+      moved_rect.right - moved_rect.left != 120) return 1;
+  is_child = false;
 
   Reset();
   if (!agent_rover::ReadWindowFrameBounds(kWindow, &bounds, &error)) {

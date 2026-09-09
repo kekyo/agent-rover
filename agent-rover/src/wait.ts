@@ -47,6 +47,7 @@ const waitContext = new AsyncLocalStorage<AgentRoverWaitContext>();
 const immediateFailureCodes = new Set([
   'AUTHENTICATION_FAILED',
   'CONNECTION_FAILED',
+  'DESKTOP_CHANGED',
   'DISCONNECTED',
   'HANDSHAKE_FAILED',
   'INVALID_ARGUMENT',

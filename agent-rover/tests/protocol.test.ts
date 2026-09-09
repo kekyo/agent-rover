@@ -73,6 +73,35 @@ describe('protocol message validation', () => {
 });
 
 describe('pending request table', () => {
+  it('preserves structured OS failures independently of the diagnostic message', async () => {
+    const table = createPendingRequestTable({ requestTimeoutMs: 30000 });
+    const request = table.createRequest('file.remove', {
+      path: 'C:/test/locked.txt',
+    });
+    const details = {
+      operation: 'file.remove',
+      nativeOperation: 'DeleteFileW',
+      path: 'C:/test/locked.txt',
+      osCode: 32,
+      reason: 'sharingViolation',
+    };
+    const response = parseProtocolMessage({
+      id: request.message.id,
+      kind: 'response',
+      ok: false,
+      error: {
+        code: 'OPERATION_FAILED',
+        message: 'localized diagnostic',
+        details,
+      },
+    });
+    if (response.kind !== 'response') throw new Error('Expected response.');
+    table.acceptResponse(response);
+    await expect(request.result).rejects.toMatchObject({
+      code: 'OPERATION_FAILED',
+      details,
+    });
+  });
   it('resolves the request that matches a response id', async () => {
     const table = createPendingRequestTable({
       requestTimeoutMs: 30000,
