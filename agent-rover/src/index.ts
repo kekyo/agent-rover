@@ -565,13 +565,17 @@ export interface RemoteStableBoundsWaitOptions extends RemoteWaitOptions {
   readonly stableIterations?: number;
 }
 
-/** Expected placement in physical screen pixels. At least one placement condition is required. */
+/**
+ * Expected placement in physical screen pixels.
+ * @remarks Specify at least one of bounds, monitorId, or dpi. Omitted conditions
+ * are not checked. Fixed-pixel tests can specify bounds alone without querying DPI.
+ */
 export interface RemoteWindowPlacement {
   /** Required outer rectangle, including invisible resize borders. */
   readonly bounds?: ScreenRect;
-  /** Required associated monitor identifier. */
+  /** Required associated monitor identifier; omit when monitor selection is irrelevant. */
   readonly monitorId?: string;
-  /** Required target window DPI; use monitor DPI only for per-monitor aware targets. */
+  /** Required target window DPI; omit to ignore DPI. Monitor DPI applies only to per-monitor aware targets. */
   readonly dpi?: number;
   /** Expected desktop revision; a mismatch fails immediately with DESKTOP_CHANGED. */
   readonly desktopRevision?: string;
@@ -684,8 +688,9 @@ export interface AppWindow extends AppWindowSnapshot {
    * @param expected At least one of bounds, monitorId, or dpi; optionally a desktop revision.
    * @param options Polling deadline, interval, and consecutive stable observations (default 2).
    * @returns A new snapshot matching the expected placement.
-   * @remarks Observes desktop configuration before and after each window snapshot.
-   * Stability includes outer, frame and client bounds, DPI, awareness and monitor.
+   * @remarks Only supplied conditions participate in stability. A bounds-only wait
+   * requires no monitor or DPI metadata. Desktop configuration is read before and
+   * after each snapshot only when desktopRevision is supplied.
    * This does not establish application readiness, rendering completion, or absence of occlusion.
    */
   readonly waitForPlacement: (

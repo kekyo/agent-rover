@@ -2301,7 +2301,6 @@ export const connectRemoteAgent = async (
           'stableIterations must be a positive safe integer.'
         );
       }
-      let previousKey: string | undefined;
       let stableIterations = 0;
       const readDesktop = async (): Promise<RemoteDesktop> => {
         const desktop = parseDesktop(
@@ -2320,24 +2319,19 @@ export const connectRemoteAgent = async (
       };
       return await waitForResult(async () => {
         let current: AppWindowSnapshot;
-        let desktop: RemoteDesktop;
         try {
-          const before = await readDesktop();
+          if (expected.desktopRevision !== undefined) await readDesktop();
           current = parseWindowSnapshot(
             await requestJson('window.snapshot', { windowId: snapshot.id })
           );
-          desktop = await readDesktop();
-          if (before.revision !== desktop.revision)
-            throw new Error('Desktop changed during placement observation.');
-          if (
-            !current.visible ||
-            current.minimized ||
-            current.monitorId === null ||
-            !desktop.monitors.some(
-              (monitor) => monitor.id === current.monitorId
-            )
-          ) {
-            throw new Error('Window is not displayed on an available monitor.');
+          if (expected.desktopRevision !== undefined) await readDesktop();
+          if (!current.visible || current.minimized) {
+            throw new Error('Window is hidden or minimized.');
+          }
+          if (expected.dpi !== undefined && current.dpi === null) {
+            throw new Error(
+              'Window DPI is unavailable; cannot verify the requested DPI.'
+            );
           }
           if (
             (expected.bounds !== undefined &&
@@ -2358,22 +2352,12 @@ export const connectRemoteAgent = async (
         } catch (error) {
           // A failed observation breaks consecutiveness, including transport and
           // native observation failures that the shared wait helper can retry.
-          previousKey = undefined;
           stableIterations = 0;
           throw error;
         }
-        const key = JSON.stringify([
-          rectKey(current.bounds),
-          rectKey(current.frameBounds),
-          rectKey(current.clientBounds),
-          current.monitorId,
-          current.dpi,
-          current.dpiAwareness,
-          current.maximized,
-          desktop.revision,
-        ]);
-        stableIterations = previousKey === key ? stableIterations + 1 : 1;
-        previousKey = key;
+        // Every supplied condition equals a fixed expected value here. Other
+        // metadata may change without breaking consecutiveness.
+        stableIterations += 1;
         if (stableIterations >= requiredIterations)
           return createWindowProxy(current);
         throw new Error('Window placement has not remained stable yet.');

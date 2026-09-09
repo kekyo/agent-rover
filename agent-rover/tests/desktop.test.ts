@@ -115,6 +115,104 @@ describe('desktop observations', () => {
 });
 
 describe('placement and diagnostics', () => {
+  it('places a window using fixed pixels without requiring desktop or DPI metadata', async () => {
+    const bounds = { x: 100, y: 100, width: 800, height: 600 };
+    const fake = await startFakeTcpAgent({
+      windows: [
+        {
+          ...defaultFakeWindow,
+          monitorId: null,
+          dpi: null,
+          dpiAwareness: null,
+        },
+      ],
+      beforeRequest: (method) =>
+        method === 'agent.desktop'
+          ? {
+              code: 'PROTOCOL_ERROR',
+              message:
+                'Desktop observations are not needed for a bounds-only wait.',
+            }
+          : undefined,
+    });
+    const agent = await connectRemoteAgent({
+      host: fake.host,
+      port: fake.port,
+    });
+    try {
+      const window = (await agent.windows())[0]!;
+      const moved = await window.setBounds(bounds);
+      const result = await moved.waitForPlacement(
+        { bounds },
+        { intervalMs: 1 }
+      );
+      expect(result.bounds).toEqual(bounds);
+      expect(result.dpi).toBeNull();
+      expect(result.monitorId).toBeNull();
+    } finally {
+      agent.release();
+      await fake.close();
+    }
+  });
+
+  it.each(['bounds', 'monitorId', 'dpi'] as const)(
+    'stabilizes only the requested %s condition',
+    async (condition) => {
+      let observations = 0;
+      const fake = await startFakeTcpAgent({
+        beforeRequest: (method) => {
+          if (method !== 'window.snapshot') return undefined;
+          if (++observations > 2)
+            return {
+              code: 'INVALID_ARGUMENT',
+              message: 'Unrequested metadata must not prolong the wait.',
+            };
+          fake.setWindows([
+            {
+              ...defaultFakeWindow,
+              bounds:
+                condition === 'bounds'
+                  ? defaultFakeWindow.bounds
+                  : { ...defaultFakeWindow.bounds, x: observations },
+              frameBounds: {
+                ...defaultFakeWindow.frameBounds,
+                x: observations,
+              },
+              clientBounds: {
+                ...defaultFakeWindow.clientBounds,
+                x: observations,
+              },
+              monitorId: condition === 'monitorId' ? 'monitor-1' : null,
+              dpi: condition === 'dpi' ? 96 : observations * 48,
+              dpiAwareness: observations === 1 ? 'unaware' : 'system',
+            },
+          ]);
+          return undefined;
+        },
+      });
+      const agent = await connectRemoteAgent({
+        host: fake.host,
+        port: fake.port,
+      });
+      try {
+        const window = (await agent.windows())[0]!;
+        const conditions = {
+          bounds: window.bounds,
+          monitorId: 'monitor-1',
+          dpi: 96,
+        };
+        await window.waitForPlacement(
+          { [condition]: conditions[condition] },
+          { intervalMs: 1 }
+        );
+        expect(observations).toBe(2);
+      } finally {
+        agent.release();
+        await fake.close();
+      }
+    }
+  );
+
   it('waits for the requested monitor and DPI and resets stability after a failed observation', async () => {
     const placed = {
       ...defaultFakeWindow,
@@ -214,7 +312,7 @@ describe('placement and diagnostics', () => {
         const window = (await agent.windows())[0]!;
         await expect(
           window.waitForPlacement(
-            { bounds: window.bounds, dpi: 96 },
+            { bounds: window.bounds, monitorId: 'monitor-1', dpi: 96 },
             { stableIterations: 1, timeoutMs: 0 }
           )
         ).rejects.toMatchObject({ code: 'TIMEOUT' });
