@@ -1608,6 +1608,28 @@ describe.concurrent('remote agent connection api', () => {
     }
   });
 
+  it('preserves outer, visible frame, and client screen rectangles', async () => {
+    const expected = {
+      ...defaultFakeWindow,
+      bounds: { x: -300, y: 20, width: 640, height: 480 },
+      frameBounds: { x: -292, y: 20, width: 624, height: 472 },
+      clientBounds: { x: -292, y: 51, width: 624, height: 441 },
+    };
+    const fakeAgent = await startFakeTcpAgent({ windows: [expected] });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const [window] = await agent.windows();
+      expect(window).toMatchObject(expected);
+      expect(await window!.refresh()).toMatchObject(expected);
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
   it('controls window activation, state, bounds, and snapshots', async () => {
     const fakeAgent = await startFakeTcpAgent({});
     const agent = await connectRemoteAgent({

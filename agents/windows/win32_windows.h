@@ -58,10 +58,14 @@ struct WindowInfo {
   bool minimized;
   /** Whether the window is maximized. */
   bool maximized;
-  /** Window bounds. */
+  /** Outer bounds including invisible resize borders, in physical screen pixels. */
   WindowRect bounds;
   /** Owning process metadata. */
   WindowProcess process;
+  /** Visible frame bounds used for capture. */
+  WindowRect frame_bounds;
+  /** Client bounds in physical screen coordinates. */
+  WindowRect client_bounds;
 };
 
 /**

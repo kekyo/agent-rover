@@ -591,6 +591,8 @@ static void AppendJsonString(std::string* output, const std::string& value) {
   output->push_back('"');
 }
 
+static void AppendRectJson(std::string* output, const WindowRect& rect);
+
 static std::string WindowJson(const WindowInfo& window) {
   std::string output = "{\"id\":";
   AppendJsonString(&output, window.id);
@@ -626,7 +628,11 @@ static std::string WindowJson(const WindowInfo& window) {
   output += std::to_string(window.bounds.width);
   output += ",\"height\":";
   output += std::to_string(window.bounds.height);
-  output += "},\"process\":{\"id\":";
+  output += "},\"frameBounds\":";
+  AppendRectJson(&output, window.frame_bounds);
+  output += ",\"clientBounds\":";
+  AppendRectJson(&output, window.client_bounds);
+  output += ",\"process\":{\"id\":";
   output += std::to_string(window.process.id);
   output += ",\"name\":";
   AppendJsonString(&output, window.process.name);
@@ -1485,7 +1491,7 @@ std::string HandleJsonRequest(
     if (!SnapshotWindowById(request.window_id, &window, &error)) {
       return FailureResponseJson(id, error);
     }
-    request.initial_bounds = window.bounds;
+    request.initial_bounds = window.frame_bounds;
     const std::string recording_id = id + "-video";
     if (!IsVideoCaptureSupported()) {
       return FailureResponseJson(

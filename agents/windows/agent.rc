@@ -1,0 +1,3 @@
+// Physical screen coordinates require per-monitor DPI awareness.
+#include <windows.h>
+1 RT_MANIFEST "agent.manifest"

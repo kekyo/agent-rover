@@ -402,6 +402,8 @@ const pathIsUnderRemotePrefix = (path: string, prefix: string): boolean => {
 const copyWindowSnapshot = (window: AppWindowSnapshot): AppWindowSnapshot => ({
   active: window.active,
   bounds: window.bounds,
+  frameBounds: window.frameBounds,
+  clientBounds: window.clientBounds,
   className: window.className,
   controlId: window.controlId,
   enabled: window.enabled,
@@ -559,6 +561,8 @@ const parseWindowSnapshot = (value: unknown): AppWindowSnapshot => {
   return {
     active,
     bounds: parseRect(value.bounds),
+    frameBounds: parseRect(value.frameBounds),
+    clientBounds: parseRect(value.clientBounds),
     className: readString(value, 'className'),
     controlId: readNumber(value, 'controlId'),
     enabled,

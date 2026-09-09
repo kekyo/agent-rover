@@ -155,15 +155,15 @@ describe('Windows video capture integration', () => {
           },
           { intervalMs: 250, timeoutMs: 10000 }
         );
-        const initialBounds = capturedWindow.bounds;
+        const initialBounds = capturedWindow.frameBounds;
         const [result, movedWindow] = await Promise.all([
           capturedWindow.recordVideo(800, outputPath),
           (async () => {
             await delay(250);
             return await capturedWindow.setBounds({
-              ...initialBounds,
-              x: initialBounds.x + 80,
-              y: initialBounds.y + 60,
+              ...capturedWindow.bounds,
+              x: capturedWindow.bounds.x + 80,
+              y: capturedWindow.bounds.y + 60,
             });
           })(),
         ]);
@@ -178,7 +178,7 @@ describe('Windows video capture integration', () => {
         expect(result.durationMs).toBeGreaterThanOrEqual(800);
         expect(result.durationMs).toBeLessThan(817);
         expect(result.initialBounds).toEqual(initialBounds);
-        expect(result.finalBounds).toEqual(movedWindow.bounds);
+        expect(result.finalBounds).toEqual(movedWindow.frameBounds);
 
         const probe = await execFileResult(
           'ffprobe',

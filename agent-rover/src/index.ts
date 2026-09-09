@@ -30,8 +30,8 @@ export interface AsyncReleaseable extends AsyncDisposable {
 
 /**
  * Screen-relative rectangle in physical screen pixels.
- * @remarks The origin is the virtual screen origin, so multi-monitor setups may
- * report negative x or y coordinates.
+ * @remarks On Windows, (0, 0) is the primary monitor origin. Monitors to its
+ * left or above have negative coordinates. Right and bottom edges are exclusive.
  */
 export interface ScreenRect {
   /** Left coordinate in physical pixels. */
@@ -329,8 +329,12 @@ export interface AppWindowSnapshot {
   readonly title: string;
   /** Platform window class name. */
   readonly className: string;
-  /** Current window bounds. */
+  /** Outer bounds, including invisible resize borders, in physical screen pixels. */
   readonly bounds: ScreenRect;
+  /** Visible frame bounds used by window screenshots and video. */
+  readonly frameBounds: ScreenRect;
+  /** Client rectangle in physical screen coordinates; may be empty. */
+  readonly clientBounds: ScreenRect;
   /** Whether the platform reports the window as visible. */
   readonly visible: boolean;
   /** Whether this window or its root owner is currently active. */

@@ -11,8 +11,6 @@
 
 namespace agent_rover {
 
-namespace {
-
 constexpr DWORD kDwmwaExtendedFrameBounds = 9;
 constexpr wchar_t kDwmApiDllName[] = L"dwmapi.dll";
 
@@ -81,8 +79,6 @@ static bool TryReadDwmExtendedFrameBounds(HWND window, RECT* rect) {
   return true;
 }
 
-}  // namespace
-
 bool ReadWindowFrameBounds(
     HWND window,
     WindowRect* bounds,
@@ -109,6 +105,52 @@ bool ReadWindowFrameBounds(
   }
 
   *bounds = RectToWindowRect(selected_rect);
+  return true;
+}
+
+bool ReadWindowOuterBounds(HWND window, WindowRect* bounds, std::string* error) {
+  RECT rect = {};
+  if (bounds == nullptr || !GetWindowRect(window, &rect)) {
+    if (error != nullptr) *error = "GetWindowRect failed.";
+    return false;
+  }
+  *bounds = RectToWindowRect(rect);
+  return true;
+}
+
+bool ReadWindowClientBounds(HWND window, WindowRect* bounds, std::string* error) {
+  RECT rect = {};
+  if (bounds == nullptr || !GetClientRect(window, &rect)) {
+    if (error != nullptr) *error = "GetClientRect failed.";
+    return false;
+  }
+  // Mapping a rectangle also handles mirrored (RTL) client coordinates.
+  SetLastError(0);
+  if (MapWindowPoints(window, nullptr, reinterpret_cast<POINT*>(&rect), 2) == 0 &&
+      GetLastError() != 0) {
+    if (error != nullptr) *error = "MapWindowPoints failed.";
+    return false;
+  }
+  *bounds = RectToWindowRect(rect);
+  return true;
+}
+
+bool MoveWindowPhysical(HWND window, const WindowRect& bounds, std::string* error) {
+  RECT rect = {bounds.x, bounds.y, bounds.x + bounds.width, bounds.y + bounds.height};
+  if ((GetWindowLongPtrW(window, GWL_STYLE) & WS_CHILD) != 0) {
+    SetLastError(0);
+    if (MapWindowPoints(nullptr, GetParent(window),
+                        reinterpret_cast<POINT*>(&rect), 2) == 0 &&
+        GetLastError() != 0) {
+      if (error != nullptr) *error = "MapWindowPoints failed.";
+      return false;
+    }
+  }
+  if (!MoveWindow(window, rect.left, rect.top, rect.right - rect.left,
+                  rect.bottom - rect.top, TRUE)) {
+    if (error != nullptr) *error = "MoveWindow failed.";
+    return false;
+  }
   return true;
 }
 

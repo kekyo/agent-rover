@@ -4,7 +4,7 @@
 // https://github.com/kekyo/agent-rover
 
 /** Current JSON protocol version spoken by driver and agent. */
-export const protocolVersion = '2026-09-09';
+export const protocolVersion = '2026-09-09.1';
 
 /** TCP frame protocol version spoken by driver and agent. */
 export const tcpFrameVersion = 2;
