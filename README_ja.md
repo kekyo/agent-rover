@@ -181,9 +181,7 @@ describe('remote agent smoke test', () => {
 最も望ましいのは、同じマシンに配置された仮想マシン上で動作させることです。
 
 > 通信経路をHTTPSなどではなく、TCP＋独自のプロトコルとしている理由は、エージェントのライブラリ依存性を極限まで下げるためです。
-> WindowsエージェントはOSが対応するDPI対応方式を選択します。基本的なウインドウ・デスクトップ操作に新しいDPI取得APIは不要で、取得できないDPI情報は`null`を返します。このエージェントでモニターごと・ウインドウごとのDPIを取得できるのはWindows 10 version 1607以降です。[WindowsのDPI対応方式](https://learn.microsoft.com/en-us/windows/win32/hidpi/high-dpi-desktop-application-development-on-windows)と[GetDpiForWindowの対応OS](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getdpiforwindow)を参照してください。
->
-> XPで起動時に`GetThreadId`のエントリポイントが見つからないと表示される場合は、XP互換ランタイムで作成したエージェントが必要です。このAPIはVista以降のもので、DPI設定では解決できません。現在のMinGW 13によるビルドにはこの依存が残り、XPでは起動できません。XP互換のビルドと実行確認が必要です。[GetThreadIdの対応OS](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadid)
+> 例えばWindowsエージェントでは、動作対象が Windows XP SP2 以上となっており、これにより古いGUIアプリケーションのテスト自動化を行うことが出来ます。
 > 但し、今後の強化でこの問題を改善させる可能性はあります。
 
 ---

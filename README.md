@@ -192,9 +192,7 @@ Be especially careful if you perform operations that would be problematic if lea
 The preferred setup is to run the agent inside a virtual machine placed on the same host.
 
 > The communication path uses TCP with a custom protocol, rather than HTTPS or a similar protocol, to reduce the agent's library dependencies as much as possible.
-> The Windows agent selects the DPI awareness supported by the OS. Basic window and desktop operations do not require modern DPI query APIs; unavailable DPI information is returned as `null`. Per-monitor and window DPI queries require Windows 10 version 1607 or later in this agent. See [Windows awareness modes](https://learn.microsoft.com/en-us/windows/win32/hidpi/high-dpi-desktop-application-development-on-windows) and [GetDpiForWindow availability](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getdpiforwindow).
->
-> If an XP machine reports a missing `GetThreadId` entry point at startup, that executable requires an XP-compatible runtime build. The API is available from Vista, and DPI settings cannot resolve this loader error. The current MinGW 13 build still imports this API and cannot start on XP; an XP-compatible build and runtime validation remain necessary. [GetThreadId requirements](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadid)
+> For example, the Windows agent targets Windows XP SP2 and later, which makes it possible to automate tests for older GUI applications.
 > Future improvements may address this limitation.
 
 ---
