@@ -6,7 +6,6 @@
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
 import {
@@ -27,7 +26,9 @@ it.skipIf(!enabled)(
     const { agentsDirectory, repositoryDirectory } = nativeTestPaths(
       import.meta.url
     );
-    const local = await mkdtemp(join(tmpdir(), 'agent-rover-desktop-win-'));
+    const buildDirectory = join(agentsDirectory, '.build');
+    await mkdir(buildDirectory, { recursive: true });
+    const local = await mkdtemp(join(buildDirectory, 'desktop-win-'));
     const fixture = join(local, 'window.exe');
     const testAgentExecutable = join(local, 'agent.exe');
     const run = async (file: string, args: string[]): Promise<void> => {
@@ -59,7 +60,8 @@ it.skipIf(!enabled)(
         `GENERATED_DIR=${join(local, 'generated')}`,
         `AMD64_OUTPUT=${testAgentExecutable}`,
       ]);
-      await run('x86_64-w64-mingw32-g++', [
+      await run('./scripts/windows-toolchain.sh', [
+        'x86_64-w64-mingw32-g++-win32',
         '-std=c++20',
         '-D_WIN32_WINNT=0x0A00',
         '-municode',

@@ -1,0 +1,18 @@
+# Debian bookworm-20250224-slim; use the amd64 toolchain for both Windows ABIs.
+FROM docker.io/library/debian@sha256:12c396bd585df7ec21d5679bb6a83d4878bc4415ce926c9e5ea6426d23c60bdc
+
+# Freeze transitive dependencies too. APT still verifies repository signatures
+# and package hashes; only the historical Release expiration is ignored.
+# https://snapshot.debian.org/#Usage
+RUN rm /etc/apt/sources.list.d/debian.sources \
+    && printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20250301T000000Z bookworm main\n' > /etc/apt/sources.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        g++-mingw-w64-x86-64-win32=12.2.0-14+25.2 \
+        g++-mingw-w64-i686-win32=12.2.0-14+25.2 \
+        binutils-mingw-w64-x86-64=2.40-2+10.4 \
+        binutils-mingw-w64-i686=2.40-2+10.4 \
+        mingw-w64-common=10.0.0-3 \
+        mingw-w64-x86-64-dev=10.0.0-3 \
+        mingw-w64-i686-dev=10.0.0-3 \
+    && rm -rf /var/lib/apt/lists/*

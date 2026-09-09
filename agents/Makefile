@@ -3,10 +3,7 @@
 # Under MIT.
 # https://github.com/kekyo/agent-rover
 
-AMD64_CXX ?= x86_64-w64-mingw32-g++
-I686_CXX ?= i686-w64-mingw32-g++
-AMD64_RC ?= x86_64-w64-mingw32-windres
-I686_RC ?= i686-w64-mingw32-windres
+include toolchain/toolchain.mk
 TARGET_ROOT ?= dist
 AMD64_OUTPUT ?= $(TARGET_ROOT)/agent-amd64.exe
 I686_OUTPUT ?= $(TARGET_ROOT)/agent-i686.exe
@@ -47,19 +44,19 @@ version-header:
 remove-legacy-output:
 	rm -f $(LEGACY_OUTPUTS)
 
-$(AMD64_OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp | version-header
+$(AMD64_OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp $(TOOLCHAIN_DEPENDENCIES) | version-header
 	@mkdir -p $(dir $@)
 	$(AMD64_CXX) $(CXXFLAGS) $(CPPFLAGS) $(CPPFLAGS_AMD64) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
 
-$(I686_OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp | version-header
+$(I686_OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp $(TOOLCHAIN_DEPENDENCIES) | version-header
 	@mkdir -p $(dir $@)
 	$(I686_CXX) $(CXXFLAGS) $(CPPFLAGS) $(CPPFLAGS_I686) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
 
-$(AMD64_OBJ_DIR)/agent.res.o: $(SRC_DIR)/agent.rc $(SRC_DIR)/agent.manifest
+$(AMD64_OBJ_DIR)/agent.res.o: $(SRC_DIR)/agent.rc $(SRC_DIR)/agent.manifest $(TOOLCHAIN_DEPENDENCIES)
 	@mkdir -p $(dir $@)
 	$(AMD64_RC) -I$(SRC_DIR) $< $@
 
-$(I686_OBJ_DIR)/agent.res.o: $(SRC_DIR)/agent.rc $(SRC_DIR)/agent.manifest
+$(I686_OBJ_DIR)/agent.res.o: $(SRC_DIR)/agent.rc $(SRC_DIR)/agent.manifest $(TOOLCHAIN_DEPENDENCIES)
 	@mkdir -p $(dir $@)
 	$(I686_RC) -I$(SRC_DIR) $< $@
 
