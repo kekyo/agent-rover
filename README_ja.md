@@ -92,7 +92,7 @@ agent-roverは、GUIアプリケーション自体の監視や操作以外にも
   ファイル操作（送受信）も可能。
 - 画面またはアプリケーションウインドウをPNG画像として、対応するWindowsエージェントでは
   H.264 MP4動画としてキャプチャ可能。
-- プリビルドエージェントは Windows (XP SP2以降のi686/amd64)・Linux X11 (i686/amd64/armv7l/arm64/riscv64) を使用可能。
+- プリビルドエージェントは Windows (Windows 10 version 1703以降のi686/amd64)・Linux X11 (i686/amd64/armv7l/arm64/riscv64) を使用可能。
 - エージェントとの通信はTCP独自プロトコル。認証はダイジェストハンドシェーク（但し通信電文自体は非暗号化）。
 - 画像認識（一致または近しい）・OCR解析アサーション。
 
@@ -181,7 +181,7 @@ describe('remote agent smoke test', () => {
 最も望ましいのは、同じマシンに配置された仮想マシン上で動作させることです。
 
 > 通信経路をHTTPSなどではなく、TCP＋独自のプロトコルとしている理由は、エージェントのライブラリ依存性を極限まで下げるためです。
-> 例えばWindowsエージェントでは、動作対象が Windows XP SP2 以上となっており、これにより古いGUIアプリケーションのテスト自動化を行うことが出来ます。
+> Windowsエージェントは、物理座標とモニターごとのDPIを扱うため、Windows 10 version 1703以降が対象です。DPI非対応のアプリケーションもテストできます。使用するPer-Monitor V2については[MicrosoftのDPI仕様](https://learn.microsoft.com/en-us/windows/win32/hidpi/dpi-awareness-context)を参照してください。
 > 但し、今後の強化でこの問題を改善させる可能性はあります。
 
 ---
@@ -199,6 +199,7 @@ agent-roverは特定のテストフレームワークに依存しません。
 | `connectRemoteAgent(options)` | リモートエージェントへ接続し、`RemoteAgent`を返します。 |
 | `RemoteAgent.capabilities()` | 接続先エージェントのプロトコルバージョン、プラットフォーム、機能一覧を取得します。 |
 | `RemoteAgent.release()` | リモートエージェントとの接続を閉じます。 |
+| `RemoteAgent.desktop()` | デスクトップ配置、モニターDPI、構成リビジョンをまとめて取得します。 |
 | `RemoteAgent.bounds()` | 仮想画面全体の矩形を取得します。 |
 | `RemoteAgent.monitors()` | 接続先セッションのモニター一覧、作業領域、スケール係数を取得します。 |
 | `RemoteAgent.cursor()` | 現在のカーソル位置と表示状態を取得します。 |
@@ -247,6 +248,110 @@ try {
   agent.release();
 }
 ```
+
+### デスクトップ配置とDPIを使ったテスト
+
+`agent.desktop()`は、デスクトップ全体の`bounds`、各モニターの情報を持つ
+`monitors`、構成を比較するための`revision`をまとめて返します。
+`agent.bounds()`と`agent.monitors()`も利用できますが、配置先を決めるときは
+一度の`desktop()`呼び出しで取得した情報を使ってください。
+
+座標はすべて物理ピクセルです。Windowsではプライマリモニターの左上が`(0, 0)`で、
+左側・上側のモニターは負の座標になります。右端・下端は矩形に含みません。
+デスクトップ全体の矩形には、モニター間の画面がない隙間も含まれます。
+配置先には各モニターの`workArea`を使い、タスクバー等を避けてください。
+[Windowsの仮想画面仕様](https://learn.microsoft.com/en-us/windows/win32/gdi/the-virtual-screen)
+
+| 情報 | テストでの使い方 |
+| --- | --- |
+| `monitor.id` / `primary` | 配置先の選択と配置後の照合に使用します。配列の順序や再接続後のIDの永続性は前提にしません。 |
+| `monitor.bounds` / `workArea` | モニター全体と、タスクバー等を除いた配置可能な矩形です。 |
+| `monitor.dpi` / `scaleFactor` | 表示倍率に対応する設定DPIと`dpi / 96`です。144 DPIは150%です。パネルの物理的な画素密度ではありません。取得不能なら両方`null`です。 |
+| `window.bounds` | 不可視のリサイズ枠を含む外周矩形です。`setBounds()`もこの矩形を受け取ります。 |
+| `window.frameBounds` | 見えているウインドウ枠の矩形です。ウインドウのPNG・動画撮影はこちらを使います。 |
+| `window.clientBounds` | 内容領域の矩形です。子ウインドウを含めて画面座標で返します。空の矩形になる場合もあります。 |
+| `window.monitorId` | Windowsが関連付けたモニターです。画面外または取得不能なら`null`です。 |
+| `window.dpi` / `dpiAwareness` | 対象ウインドウに適用されるDPIとDPI対応方式です。取得不能なら`null`です。 |
+
+複数モニターにまたがるウインドウの`monitorId`は、Windowsが外周矩形との交差面積で
+選択したモニターを表します。モニター内に全体が収まっていることを保証しません。
+最小化中は最小化前の矩形で関連付けられるため、`visible`と`minimized`も確認してください。
+[MonitorFromWindowの仕様](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-monitorfromwindow)
+
+モニターのDPIとウインドウのDPIは異なる場合があります。
+`dpiAwareness`が`unaware`または`unaware-gdi-scaled`ならウインドウDPIは96、
+`system`ならシステムDPI、`per-monitor`または`per-monitor-v2`なら配置先のモニターDPIです。
+例えば150%のモニターにあるDPI非対応アプリでも`window.dpi`は96ですが、表示が
+100%であることを意味しません。アプリ内部の論理座標へ一律に倍率を掛けると誤ります。
+入力には観測した物理座標を使い、論理座標との変換が必要なら対象アプリのDPI対応方式と
+描画方法を踏まえてください。`null`を96 DPIや100%と読み替えないでください。
+[GetDpiForWindowの仕様](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getdpiforwindow)
+
+次は、接続済みの`agent`と検索済みの`window`を使って配置・検証する例です。
+テストに特定の倍率が必要なら、配置前に`monitor.dpi`も前提条件として検証します。
+
+```typescript
+const desktop = await agent.desktop();
+const monitor = desktop.monitors.find((entry) => entry.primary);
+if (!monitor || monitor.dpi === null) {
+  throw new Error('配置先のモニターまたはDPIを取得できません。');
+}
+const restored = await window.restore();
+if (restored.dpi === null || restored.dpiAwareness === null) {
+  throw new Error('対象ウインドウのDPI情報を取得できません。');
+}
+
+// このテストでは800×600物理ピクセルと周囲32ピクセルを必要とする
+if (monitor.workArea.width < 864 || monitor.workArea.height < 664) {
+  throw new Error('テストに必要な作業領域がありません。');
+}
+const bounds = {
+  x: monitor.workArea.x + 32,
+  y: monitor.workArea.y + 32,
+  width: 800,
+  height: 600,
+};
+const perMonitor = restored.dpiAwareness === 'per-monitor' ||
+  restored.dpiAwareness === 'per-monitor-v2';
+const expectedDpi = perMonitor ? monitor.dpi : restored.dpi;
+const moved = await restored.setBounds(bounds);
+const placed = await moved.waitForPlacement(
+  { bounds, monitorId: monitor.id, dpi: expectedDpi, desktopRevision: desktop.revision },
+  { stableIterations: 3, timeoutMs: 10000 }
+);
+
+// 撮影矩形は外周ではなく表示枠と照合する
+const screenshot = await placed.screenshot();
+expect(screenshot.bounds).toEqual(placed.frameBounds);
+expect(screenshot.clipped).toBe(false);
+expect((await agent.desktop()).revision).toBe(desktop.revision);
+```
+
+`waitForPlacement()`には`bounds`、`monitorId`、`dpi`のうち少なくとも一つを指定します。
+指定した条件への到達を確認した後、外周・表示枠・内容領域・DPI・DPI対応方式・
+所属モニター・デスクトップ構成が連続して一致するまで待機します。
+`stableIterations`は既定で2、`intervalMs`は50、`timeoutMs`は10000です。
+途中の取得失敗や条件不一致で安定回数を数え直します。非表示・最小化・所属モニターが
+不明なウインドウは成功扱いにしません。`setBounds()`の成功だけでは、アプリ独自の
+最小サイズ制限やDPI変更処理の後に要求した位置・サイズが保たれるとは限りません。
+
+`waitForStableBounds()`は外周矩形が変化しないことだけを確認します。
+意図した配置の確認には`waitForPlacement()`を使ってください。
+いずれの待機もアプリ内部の描画完了やアニメーション終了、他ウインドウによる遮蔽の
+有無までは判定しません。`screenshot.clipped === false`も遮蔽やモニター間の隙間が
+ないことの保証ではありません。必要なUI状態や撮影内容を別途検証してください。
+
+`desktopRevision`を指定した待機で構成が異なる場合は`DESKTOP_CHANGED`になります。
+再接続、モニター増減、解像度・DPI・作業領域の変更後はデスクトップ情報を取り直し、
+テストの前提条件と配置を再評価してください。リビジョンは設定内容の識別値で、
+単調増加するイベント番号ではありません。同じ構成に戻れば同じ値になるため、
+その間に変更が一度もなかったことは保証しません。
+
+Windowsエージェントは連続する取得結果を照合し、構成が変化し続ける場合は
+`OPERATION_FAILED`を返します。デスクトップ・ウインドウ・撮影の各操作全体を
+原子的に取得することはできません。`agent.diagnostics.capture()`には取得前の
+`desktop`と取得後の`desktopAfter`が含まれ、`saveDiagnostics()`のマニフェストにも
+保存されます。リビジョンの比較とウインドウのDPI情報を、失敗原因の判定に利用できます。
 
 ### 動画撮影
 
@@ -326,6 +431,7 @@ try {
 | `AppWindow.recordVideo(durationMs, options?)` | ウインドウ領域をテンポラリファイルを元にしたReadableStreamとしてキャプチャします。 |
 | `AppWindow.waitForVisible(options?)` | ウインドウが表示状態になるまで待機します。 |
 | `AppWindow.waitForHidden(options?)` / `AppWindow.waitForClosed(options?)` | ウインドウが非表示、または閉じられるまで待機します。 |
+| `AppWindow.waitForPlacement(expected, options?)` | 指定した矩形・モニター・DPIへの到達と安定を確認します。 |
 | `AppWindow.waitForStableBounds(options?)` | ウインドウ矩形が安定するまで待機します。 |
 | `AppWindow.close()` | ウインドウにクローズ要求を送ります。 |
 
@@ -507,10 +613,10 @@ const notepadWindow = await agent.waitForWindow({
 });
 
 // ウインドウを前面化し、入力したい位置をクリック
-await notepadWindow.activate();
+const activeWindow = await notepadWindow.activate();
 const inputPoint = {
-  x: notepadWindow.bounds.x + 24,
-  y: notepadWindow.bounds.y + 96,
+  x: activeWindow.clientBounds.x + 24,
+  y: activeWindow.clientBounds.y + 96,
 };
 await agent.mouse.move(inputPoint);
 await agent.mouse.click(inputPoint, {

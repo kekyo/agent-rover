@@ -13,7 +13,7 @@ schema unless the driver is extended.
 
 | Name | Value | Source |
 | --- | --- | --- |
-| JSON protocol version | `2026-09-09` | `protocolVersion` / `kProtocolVersion` |
+| JSON protocol version | `2026-09-09.1` | `protocolVersion` / `kProtocolVersion` |
 | TCP frame version | `2` | `tcpFrameVersion` / `kTcpFrameVersion` |
 | TCP transport capability | `transport.tcp-frame-v1` | `tcpFrameCapabilityId` / `kTcpFrameCapabilityId` |
 | Default frame payload limit | `16 * 1024 * 1024` bytes | driver and native agent |
@@ -21,7 +21,7 @@ schema unless the driver is extended.
 | Binary transfer chunk size used by driver and native agent | `64 * 1024` bytes | implementation detail, peers must accept other positive chunk sizes |
 
 The driver rejects the connection during the ready handshake when the reported
-JSON protocol version is not exactly `2026-09-09`.
+JSON protocol version is not exactly `2026-09-09.1`.
 
 ## Connection Lifecycle
 
@@ -239,7 +239,7 @@ Immediately after authentication, the agent must send:
   "name": "agent.ready",
   "data": {
     "capabilities": {
-      "protocolVersion": "2026-09-09",
+      "protocolVersion": "2026-09-09.1",
       "platform": "windows",
       "features": [
         "capabilities",
@@ -249,6 +249,7 @@ Immediately after authentication, the agent must send:
         "agent.bounds",
         "agent.cursor",
         "agent.monitors",
+        "agent.desktop",
         "agent.screenshot",
         "agent.recordVideo",
         "agent.windows",
@@ -285,14 +286,14 @@ Immediately after authentication, the agent must send:
         "agent.native-windows"
       ]
     },
-    "protocolVersion": "2026-09-09"
+    "protocolVersion": "2026-09-09.1"
   }
 }
 ```
 
 The driver validates `data.capabilities`:
 
-- `protocolVersion` must be a string and must equal `2026-09-09`.
+- `protocolVersion` must be a string and must equal `2026-09-09.1`.
 - `platform` must be the string `windows`.
 - `features` must be an array of strings.
 
@@ -370,8 +371,11 @@ transfers by `transferId` until the corresponding method consumes them.
 
 ### Rect
 
-Coordinates are physical screen pixels in the virtual screen coordinate
-system. Multi-monitor systems may use negative `x` or `y` values.
+Coordinates are physical screen pixels. On Windows, the primary monitor starts
+at (0, 0), and monitors to its left or above have negative `x` or `y` values.
+Right and bottom edges are exclusive. Virtual screen bounds include gaps between
+monitors; use individual work areas to choose a visible placement.
+[Windows virtual screen](https://learn.microsoft.com/en-us/windows/win32/gdi/the-virtual-screen)
 
 ```json
 {
@@ -395,11 +399,28 @@ system. Multi-monitor systems may use negative `x` or `y` values.
 
 ```json
 {
-  "protocolVersion": "2026-09-09",
+  "protocolVersion": "2026-09-09.1",
   "platform": "windows",
   "features": ["transport.tcp-frame-v1"]
 }
 ```
+
+### Desktop
+
+`agent.desktop` returns one object with `bounds: Rect`, `monitors: Monitor[]`,
+and a nonempty opaque `revision: string`. The Windows agent hashes canonical
+monitor IDs, names, physical rectangles, work areas, primary flags, and effective
+DPI. Enumeration order does not change the revision. Returning to a previous
+configuration returns the same revision; this is not an event counter.
+
+The agent accepts two consecutive matching observations, retrying up to three
+mismatches before returning `OPERATION_FAILED`. This cannot make desktop,
+window, input, and capture operations atomic. The driver's placement wait can
+compare a supplied revision and fail locally with `DESKTOP_CHANGED`.
+
+The native agent requires Windows 10 version 1703 or later and runs with
+[Per-Monitor V2 awareness](https://learn.microsoft.com/en-us/windows/win32/hidpi/dpi-awareness-context).
+It refuses to start if compatibility settings prevent per-monitor awareness.
 
 ### Window Snapshot
 
@@ -409,6 +430,11 @@ system. Multi-monitor systems may use negative `x` or `y` values.
   "title": "Untitled - Notepad",
   "className": "Notepad",
   "bounds": { "x": 10, "y": 20, "width": 640, "height": 480 },
+  "frameBounds": { "x": 18, "y": 20, "width": 624, "height": 472 },
+  "clientBounds": { "x": 18, "y": 51, "width": 624, "height": 441 },
+  "monitorId": "monitor-1",
+  "dpi": 96,
+  "dpiAwareness": "unaware",
   "visible": true,
   "active": false,
   "focused": false,
@@ -431,6 +457,25 @@ ignored.
 Windows agent uses handle-derived strings, but custom agents only need to make
 the id usable by later `window.*` requests.
 
+`bounds` is the outer rectangle including invisible resize borders.
+`frameBounds` is the visible frame used for window PNG/video capture.
+`clientBounds` is the client rectangle in physical screen coordinates, even for
+child windows; an empty client rectangle is allowed.
+[Windows rectangle semantics](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowrect)
+
+`monitorId` is the associated monitor identifier, or `null` when offscreen or
+unavailable. Windows uses the largest outer-rectangle intersection, and the
+pre-minimize rectangle for minimized windows. Association does not establish
+full containment or visibility.
+[MonitorFromWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-monitorfromwindow)
+
+`dpi` is a positive integer or `null` when unavailable. `dpiAwareness` is
+`unaware`, `unaware-gdi-scaled`, `system`, `per-monitor`, `per-monitor-v2`,
+or `null` when unavailable. This describes the target window, not the agent.
+Unaware windows report 96, system-aware windows report system DPI, and
+per-monitor aware windows report their associated monitor's DPI.
+[GetDpiForWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getdpiforwindow)
+
 ### Monitor
 
 ```json
@@ -440,9 +485,16 @@ the id usable by later `window.*` requests.
   "bounds": { "x": 0, "y": 0, "width": 1024, "height": 768 },
   "workArea": { "x": 0, "y": 0, "width": 1024, "height": 728 },
   "primary": true,
-  "scaleFactor": 1
+  "scaleFactor": 1,
+  "dpi": 96
 }
 ```
+
+`dpi` describes effective display scaling, not physical panel density.
+`scaleFactor` equals `dpi / 96`; both are `null` when DPI cannot be read.
+Do not substitute a default 96 or 1. Monitor IDs are scoped to the current
+configuration and need not survive a reconnect. The driver validates positive
+integer DPI and a corresponding positive scale factor (wire rounding is allowed).
 
 ### Cursor
 
@@ -586,6 +638,16 @@ Params: omitted.
 Result: `Capabilities`.
 
 This is the request form of the same capability object sent in `agent.ready`.
+
+### `agent.desktop`
+
+Params: omitted.
+
+Result: `Desktop`.
+
+Return desktop geometry, per-monitor effective DPI, and a configuration revision
+together. Prefer this method when choosing a placement. `agent.bounds` and
+`agent.monitors` use the same native observation path but are separate requests.
 
 ### `agent.bounds`
 
@@ -744,7 +806,12 @@ Params:
 
 Result: `Window Snapshot`.
 
-Move and resize the window. Return the updated snapshot.
+Move and resize the outer rectangle in physical screen coordinates, including
+for child windows. Return an updated snapshot. Applications may constrain or
+subsequently adjust their bounds; completion does not mean the requested
+placement or rendering is stable. The TypeScript `waitForPlacement` helper
+checks the expected placement using `agent.desktop` and `window.snapshot`;
+it does not require a separate native wait method.
 
 ### `window.close`
 
@@ -1333,7 +1400,7 @@ when no event log query is supplied.
 1. Listen on a TCP port and read/write 20-byte `TRVR` frames.
 2. Implement optional auth challenge/response, including the NUL byte in the
    HMAC message prefix.
-3. Send `agent.ready` with protocol version `2026-09-09`, platform `windows`,
+3. Send `agent.ready` with protocol version `2026-09-09.1`, platform `windows`,
    and a string feature array.
 4. Decode JSON request frames and return matching JSON response frames.
 5. Implement binary transfer chunk encode/decode, contiguous sequence

@@ -113,3 +113,176 @@ describe('desktop observations', () => {
     }
   });
 });
+
+describe('placement and diagnostics', () => {
+  it('waits for the requested monitor and DPI and resets stability after a failed observation', async () => {
+    const placed = {
+      ...defaultFakeWindow,
+      bounds: { x: 32, y: 32, width: 400, height: 300 },
+      monitorId: primary.id,
+      dpi: 144,
+      dpiAwareness: 'per-monitor-v2' as const,
+    };
+    const samples = [
+      { ...placed, title: 'wrong monitor', monitorId: left.id },
+      { ...placed, title: 'wrong DPI', dpi: 96 },
+      { ...placed, title: 'first match' },
+      null,
+      { ...placed, title: 'match after failure' },
+      { ...placed, title: 'settled' },
+    ];
+    let index = 0;
+    const fake = await startFakeTcpAgent({
+      monitors: [primary, left],
+      beforeRequest: (method) => {
+        if (method !== 'window.snapshot') return undefined;
+        const sample = samples[Math.min(index++, samples.length - 1)];
+        if (sample === null)
+          return {
+            code: 'OPERATION_FAILED',
+            message: 'Temporary observation failure.',
+          };
+        fake.setWindows([sample!]);
+        return undefined;
+      },
+    });
+    const agent = await connectRemoteAgent({
+      host: fake.host,
+      port: fake.port,
+    });
+    try {
+      const desktop = await agent.desktop();
+      const window = (await agent.windows())[0]!;
+      const result = await window.waitForPlacement(
+        {
+          bounds: placed.bounds,
+          monitorId: primary.id,
+          dpi: 144,
+          desktopRevision: desktop.revision,
+        },
+        { intervalMs: 1 }
+      );
+      expect(result).toMatchObject({ ...placed, title: 'settled' });
+    } finally {
+      agent.release();
+      await fake.close();
+    }
+  });
+
+  it('fails when the desktop changes between the placement observations', async () => {
+    const fake = await startFakeTcpAgent({
+      monitors: [primary],
+      beforeRequest: (method) => {
+        if (method === 'window.snapshot')
+          fake.setMonitors([{ ...primary, dpi: 120, scaleFactor: 1.25 }]);
+        return undefined;
+      },
+    });
+    const agent = await connectRemoteAgent({
+      host: fake.host,
+      port: fake.port,
+    });
+    try {
+      const revision = (await agent.desktop()).revision;
+      const window = (await agent.windows())[0]!;
+      await expect(
+        window.waitForPlacement({
+          bounds: window.bounds,
+          desktopRevision: revision,
+        })
+      ).rejects.toMatchObject({ code: 'DESKTOP_CHANGED' });
+    } finally {
+      agent.release();
+      await fake.close();
+    }
+  });
+
+  it.each([
+    { ...defaultFakeWindow, minimized: true },
+    { ...defaultFakeWindow, visible: false },
+    { ...defaultFakeWindow, monitorId: null },
+    { ...defaultFakeWindow, dpi: null },
+  ])(
+    'does not accept unavailable or undisplayed placement: %j',
+    async (snapshot) => {
+      const fake = await startFakeTcpAgent({ windows: [snapshot] });
+      const agent = await connectRemoteAgent({
+        host: fake.host,
+        port: fake.port,
+      });
+      try {
+        const window = (await agent.windows())[0]!;
+        await expect(
+          window.waitForPlacement(
+            { bounds: window.bounds, dpi: 96 },
+            { stableIterations: 1, timeoutMs: 0 }
+          )
+        ).rejects.toMatchObject({ code: 'TIMEOUT' });
+      } finally {
+        agent.release();
+        await fake.close();
+      }
+    }
+  );
+
+  it('rejects invalid placement conditions before waiting', async () => {
+    const fake = await startFakeTcpAgent({});
+    const agent = await connectRemoteAgent({
+      host: fake.host,
+      port: fake.port,
+    });
+    try {
+      const window = (await agent.windows())[0]!;
+      for (const expected of [
+        {},
+        { dpi: 0 },
+        { monitorId: '' },
+        { bounds: { ...window.bounds, width: -1 } },
+      ]) {
+        await expect(window.waitForPlacement(expected)).rejects.toMatchObject({
+          code: 'INVALID_ARGUMENT',
+        });
+      }
+      await expect(
+        window.waitForPlacement({ dpi: 96 }, { stableIterations: 0 })
+      ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    } finally {
+      agent.release();
+      await fake.close();
+    }
+  });
+
+  it('records desktop observations before and after diagnostics acquisition', async () => {
+    const fake = await startFakeTcpAgent({
+      monitors: [primary],
+      beforeRequest: (method) => {
+        if (method === 'agent.screenshot') fake.setMonitors([left, primary]);
+        return undefined;
+      },
+    });
+    const agent = await connectRemoteAgent({
+      host: fake.host,
+      port: fake.port,
+    });
+    try {
+      const before = await agent.desktop();
+      const capture = await agent.diagnostics.capture();
+      const after = await agent.desktop();
+      expect(before.revision).not.toBe(after.revision);
+      expect(capture).toMatchObject({
+        desktop: before,
+        desktopAfter: after,
+        bounds: before.bounds,
+        monitors: before.monitors,
+      });
+      expect(capture.windows[0]).toMatchObject({
+        dpi: 96,
+        dpiAwareness: 'unaware',
+        monitorId: 'monitor-1',
+      });
+    } finally {
+      agent.release();
+      await fake.close();
+    }
+  });
+});

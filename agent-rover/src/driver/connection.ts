@@ -71,6 +71,7 @@ import type {
   RemoteKeyboardPressOptions,
   RemoteMonitor,
   RemoteDesktop,
+  RemoteWindowPlacement,
   WindowDpiAwareness,
   RemoteMouseButtonOptions,
   RemoteMouseClickOptions,
@@ -1391,6 +1392,52 @@ const agentScreenshotOptionsToJson = (
         rect: rectToJson(options.rect),
       };
 
+const validatePlacement = (expected: RemoteWindowPlacement): void => {
+  if (
+    expected.bounds === undefined &&
+    expected.monitorId === undefined &&
+    expected.dpi === undefined
+  ) {
+    throw createRemoteAgentError(
+      'INVALID_ARGUMENT',
+      'Placement requires bounds, monitorId, or dpi.'
+    );
+  }
+  for (const value of [expected.monitorId, expected.desktopRevision]) {
+    if (
+      value !== undefined &&
+      (typeof value !== 'string' || value.length === 0)
+    ) {
+      throw createRemoteAgentError(
+        'INVALID_ARGUMENT',
+        'Placement identifiers must be nonempty strings.'
+      );
+    }
+  }
+  if (
+    expected.dpi !== undefined &&
+    (!Number.isSafeInteger(expected.dpi) || expected.dpi <= 0)
+  ) {
+    throw createRemoteAgentError(
+      'INVALID_ARGUMENT',
+      'Placement DPI must be a positive integer.'
+    );
+  }
+  if (expected.bounds !== undefined) {
+    const rect = expected.bounds;
+    if (
+      ![rect.x, rect.y, rect.width, rect.height].every(Number.isSafeInteger) ||
+      rect.width <= 0 ||
+      rect.height <= 0
+    ) {
+      throw createRemoteAgentError(
+        'INVALID_ARGUMENT',
+        'Placement bounds require integer coordinates and positive dimensions.'
+      );
+    }
+  }
+};
+
 const rectKey = (rect: ScreenRect): string =>
   `${String(rect.x)},${String(rect.y)},${String(rect.width)},${String(
     rect.height
@@ -2240,6 +2287,96 @@ export const connectRemoteAgent = async (
           return;
         }
         throw new Error(`Window is still visible: ${snapshot.id}.`);
+      }, options);
+    },
+    waitForPlacement: async (expected, options): Promise<AppWindow> => {
+      validatePlacement(expected);
+      const requiredIterations = options?.stableIterations ?? 2;
+      if (
+        !Number.isSafeInteger(requiredIterations) ||
+        requiredIterations <= 0
+      ) {
+        throw createRemoteAgentError(
+          'INVALID_ARGUMENT',
+          'stableIterations must be a positive safe integer.'
+        );
+      }
+      let previousKey: string | undefined;
+      let stableIterations = 0;
+      const readDesktop = async (): Promise<RemoteDesktop> => {
+        const desktop = parseDesktop(
+          await requestJson('agent.desktop', undefined)
+        );
+        if (
+          expected.desktopRevision !== undefined &&
+          desktop.revision !== expected.desktopRevision
+        ) {
+          throw createRemoteAgentError(
+            'DESKTOP_CHANGED',
+            'Desktop configuration differs from the placement revision. Re-read the desktop and choose a new placement.'
+          );
+        }
+        return desktop;
+      };
+      return await waitForResult(async () => {
+        let current: AppWindowSnapshot;
+        let desktop: RemoteDesktop;
+        try {
+          const before = await readDesktop();
+          current = parseWindowSnapshot(
+            await requestJson('window.snapshot', { windowId: snapshot.id })
+          );
+          desktop = await readDesktop();
+          if (before.revision !== desktop.revision)
+            throw new Error('Desktop changed during placement observation.');
+          if (
+            !current.visible ||
+            current.minimized ||
+            current.monitorId === null ||
+            !desktop.monitors.some(
+              (monitor) => monitor.id === current.monitorId
+            )
+          ) {
+            throw new Error('Window is not displayed on an available monitor.');
+          }
+          if (
+            (expected.bounds !== undefined &&
+              rectKey(expected.bounds) !== rectKey(current.bounds)) ||
+            (expected.monitorId !== undefined &&
+              expected.monitorId !== current.monitorId) ||
+            (expected.dpi !== undefined && expected.dpi !== current.dpi)
+          ) {
+            throw new Error(
+              'Window has not reached the requested placement: ' +
+                JSON.stringify({
+                  bounds: current.bounds,
+                  monitorId: current.monitorId,
+                  dpi: current.dpi,
+                })
+            );
+          }
+        } catch (error) {
+          // A failed observation breaks consecutiveness, including transport and
+          // native observation failures that the shared wait helper can retry.
+          previousKey = undefined;
+          stableIterations = 0;
+          throw error;
+        }
+        const key = JSON.stringify([
+          rectKey(current.bounds),
+          rectKey(current.frameBounds),
+          rectKey(current.clientBounds),
+          current.monitorId,
+          current.dpi,
+          current.dpiAwareness,
+          current.maximized,
+          desktop.revision,
+        ]);
+        stableIterations = previousKey === key ? stableIterations + 1 : 1;
+        previousKey = key;
+        if (stableIterations >= requiredIterations)
+          return createWindowProxy(current);
+        throw new Error('Window placement has not remained stable yet.');
       }, options);
     },
     waitForStableBounds: async (
@@ -3876,7 +4013,8 @@ export const connectRemoteAgent = async (
     const maxDescendantDepth = validateDiagnosticsOptions(options);
     const includeDescendants = options?.includeDescendants ?? false;
     const capturedAt = new Date().toISOString();
-    const bounds = parseRect(await requestJson('agent.bounds', undefined));
+    const desktop = parseDesktop(await requestJson('agent.desktop', undefined));
+    const bounds = desktop.bounds;
     const screenshot = await parseScreenshot(
       await requestJson(
         'agent.screenshot',
@@ -3896,9 +4034,7 @@ export const connectRemoteAgent = async (
       )
     );
     const cursor = parseCursor(await requestJson('agent.cursor', undefined));
-    const monitors = parseMonitorArray(
-      await requestJson('agent.monitors', undefined)
-    );
+    const monitors = desktop.monitors;
     const eventLogs = parseEventLogArray(
       await requestJson(
         'eventLogs.read',
@@ -3907,6 +4043,8 @@ export const connectRemoteAgent = async (
     );
 
     return {
+      desktop,
+      desktopAfter: parseDesktop(await requestJson('agent.desktop', undefined)),
       activeWindow: findActiveDiagnosticsWindow(windows),
       bounds,
       capturedAt,

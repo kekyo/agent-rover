@@ -5,11 +5,15 @@
 
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
-import { connectRemoteAgent, type RemoteAgent } from '../src/index';
+import {
+  connectRemoteAgent,
+  type RemoteAgent,
+  type AppWindowSnapshot,
+} from '../src/index';
 import { waitForResult } from '../src/wait';
 import { nativeTestPaths } from './helpers/native-paths';
 import { connectWindowsBootstrap } from './helpers/windows-bootstrap';
@@ -20,7 +24,9 @@ const enabled = Boolean(host && process.env.AGENT_ROVER_WIN11_TOKEN2);
 it.skipIf(!enabled)(
   'observes physical placement and DPI for unaware, system and per-monitor windows on Windows',
   async () => {
-    const { agentsDirectory } = nativeTestPaths(import.meta.url);
+    const { agentsDirectory, repositoryDirectory } = nativeTestPaths(
+      import.meta.url
+    );
     const local = await mkdtemp(join(tmpdir(), 'agent-rover-desktop-win-'));
     const fixture = join(local, 'window.exe');
     const run = async (file: string, args: string[]): Promise<void> => {
@@ -119,6 +125,7 @@ it.skipIf(!enabled)(
         expect(monitor.dpi).toBeGreaterThan(0);
         expect(monitor.scaleFactor).toBe(monitor.dpi! / 96);
       }
+      const placements: AppWindowSnapshot[] = [];
       for (const mode of ['unaware', 'system', 'per-monitor-v2'] as const) {
         const process = await agent.processes.launchManaged({
           path: `${directory}\\window.exe`,
@@ -143,7 +150,18 @@ it.skipIf(!enabled)(
               height: 300,
             };
             window = await window.setBounds(bounds);
-            window = await window.waitForStableBounds();
+            const expectedDpi =
+              mode === 'unaware'
+                ? 96
+                : mode === 'system'
+                  ? systemDpi
+                  : monitor.dpi!;
+            window = await window.waitForPlacement({
+              bounds,
+              monitorId: monitor.id,
+              dpi: expectedDpi,
+              desktopRevision: desktop.revision,
+            });
             expect(window.bounds).toEqual(bounds);
             expect(window.monitorId).toBe(monitor.id);
             expect(window.dpiAwareness).toBe(mode);
@@ -169,12 +187,19 @@ it.skipIf(!enabled)(
             const capture = await window.screenshot();
             expect(capture.bounds).toEqual(window.frameBounds);
             expect(capture.clipped).toBe(false);
+            placements.push({ ...window });
           }
           expect((await agent.desktop()).revision).toBe(desktop.revision);
         } finally {
           await process.releaseAsync();
         }
       }
+      const reports = join(repositoryDirectory, 'test-results');
+      await mkdir(reports, { recursive: true });
+      await writeFile(
+        join(reports, 'windows-desktop.json'),
+        JSON.stringify({ desktop, placements }, null, 2)
+      );
     } finally {
       agent?.release();
       try {

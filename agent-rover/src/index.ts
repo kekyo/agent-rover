@@ -565,6 +565,18 @@ export interface RemoteStableBoundsWaitOptions extends RemoteWaitOptions {
   readonly stableIterations?: number;
 }
 
+/** Expected placement in physical screen pixels. At least one placement condition is required. */
+export interface RemoteWindowPlacement {
+  /** Required outer rectangle, including invisible resize borders. */
+  readonly bounds?: ScreenRect;
+  /** Required associated monitor identifier. */
+  readonly monitorId?: string;
+  /** Required target window DPI; use monitor DPI only for per-monitor aware targets. */
+  readonly dpi?: number;
+  /** Expected desktop revision; a mismatch fails immediately with DESKTOP_CHANGED. */
+  readonly desktopRevision?: string;
+}
+
 /** Options for recursively listing window descendants. */
 export interface AppWindowDescendantsOptions {
   /** Maximum descendant depth to include. */
@@ -616,7 +628,7 @@ export interface AppWindow extends AppWindowSnapshot {
   readonly findDescendants: (
     query: RemoteWindowQuery
   ) => Promise<readonly AppWindow[]>;
-  /** Captures this window bounds as a PNG screenshot. */
+  /** Captures this window visible frame as a PNG screenshot. */
   readonly screenshot: () => Promise<AppWindowScreenshot>;
   /** Captures this window as an H.264 MP4 video. */
   readonly recordVideo: {
@@ -667,6 +679,19 @@ export interface AppWindow extends AppWindowSnapshot {
   readonly waitForStableBounds: (
     options?: RemoteStableBoundsWaitOptions
   ) => Promise<AppWindow>;
+  /**
+   * Waits for a visible, non-minimized window to reach and retain its placement.
+   * @param expected At least one of bounds, monitorId, or dpi; optionally a desktop revision.
+   * @param options Polling deadline, interval, and consecutive stable observations (default 2).
+   * @returns A new snapshot matching the expected placement.
+   * @remarks Observes desktop configuration before and after each window snapshot.
+   * Stability includes outer, frame and client bounds, DPI, awareness and monitor.
+   * This does not establish application readiness, rendering completion, or absence of occlusion.
+   */
+  readonly waitForPlacement: (
+    expected: RemoteWindowPlacement,
+    options?: RemoteStableBoundsWaitOptions
+  ) => Promise<AppWindow>;
   /** Requests that this window closes. */
   readonly close: () => Promise<void>;
 }
@@ -675,7 +700,7 @@ export interface AppWindow extends AppWindowSnapshot {
 export interface AppWindowScreenshot {
   /** PNG image buffer. */
   readonly image: Buffer;
-  /** Window bounds used for capture. */
+  /** Visible frame bounds used for capture. */
   readonly bounds: ScreenRect;
   /** Visible bounds included in the screenshot. */
   readonly visibleBounds: ScreenRect;
@@ -1066,7 +1091,11 @@ export interface RemoteDiagnosticsCaptureOptions {
 export interface RemoteDiagnosticsCapture {
   /** Capture timestamp as an ISO string. */
   readonly capturedAt: string;
-  /** Remote agent bounds. */
+  /** Desktop observation before screenshot and window acquisition. */
+  readonly desktop: RemoteDesktop;
+  /** Desktop observation after acquisition; compare revisions to detect a changed configuration. */
+  readonly desktopAfter: RemoteDesktop;
+  /** Remote agent bounds from the initial desktop observation. */
   readonly bounds: ScreenRect;
   /** Screen screenshot. */
   readonly screenshot: RemoteScreenshot;
@@ -1076,7 +1105,7 @@ export interface RemoteDiagnosticsCapture {
   readonly activeWindow: AppWindowSnapshot | null;
   /** Cursor state at capture time. */
   readonly cursor: RemoteCursor;
-  /** Monitor list at capture time. */
+  /** Monitor list from the initial desktop observation. */
   readonly monitors: readonly RemoteMonitor[];
   /** Event log entries collected during capture. */
   readonly eventLogs: readonly EventLogEntry[];
@@ -1269,6 +1298,7 @@ export type RemoteAgentErrorCode =
   | 'OPERATION_FAILED'
   | 'AUTHENTICATION_FAILED'
   | 'CONNECTION_FAILED'
+  | 'DESKTOP_CHANGED'
   | 'DISCONNECTED'
   | 'HANDSHAKE_FAILED'
   | 'INVALID_ARGUMENT'
