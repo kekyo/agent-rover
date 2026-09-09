@@ -3,6 +3,7 @@
 #include <cstdint>
 #define TRUE 1
 #define FALSE 0
+#define WINAPI
 #define CALLBACK
 #define MONITORINFOF_PRIMARY 1
 #define MONITOR_DEFAULTTONULL 0
@@ -11,6 +12,10 @@
 #define WS_POPUP 0x80000000
 #define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 reinterpret_cast<void*>(-4)
 #define DPI_AWARENESS_CONTEXT_UNAWARE_GDISCALED reinterpret_cast<void*>(-5)
+using HMODULE = void*;
+using FARPROC = void (*)();
+HMODULE GetModuleHandleW(const wchar_t*);
+FARPROC GetProcAddress(HMODULE, const char*);
 using BOOL = int;
 using DWORD = unsigned long;
 using UINT = unsigned int;

@@ -6,7 +6,6 @@
 #include "win32_files.h"
 
 #include <windows.h>
-#include <bcrypt.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -195,37 +194,11 @@ bool HashFileSha256(
     return false;
   }
 
-  BCRYPT_ALG_HANDLE algorithm = nullptr;
-  BCRYPT_HASH_HANDLE hash = nullptr;
-  DWORD object_bytes = 0;
-  DWORD digest_bytes = 0;
-  DWORD received_bytes = 0;
-  NTSTATUS status = BCryptOpenAlgorithmProvider(
-      &algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0);
-  if (BCRYPT_SUCCESS(status)) {
-    status = BCryptGetProperty(
-        algorithm, BCRYPT_OBJECT_LENGTH,
-        reinterpret_cast<PUCHAR>(&object_bytes), sizeof(object_bytes),
-        &received_bytes, 0);
-  }
-  if (BCRYPT_SUCCESS(status)) {
-    status = BCryptGetProperty(
-        algorithm, BCRYPT_HASH_LENGTH,
-        reinterpret_cast<PUCHAR>(&digest_bytes), sizeof(digest_bytes),
-        &received_bytes, 0);
-  }
-  std::vector<unsigned char> hash_object(object_bytes);
-  std::vector<unsigned char> digest(digest_bytes);
-  if (BCRYPT_SUCCESS(status)) {
-    status = BCryptCreateHash(
-        algorithm, &hash, hash_object.data(), object_bytes,
-        nullptr, 0, 0);
-  }
-
+  auto hash = CreateSha256();
   std::vector<unsigned char> buffer(64 * 1024);
   bool file_read_succeeded = true;
   DWORD file_read_error = ERROR_SUCCESS;
-  while (BCRYPT_SUCCESS(status)) {
+  while (true) {
     DWORD read = 0;
     if (!ReadFile(
             file, buffer.data(), static_cast<DWORD>(buffer.size()),
@@ -237,27 +210,14 @@ bool HashFileSha256(
     if (read == 0) {
       break;
     }
-    status = BCryptHashData(hash, buffer.data(), read, 0);
-  }
-  if (file_read_succeeded && BCRYPT_SUCCESS(status)) {
-    status = BCryptFinishHash(hash, digest.data(), digest_bytes, 0);
-  }
-
-  if (hash != nullptr) {
-    BCryptDestroyHash(hash);
-  }
-  if (algorithm != nullptr) {
-    BCryptCloseAlgorithmProvider(algorithm, 0);
+    UpdateSha256(&hash, buffer.data(), read);
   }
   CloseHandle(file);
   if (!file_read_succeeded) {
     *error = MakeOperationError("ReadFile", WideToUtf8(wide_path), file_read_error);
     return false;
   }
-  if (!BCRYPT_SUCCESS(status) || digest_bytes != 32) {
-    *error = "BCrypt SHA-256 file hashing failed.";
-    return false;
-  }
+  const auto digest = FinishSha256(hash);
 
   static const char* digits = "0123456789abcdef";
   sha256->clear();

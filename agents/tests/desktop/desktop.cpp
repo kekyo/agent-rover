@@ -4,7 +4,10 @@
 #include <cwchar>
 #include <iostream>
 #include <string>
+#include <cstring>
 
+static bool legacy = false;
+static bool system_aware = false;
 static int enumeration = 0;
 static bool changing = false;
 static bool unavailable = false;
@@ -58,16 +61,43 @@ UINT GetDpiForWindow(HWND hwnd) {
   if (hwnd == Left()) return 96;
   return changing ? 120 + enumeration : 144;
 }
-DPI_AWARENESS_CONTEXT GetThreadDpiAwarenessContext() { return DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2; }
+DPI_AWARENESS_CONTEXT GetThreadDpiAwarenessContext() { return system_aware ? reinterpret_cast<void*>(11) : DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2; }
 DPI_AWARENESS_CONTEXT GetWindowDpiAwarenessContext(HWND hwnd) {
   return hwnd == Target() ? reinterpret_cast<void*>(10 + awareness) : DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2;
 }
 DPI_AWARENESS GetAwarenessFromDpiAwarenessContext(DPI_AWARENESS_CONTEXT value) {
-  return value == DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 ? DPI_AWARENESS_PER_MONITOR_AWARE : awareness;
+  return value == DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 ? DPI_AWARENESS_PER_MONITOR_AWARE : (system_aware ? DPI_AWARENESS_SYSTEM_AWARE : awareness);
 }
 BOOL AreDpiAwarenessContextsEqual(DPI_AWARENESS_CONTEXT a, DPI_AWARENESS_CONTEXT b) { return a == b; }
 static void Check(bool condition, const char* message) { if (!condition) { std::cerr << message << '\n'; std::exit(1); } }
-int main() {
+HMODULE GetModuleHandleW(const wchar_t*) { return reinterpret_cast<void*>(1); }
+FARPROC GetProcAddress(HMODULE, const char* name) {
+  if (legacy) return nullptr;
+#define RESOLVE(api) if (std::strcmp(name, #api) == 0) return reinterpret_cast<FARPROC>(&api)
+  RESOLVE(GetDpiForWindow);
+  RESOLVE(GetThreadDpiAwarenessContext);
+  RESOLVE(GetWindowDpiAwarenessContext);
+  RESOLVE(GetAwarenessFromDpiAwarenessContext);
+  RESOLVE(AreDpiAwarenessContextsEqual);
+#undef RESOLVE
+  return nullptr;
+}
+int main(int argc, char** argv) {
+  legacy = argc > 1 && std::strcmp(argv[1], "legacy") == 0;
+  system_aware = argc > 1 && std::strcmp(argv[1], "system") == 0;
+  if (legacy || system_aware) {
+    agent_rover::DesktopInfo desktop = {};
+    std::string error;
+    Check(agent_rover::ReadDesktop(&desktop, &error), "basic geometry without per-monitor APIs");
+    Check(desktop.bounds.x == -1920 && desktop.monitors.size() == 2, "legacy monitor geometry");
+    Check(desktop.monitors[1].dpi == 0, "do not report system DPI as monitor DPI");
+    if (legacy) {
+      Check(agent_rover::ReadWindowDpi(Target()) == 0, "missing DPI API returns unknown");
+      Check(agent_rover::ReadWindowDpiAwareness(Target()).empty(), "missing awareness API returns unknown");
+    }
+    Check(live_probes == 0, "no leftover probes");
+    return 0;
+  }
   agent_rover::DesktopInfo desktop = {};
   std::string error;
   Check(agent_rover::ReadDesktop(&desktop, &error), "read desktop");

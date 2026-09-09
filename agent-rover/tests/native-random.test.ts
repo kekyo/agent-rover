@@ -10,12 +10,12 @@ import { join } from 'node:path';
 import { it } from 'vitest';
 import { nativeTestPaths } from './helpers/native-paths';
 
-it('observes mixed DPI, negative origins, configuration changes, and unavailable DPI', async () => {
+it('generates authentication randomness with modern and legacy APIs and reports failures', async () => {
   const { agentsDirectory, windowsAgentDirectory } = nativeTestPaths(
     import.meta.url
   );
-  const directory = await mkdtemp(join(tmpdir(), 'agent-rover-desktop-'));
-  const executable = join(directory, 'desktop-test');
+  const directory = await mkdtemp(join(tmpdir(), 'agent-rover-random-'));
+  const executable = join(directory, 'random-test');
   const run = async (file: string, args: string[]): Promise<void> => {
     await new Promise<void>((resolve, reject) => {
       execFile(file, args, (error, stdout, stderr) => {
@@ -27,18 +27,28 @@ it('observes mixed DPI, negative origins, configuration changes, and unavailable
   try {
     await run('g++', [
       '-std=c++20',
+      '-D_WIN32',
       '-I',
-      join(agentsDirectory, 'tests/desktop/fake'),
+      join(agentsDirectory, 'tests/random/fake'),
       '-I',
       windowsAgentDirectory,
-      join(agentsDirectory, 'tests/desktop/desktop.cpp'),
-      join(windowsAgentDirectory, 'win32_desktop.cpp'),
+      join(agentsDirectory, 'tests/random/random.cpp'),
+      join(windowsAgentDirectory, 'auth.cpp'),
+      join(windowsAgentDirectory, 'binary_codec.cpp'),
+      join(windowsAgentDirectory, 'win32_random.cpp'),
       '-o',
       executable,
     ]);
-    await run(executable, []);
-    await run(executable, ['legacy']);
-    await run(executable, ['system']);
+    for (const mode of [
+      'modern',
+      'legacy',
+      'missing-export',
+      'legacy-failure',
+      'acquire-failure',
+      'cng-failure',
+      'open-failure',
+    ])
+      await run(executable, [mode]);
   } finally {
     await rm(directory, { force: true, recursive: true });
   }

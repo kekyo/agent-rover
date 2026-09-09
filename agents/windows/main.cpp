@@ -38,12 +38,6 @@ int wmain(int argc, wchar_t** argv) {
     return 1;
   }
 
-  if (GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext()) !=
-      DPI_AWARENESS_PER_MONITOR_AWARE) {
-    std::fprintf(stderr, "Per-monitor DPI awareness is required. Check application compatibility settings.\n");
-    return 1;
-  }
-
   agent_rover::ServerOptions options = {
       parsed.options.host,
       parsed.options.port,

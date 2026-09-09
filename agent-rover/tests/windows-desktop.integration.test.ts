@@ -18,8 +18,8 @@ import { waitForResult } from '../src/wait';
 import { nativeTestPaths } from './helpers/native-paths';
 import { connectWindowsBootstrap } from './helpers/windows-bootstrap';
 
-const host = process.env.AGENT_ROVER_WIN11_HOST2;
-const enabled = Boolean(host && process.env.AGENT_ROVER_WIN11_TOKEN2);
+const host = process.env.AGENT_ROVER_WIN11_HOST;
+const enabled = Boolean(host && process.env.AGENT_ROVER_WIN11_TOKEN);
 
 it.skipIf(!enabled)(
   'observes physical placement and DPI for unaware, system and per-monitor windows on Windows',
@@ -143,10 +143,12 @@ it.skipIf(!enabled)(
             return (JSON.parse(output) as { systemDpi: number }).systemDpi;
           });
           for (const monitor of desktop.monitors) {
+            // Multiples of three are exactly representable at both 96 and
+            // 144 DPI, including Windows bitmap scaling of unaware windows.
             const bounds = {
-              x: monitor.workArea.x + 32,
-              y: monitor.workArea.y + 32,
-              width: 400,
+              x: monitor.workArea.x + 30,
+              y: monitor.workArea.y + 30,
+              width: 402,
               height: 300,
             };
             window = await window.setBounds(bounds);
@@ -178,8 +180,8 @@ it.skipIf(!enabled)(
             const childBounds = {
               x: window.clientBounds.x + 12,
               y: window.clientBounds.y + 18,
-              width: 100,
-              height: 40,
+              width: 102,
+              height: 42,
             };
             const movedChild = await child.setBounds(childBounds);
             expect(movedChild.bounds).toEqual(childBounds);

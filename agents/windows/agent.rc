@@ -1,3 +1,3 @@
-// Physical screen coordinates require per-monitor DPI awareness.
+// Select the best DPI awareness supported by Windows; legacy systems use dpiAware.
 #include <windows.h>
 1 RT_MANIFEST "agent.manifest"

@@ -27,10 +27,10 @@ SCREW_UP ?= ../node_modules/.bin/screw-up
 CXXFLAGS ?= -std=c++20 -Os -s -fno-exceptions -fno-rtti
 CPPFLAGS ?= -DPSAPI_VERSION=1
 CPPFLAGS += -I$(GENERATED_DIR)
-CPPFLAGS_AMD64 ?= -D_WIN32_WINNT=0x0A00
-CPPFLAGS_I686 ?= -D_WIN32_WINNT=0x0A00
+CPPFLAGS_AMD64 ?= -D_WIN32_WINNT=0x0502
+CPPFLAGS_I686 ?= -D_WIN32_WINNT=0x0501
 LDFLAGS ?= -static -static-libgcc -static-libstdc++ -s -municode
-LDLIBS ?= -luser32 -lgdi32 -lpsapi -ladvapi32 -lws2_32 -lbcrypt -lole32 -lmfuuid
+LDLIBS ?= -luser32 -lgdi32 -lpsapi -ladvapi32 -lws2_32 -lole32 -lmfuuid
 
 .PHONY: all amd64 i686 clean print-output remove-legacy-output version-header
 

@@ -26,11 +26,11 @@ export interface WindowsBootstrap {
 
 /** Connects to the explicitly configured Windows 11 test machine. */
 export const connectWindowsBootstrap = async (): Promise<WindowsBootstrap> => {
-  const host = process.env.AGENT_ROVER_WIN11_HOST2;
-  const authToken = process.env.AGENT_ROVER_WIN11_TOKEN2;
+  const host = process.env.AGENT_ROVER_WIN11_HOST;
+  const authToken = process.env.AGENT_ROVER_WIN11_TOKEN;
   if (!host || !authToken)
     throw new Error(
-      'AGENT_ROVER_WIN11_HOST2 and AGENT_ROVER_WIN11_TOKEN2 are required.'
+      'AGENT_ROVER_WIN11_HOST and AGENT_ROVER_WIN11_TOKEN are required.'
     );
   const pending = createPendingRequestTable({ requestTimeoutMs: 30000 });
   let readyResolve: () => void = () => {};

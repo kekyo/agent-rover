@@ -62,6 +62,7 @@ typedef unsigned long DWORD;
 typedef void* HMODULE;
 typedef long HRESULT;
 typedef void* HWND;
+typedef void* DPI_AWARENESS_CONTEXT;
 typedef const char* LPCSTR;
 typedef const wchar_t* LPCWSTR;
 typedef void* PVOID;
@@ -85,6 +86,7 @@ extern "C" HWND GetParent(HWND window);
 extern "C" BOOL MoveWindow(HWND window, int x, int y, int width, int height, BOOL repaint);
 extern "C" UINT GetSystemDirectoryW(wchar_t* buffer, UINT size);
 extern "C" HMODULE LoadLibraryW(LPCWSTR path);
+extern "C" HMODULE GetModuleHandleW(LPCWSTR name);
 extern "C" FARPROC GetProcAddress(HMODULE module, LPCSTR name);
 extern "C" BOOL FreeLibrary(HMODULE module);
 
@@ -199,6 +201,8 @@ extern "C" UINT GetSystemDirectoryW(wchar_t* buffer, UINT size) {
   std::wmemcpy(buffer, path, length + 1);
   return length;
 }
+
+extern "C" HMODULE GetModuleHandleW(LPCWSTR) { return nullptr; }
 
 extern "C" HMODULE LoadLibraryW(LPCWSTR path) {
   loaded_library_path = path;

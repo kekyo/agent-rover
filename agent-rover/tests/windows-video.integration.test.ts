@@ -27,8 +27,8 @@ const repositoryDirectory = join(testDirectory, '..', '..');
 const agentDirectory = join(repositoryDirectory, 'agents');
 const builtAgentPath = join(agentDirectory, 'dist', 'agent-amd64.exe');
 const testAgentPort = 39407;
-const hostEnvironmentName = 'AGENT_ROVER_WIN11_HOST2';
-const tokenEnvironmentName = 'AGENT_ROVER_WIN11_TOKEN2';
+const hostEnvironmentName = 'AGENT_ROVER_WIN11_HOST';
+const tokenEnvironmentName = 'AGENT_ROVER_WIN11_TOKEN';
 
 const execFileResult = async (
   file: string,
@@ -89,7 +89,7 @@ if (
   !hasWin11Environment()
 )
   throw new Error(
-    'Windows acceptance requires AGENT_ROVER_WIN11_HOST2 and AGENT_ROVER_WIN11_TOKEN2.'
+    'Windows acceptance requires AGENT_ROVER_WIN11_HOST and AGENT_ROVER_WIN11_TOKEN.'
   );
 const win11It = hasWin11Environment() ? it : it.skip;
 

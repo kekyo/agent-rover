@@ -9,8 +9,7 @@
 #include "binary_codec.h"
 
 #ifdef _WIN32
-#include <windows.h>
-#include <bcrypt.h>
+#include "win32_random.h"
 #endif
 
 #include <algorithm>
@@ -24,16 +23,7 @@ static bool FillRandomBytes(
     std::string* error) {
   bytes->assign(byte_count, 0);
 #ifdef _WIN32
-  const NTSTATUS status = BCryptGenRandom(
-      nullptr,
-      bytes->data(),
-      static_cast<ULONG>(bytes->size()),
-      BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-  if (!BCRYPT_SUCCESS(status)) {
-    *error = "BCryptGenRandom failed.";
-    return false;
-  }
-  return true;
+  return GenerateSecureRandom(bytes->data(), bytes->size(), error);
 #else
   *error = "Random byte generation is only available on Windows.";
   return false;
