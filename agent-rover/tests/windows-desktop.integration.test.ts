@@ -29,6 +29,7 @@ it.skipIf(!enabled)(
     );
     const local = await mkdtemp(join(tmpdir(), 'agent-rover-desktop-win-'));
     const fixture = join(local, 'window.exe');
+    const testAgentExecutable = join(local, 'agent.exe');
     const run = async (file: string, args: string[]): Promise<void> => {
       await new Promise<void>((resolve, reject) => {
         execFile(
@@ -50,7 +51,14 @@ it.skipIf(!enabled)(
     let agent: RemoteAgent | undefined;
     let deployment: { managedProcessId: number } | undefined;
     try {
-      await run('make', ['amd64']);
+      // Concurrent integration suites must not overwrite each other's objects.
+      await run('make', [
+        'amd64',
+        '-j4',
+        `OBJ_ROOT=${join(local, 'obj')}`,
+        `GENERATED_DIR=${join(local, 'generated')}`,
+        `AMD64_OUTPUT=${testAgentExecutable}`,
+      ]);
       await run('x86_64-w64-mingw32-g++', [
         '-std=c++20',
         '-D_WIN32_WINNT=0x0A00',
@@ -66,10 +74,7 @@ it.skipIf(!enabled)(
         recursive: true,
       });
       const agentPath = `${directory}\\agent.exe`;
-      await bootstrap.upload(
-        agentPath,
-        await readFile(join(agentsDirectory, 'dist/agent-amd64.exe'))
-      );
+      await bootstrap.upload(agentPath, await readFile(testAgentExecutable));
       await bootstrap.upload(
         `${directory}\\window.exe`,
         await readFile(fixture)
