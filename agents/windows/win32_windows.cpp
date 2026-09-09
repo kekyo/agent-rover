@@ -13,6 +13,7 @@
 #include <string>
 
 #include "win32_util.h"
+#include "win32_desktop.h"
 #include "win32_window_bounds.h"
 
 namespace agent_rover {
@@ -191,6 +192,9 @@ static WindowInfo ReadWindowInfo(HWND window, const std::string& parent_id) {
       ReadWindowProcess(process_id),
       {},
       {},
+      ReadWindowMonitorId(window),
+      ReadWindowDpi(window),
+      ReadWindowDpiAwareness(window),
   };
   ReadWindowFrameBounds(window, &info.frame_bounds, nullptr);
   ReadWindowClientBounds(window, &info.client_bounds, nullptr);

@@ -77,6 +77,9 @@ export interface FakeTcpAgentOptions {
   readonly videoData?: Buffer;
   readonly videoRequests?: Record<string, unknown>[];
   readonly windows?: readonly AppWindowSnapshot[];
+  readonly monitors?: readonly (RemoteMonitor & {
+    readonly dpi: number | null;
+  })[];
 }
 
 export interface FakeTcpAgent {
@@ -86,6 +89,7 @@ export interface FakeTcpAgent {
   readonly port: number;
   readonly requestUsedBase64: () => boolean;
   readonly setProcesses: (processes: readonly RemoteProcessSnapshot[]) => void;
+  readonly setMonitors: (monitors: readonly RemoteMonitor[]) => void;
   readonly setWindows: (windows: readonly AppWindowSnapshot[]) => void;
 }
 
@@ -98,6 +102,7 @@ export const defaultFakeCapabilities: RemoteAgentCapabilities = {
     'agent.bounds',
     'agent.cursor',
     'agent.monitors',
+    'agent.desktop',
     'agent.screenshot',
     'agent.recordVideo',
     'windows',
@@ -150,6 +155,9 @@ export const defaultFakeWindow: AppWindowSnapshot = {
   },
   frameBounds: { x: 10, y: 20, width: 640, height: 480 },
   clientBounds: { x: 18, y: 51, width: 624, height: 441 },
+  monitorId: 'monitor-1',
+  dpi: 96,
+  dpiAwareness: 'unaware',
   className: 'Notepad',
   controlId: 0,
   enabled: true,
@@ -176,6 +184,9 @@ export const defaultFakeChildWindow: AppWindowSnapshot = {
   },
   frameBounds: { x: 18, y: 52, width: 120, height: 24 },
   clientBounds: { x: 18, y: 52, width: 120, height: 24 },
+  monitorId: 'monitor-1',
+  dpi: 96,
+  dpiAwareness: 'unaware',
   className: 'Button',
   controlId: 1,
   enabled: true,
@@ -205,6 +216,7 @@ const defaultScreenMonitor: RemoteMonitor = {
   name: 'DISPLAY1',
   primary: true,
   scaleFactor: 1,
+  dpi: 96,
   workArea: {
     height: 728,
     width: 1024,
@@ -401,6 +413,34 @@ export const startFakeTcpAgent = async (
       : { protocolVersion: options.protocolVersionOverride }),
   };
   const windows = [...(options.windows ?? [defaultFakeWindow])];
+  let monitors = [...(options.monitors ?? [defaultScreenMonitor])];
+  const desktop = () => {
+    const sorted = [...monitors].sort((a, b) => a.id.localeCompare(b.id));
+    const x = Math.min(...monitors.map((monitor) => monitor.bounds.x));
+    const y = Math.min(...monitors.map((monitor) => monitor.bounds.y));
+    return {
+      bounds: {
+        x,
+        y,
+        width:
+          Math.max(
+            ...monitors.map(
+              (monitor) => monitor.bounds.x + monitor.bounds.width
+            )
+          ) - x,
+        height:
+          Math.max(
+            ...monitors.map(
+              (monitor) => monitor.bounds.y + monitor.bounds.height
+            )
+          ) - y,
+      },
+      monitors: sorted,
+      revision: createHash('sha256')
+        .update(JSON.stringify(sorted))
+        .digest('hex'),
+    };
+  };
   const childrenByWindowId = Object.fromEntries(
     Object.entries(
       options.childrenByWindowId ?? {
@@ -629,11 +669,14 @@ export const startFakeTcpAgent = async (
           clipboardText = '';
           sendSuccess(id, null);
           return;
+        case 'agent.desktop':
+          sendSuccess(id, toJson(desktop()));
+          return;
         case 'agent.bounds':
-          sendSuccess(id, toJson(defaultScreenBounds));
+          sendSuccess(id, toJson(desktop().bounds));
           return;
         case 'agent.monitors':
-          sendSuccess(id, toJson([defaultScreenMonitor]));
+          sendSuccess(id, toJson(monitors));
           return;
         case 'agent.cursor':
           sendSuccess(id, toJson(defaultScreenCursor));
@@ -1525,6 +1568,9 @@ export const startFakeTcpAgent = async (
       for (const process of nextProcesses) {
         processes.set(process.id, process);
       }
+    },
+    setMonitors: (nextMonitors): void => {
+      monitors = [...nextMonitors];
     },
     setWindows: (nextWindows): void => {
       windows.splice(0, windows.length, ...nextWindows);

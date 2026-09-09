@@ -321,6 +321,14 @@ export interface RemoteAgentCapabilities {
   readonly features: readonly string[];
 }
 
+/** Windows DPI awareness, reported for the target window rather than its process. */
+export type WindowDpiAwareness =
+  | 'unaware'
+  | 'unaware-gdi-scaled'
+  | 'system'
+  | 'per-monitor'
+  | 'per-monitor-v2';
+
 /** Remote top-level or descendant application window. */
 export interface AppWindowSnapshot {
   /** Stable agent-side identifier for this window. */
@@ -335,6 +343,12 @@ export interface AppWindowSnapshot {
   readonly frameBounds: ScreenRect;
   /** Client rectangle in physical screen coordinates; may be empty. */
   readonly clientBounds: ScreenRect;
+  /** Associated monitor, or null when offscreen or unavailable. Minimized windows use their previous placement. */
+  readonly monitorId: string | null;
+  /** DPI applied to this window, or null when unavailable. May differ from monitor DPI. */
+  readonly dpi: number | null;
+  /** Target window DPI awareness, or null when unavailable. */
+  readonly dpiAwareness: WindowDpiAwareness | null;
   /** Whether the platform reports the window as visible. */
   readonly visible: boolean;
   /** Whether this window or its root owner is currently active. */
@@ -756,7 +770,7 @@ export interface CapturedVideoStream
 
 /** Remote monitor geometry. */
 export interface RemoteMonitor {
-  /** Stable monitor identifier within the current screen session. */
+  /** Monitor identifier for the current display configuration; not persistent across reconnects. */
   readonly id: string;
   /** Platform monitor name when available. */
   readonly name: string;
@@ -766,8 +780,25 @@ export interface RemoteMonitor {
   readonly workArea: ScreenRect;
   /** Whether this monitor is the primary monitor. */
   readonly primary: boolean;
-  /** Monitor scale factor relative to 96 DPI. */
-  readonly scaleFactor: number;
+  /** Configured effective DPI, or null when unavailable. Not physical panel density. */
+  readonly dpi: number | null;
+  /** Monitor scale factor relative to 96 DPI, or null when DPI is unavailable. */
+  readonly scaleFactor: number | null;
+}
+
+/** Desktop geometry and DPI observed together. */
+export interface RemoteDesktop {
+  /** Bounding rectangle of all monitors, including gaps without display pixels. */
+  readonly bounds: ScreenRect;
+  /** Monitors in this configuration; select by id or primary rather than array index. */
+  readonly monitors: readonly RemoteMonitor[];
+  /**
+   * Opaque identity of the observed geometry, work areas, monitor IDs, and DPI.
+   * @remarks Equal revisions mean equal observed configurations, not that no
+   * intervening change occurred. Acquisition checks consecutive observations;
+   * it cannot make desktop and window operations atomic.
+   */
+  readonly revision: string;
 }
 
 /** Remote cursor state. */
@@ -1195,6 +1226,12 @@ export interface RemoteAgent extends Releaseable {
   };
   /** Reads the virtual screen bounds. */
   readonly bounds: () => Promise<ScreenRect>;
+  /**
+   * Reads desktop geometry, monitor DPI, and an opaque configuration revision.
+   * @returns Two consecutive matching native observations, or an operation error
+   * if the configuration keeps changing. Re-read after reconnecting or moving windows.
+   */
+  readonly desktop: () => Promise<RemoteDesktop>;
   /** Lists monitors in the current screen session. */
   readonly monitors: () => Promise<readonly RemoteMonitor[]>;
   /** Reads the current cursor state. */

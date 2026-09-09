@@ -494,6 +494,7 @@ static std::string CapabilitiesJson() {
       "\"agent.bounds\","
       "\"agent.cursor\","
       "\"agent.monitors\","
+      "\"agent.desktop\","
       "\"agent.screenshot\","
       "\"windows\","
       "\"window.children\","
@@ -632,6 +633,14 @@ static std::string WindowJson(const WindowInfo& window) {
   AppendRectJson(&output, window.frame_bounds);
   output += ",\"clientBounds\":";
   AppendRectJson(&output, window.client_bounds);
+  output += ",\"monitorId\":";
+  if (window.monitor_id.empty()) output += "null";
+  else AppendJsonString(&output, window.monitor_id);
+  output += ",\"dpi\":";
+  output += window.dpi == 0 ? "null" : std::to_string(window.dpi);
+  output += ",\"dpiAwareness\":";
+  if (window.dpi_awareness.empty()) output += "null";
+  else AppendJsonString(&output, window.dpi_awareness);
   output += ",\"process\":{\"id\":";
   output += std::to_string(window.process.id);
   output += ",\"name\":";
@@ -849,7 +858,9 @@ static std::string MonitorJson(const ScreenMonitor& monitor) {
   output += ",\"primary\":";
   output += monitor.primary ? "true" : "false";
   output += ",\"scaleFactor\":";
-  output += std::to_string(monitor.scale_factor);
+  output += monitor.dpi == 0 ? "null" : std::to_string(monitor.dpi / 96.0);
+  output += ",\"dpi\":";
+  output += monitor.dpi == 0 ? "null" : std::to_string(monitor.dpi);
   output += "}";
   return output;
 }
@@ -1132,6 +1143,19 @@ std::string HandleJsonRequest(
       return FailureResponseJson(id, error);
     }
     return SuccessResponseJson(id, "null");
+  }
+  if (method == "agent.desktop") {
+    DesktopInfo desktop = {};
+    std::string error;
+    if (!ReadDesktop(&desktop, &error)) return FailureResponseJson(id, error);
+    std::string output = "{\"bounds\":";
+    AppendRectJson(&output, desktop.bounds);
+    output += ",\"monitors\":" + MonitorArrayJson(desktop.monitors);
+    output += ",\"revision\":";
+    AppendJsonString(&output, Sha256Hex(std::vector<unsigned char>(
+        desktop.configuration_key.begin(), desktop.configuration_key.end())));
+    output += "}";
+    return SuccessResponseJson(id, output);
   }
   if (method == "agent.bounds") {
     WindowRect bounds = {};

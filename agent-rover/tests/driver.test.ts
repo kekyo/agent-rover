@@ -1791,6 +1791,39 @@ describe.concurrent('remote agent connection api', () => {
     }
   });
 
+  it('preserves monitor DPI separately from target window DPI', async () => {
+    const monitor = {
+      id: 'left',
+      name: 'left',
+      primary: false,
+      bounds: { x: -1920, y: -200, width: 1920, height: 1080 },
+      workArea: { x: -1920, y: -160, width: 1920, height: 1040 },
+      dpi: 144,
+      scaleFactor: 1.5,
+    };
+    const window = {
+      ...defaultFakeWindow,
+      monitorId: 'left',
+      dpi: 96,
+      dpiAwareness: 'unaware' as const,
+    };
+    const fakeAgent = await startFakeTcpAgent({
+      monitors: [monitor],
+      windows: [window],
+    });
+    const agent = await connectRemoteAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      expect(await agent.monitors()).toEqual([monitor]);
+      expect((await agent.windows())[0]).toMatchObject(window);
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
   it('reads screen geometry, cursor state, and screenshots', async () => {
     const fakeAgent = await startFakeTcpAgent({});
     const agent = await connectRemoteAgent({
@@ -1816,6 +1849,7 @@ describe.concurrent('remote agent connection api', () => {
           name: 'DISPLAY1',
           primary: true,
           scaleFactor: 1,
+          dpi: 96,
           workArea: {
             height: 728,
             width: 1024,

@@ -70,6 +70,8 @@ import type {
   RemoteInputOperation,
   RemoteKeyboardPressOptions,
   RemoteMonitor,
+  RemoteDesktop,
+  WindowDpiAwareness,
   RemoteMouseButtonOptions,
   RemoteMouseClickOptions,
   RemoteMouseDragOptions,
@@ -404,6 +406,9 @@ const copyWindowSnapshot = (window: AppWindowSnapshot): AppWindowSnapshot => ({
   bounds: window.bounds,
   frameBounds: window.frameBounds,
   clientBounds: window.clientBounds,
+  monitorId: window.monitorId,
+  dpi: window.dpi,
+  dpiAwareness: window.dpiAwareness,
   className: window.className,
   controlId: window.controlId,
   enabled: window.enabled,
@@ -527,6 +532,43 @@ const parseProcess = (value: unknown): AppWindowProcess => {
   };
 };
 
+const parseNullableIdentifier = (value: unknown): string | null => {
+  if (value === null || (typeof value === 'string' && value.length > 0))
+    return value;
+  throw createRemoteAgentError(
+    'PROTOCOL_ERROR',
+    'Expected a nonempty identifier or null.'
+  );
+};
+
+const parseDpi = (value: unknown): number | null => {
+  if (
+    value === null ||
+    (typeof value === 'number' && Number.isSafeInteger(value) && value > 0)
+  )
+    return value;
+  throw createRemoteAgentError(
+    'PROTOCOL_ERROR',
+    'DPI must be a positive integer or null.'
+  );
+};
+
+const parseDpiAwareness = (value: unknown): WindowDpiAwareness | null => {
+  if (
+    value === null ||
+    value === 'unaware' ||
+    value === 'unaware-gdi-scaled' ||
+    value === 'system' ||
+    value === 'per-monitor' ||
+    value === 'per-monitor-v2'
+  )
+    return value;
+  throw createRemoteAgentError(
+    'PROTOCOL_ERROR',
+    'Window DPI awareness is invalid.'
+  );
+};
+
 const parseWindowSnapshot = (value: unknown): AppWindowSnapshot => {
   if (!isRecord(value)) {
     throw createRemoteAgentError(
@@ -563,6 +605,9 @@ const parseWindowSnapshot = (value: unknown): AppWindowSnapshot => {
     bounds: parseRect(value.bounds),
     frameBounds: parseRect(value.frameBounds),
     clientBounds: parseRect(value.clientBounds),
+    monitorId: parseNullableIdentifier(value.monitorId),
+    dpi: parseDpi(value.dpi),
+    dpiAwareness: parseDpiAwareness(value.dpiAwareness),
     className: readString(value, 'className'),
     controlId: readNumber(value, 'controlId'),
     enabled,
@@ -845,6 +890,23 @@ const persistCapturedVideo = async (
   };
 };
 
+const parseMonitorScale = (value: Record<string, unknown>): number | null => {
+  const dpi = parseDpi(value.dpi);
+  if (dpi === null && value.scaleFactor === null) return null;
+  if (
+    dpi !== null &&
+    typeof value.scaleFactor === 'number' &&
+    Number.isFinite(value.scaleFactor) &&
+    value.scaleFactor > 0 &&
+    Math.abs(value.scaleFactor - dpi / 96) < 0.000001
+  )
+    return dpi / 96;
+  throw createRemoteAgentError(
+    'PROTOCOL_ERROR',
+    'Monitor scaleFactor must agree with its DPI or both must be null.'
+  );
+};
+
 const parseMonitor = (value: unknown): RemoteMonitor => {
   if (!isRecord(value)) {
     throw createRemoteAgentError(
@@ -864,7 +926,8 @@ const parseMonitor = (value: unknown): RemoteMonitor => {
     id: readString(value, 'id'),
     name: readString(value, 'name'),
     primary,
-    scaleFactor: readNumber(value, 'scaleFactor'),
+    dpi: parseDpi(value.dpi),
+    scaleFactor: parseMonitorScale(value),
     workArea: parseRect(value.workArea),
   };
 };
@@ -879,6 +942,27 @@ const parseMonitorArray = (
     );
   }
   return value.map((entry) => parseMonitor(entry));
+};
+
+const parseDesktop = (value: JsonValue | undefined): RemoteDesktop => {
+  if (!isRecord(value))
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'Desktop must be an object.'
+    );
+  const revision = readString(value, 'revision');
+  const monitors = parseMonitorArray(value.monitors as JsonValue);
+  if (
+    revision.length === 0 ||
+    monitors.length === 0 ||
+    new Set(monitors.map((monitor) => monitor.id)).size !== monitors.length
+  ) {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'Desktop requires a revision and distinct monitors.'
+    );
+  }
+  return { bounds: parseRect(value.bounds), monitors, revision };
 };
 
 const parseCursor = (value: JsonValue | undefined): RemoteCursor => {
@@ -3993,6 +4077,8 @@ export const connectRemoteAgent = async (
         });
       },
     },
+    desktop: async (): Promise<RemoteDesktop> =>
+      parseDesktop(await requestJson('agent.desktop', undefined)),
     monitors: async (): Promise<readonly RemoteMonitor[]> =>
       parseMonitorArray(await requestJson('agent.monitors', undefined)),
     mouse: {

@@ -66,6 +66,12 @@ struct WindowInfo {
   WindowRect frame_bounds;
   /** Client bounds in physical screen coordinates. */
   WindowRect client_bounds;
+  /** Associated monitor identifier, or empty when offscreen or unavailable. */
+  std::string monitor_id;
+  /** DPI applied to this window, or zero when unavailable. */
+  uint32_t dpi;
+  /** DPI awareness name, or empty when unavailable. */
+  std::string dpi_awareness;
 };
 
 /**

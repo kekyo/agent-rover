@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "win32_windows.h"
+#include "win32_desktop.h"
 
 namespace agent_rover {
 
@@ -23,22 +24,6 @@ struct WindowScreenshot {
   WindowRect visible_bounds;
   /** Whether capture bounds were clipped. */
   bool clipped;
-};
-
-/** Screen monitor geometry. */
-struct ScreenMonitor {
-  /** Stable monitor identifier within the current screen session. */
-  std::string id;
-  /** Platform monitor name. */
-  std::string name;
-  /** Monitor bounds in physical screen pixels. */
-  WindowRect bounds;
-  /** Work area excluding taskbars and system toolbars. */
-  WindowRect work_area;
-  /** Whether this monitor is the primary monitor. */
-  bool primary;
-  /** Monitor scale factor relative to 96 DPI. */
-  double scale_factor;
 };
 
 /** Screen cursor state. */
@@ -62,26 +47,6 @@ struct ScreenCursor {
 bool CaptureWindowScreenshot(
     const std::string& window_id,
     WindowScreenshot* screenshot,
-    std::string* error);
-
-/**
- * Reads the virtual screen bounds.
- *
- * @param bounds Receives virtual screen bounds.
- * @param error Receives a human-readable error on failure.
- * @return true on success.
- */
-bool GetScreenBounds(WindowRect* bounds, std::string* error);
-
-/**
- * Lists monitors in the current screen session.
- *
- * @param monitors Receives monitor geometry entries.
- * @param error Receives a human-readable error on failure.
- * @return true on success.
- */
-bool ListScreenMonitors(
-    std::vector<ScreenMonitor>* monitors,
     std::string* error);
 
 /**
