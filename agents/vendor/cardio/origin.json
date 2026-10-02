@@ -1,0 +1,16 @@
+{
+  "name": "cardio",
+  "version": "1.2.0",
+  "commit": "9929090562915ee848bef66b84994a0e678832e7",
+  "license": "MIT",
+  "files": {
+    "cardio.h": {
+      "source": "https://raw.githubusercontent.com/kekyo/cardio/9929090562915ee848bef66b84994a0e678832e7/include/cardio.h",
+      "sha256": "9c479b0487588cee284dc0f525916008e2277132a81052a9a7291212ee202af4"
+    },
+    "LICENSE": {
+      "source": "https://raw.githubusercontent.com/kekyo/cardio/9929090562915ee848bef66b84994a0e678832e7/LICENSE",
+      "sha256": "53a683bd1a34791867305f980c4b89a865f3b40eddc54778119979db91cdab81"
+    }
+  }
+}
