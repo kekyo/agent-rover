@@ -3,8 +3,8 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
-import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { lstat, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname, join, win32 } from 'node:path';
 import type { RemoteAgent } from '../index';
 
 /** Completed file transfer totals. */
@@ -33,11 +33,12 @@ const localType = async (
 };
 
 /**
- * Copies a file through the existing SDK, leaving completed writes in place.
+ * Copies files through the existing SDK, leaving completed writes in place.
  * @param agent Connected agent.
  * @param direction Upload or download.
  * @param source Exact source path.
  * @param destination Exact destination path.
+ * @param recursive Copy directory contents instead of a single file.
  * @param signal Stops subsequent operations after CLI interruption.
  * @returns Completed transfer totals.
  */
@@ -46,8 +47,76 @@ export const transferArctlFiles = async (
   direction: 'put' | 'get',
   source: string,
   destination: string,
+  recursive: boolean,
   signal: AbortSignal
 ): Promise<ArctlTransferResult> => {
+  signal.throwIfAborted();
+  if (recursive) {
+    const sourceType =
+      direction === 'put'
+        ? await localType(source)
+        : (await agent.files.stat(source)).type;
+    if (sourceType !== 'directory')
+      throw new Error(`Recursive source must be a directory: ${source}`);
+    const destinationType =
+      direction === 'put'
+        ? (await agent.files.exists(destination))
+          ? (await agent.files.stat(destination)).type
+          : undefined
+        : await localType(destination);
+    if (destinationType !== undefined && destinationType !== 'directory')
+      throw new Error(`Destination is not a directory: ${destination}`);
+    signal.throwIfAborted();
+    if (direction === 'put')
+      await agent.files.mkdir(destination, { recursive: true });
+    else await mkdir(destination, { recursive: true });
+    const entries =
+      direction === 'put'
+        ? (await readdir(source, { withFileTypes: true })).map((entry) => ({
+            name: entry.name,
+            type: entry.isDirectory()
+              ? 'directory'
+              : entry.isFile()
+                ? 'file'
+                : 'other',
+          }))
+        : await agent.files.readdir(source);
+    let files = 0;
+    let directories = 1;
+    let bytes = 0;
+    for (const entry of [...entries].sort((left, right) =>
+      left.name.localeCompare(right.name)
+    )) {
+      // Windows directory entries are single names. Reject path components
+      // before combining them with either the local or the remote destination.
+      if (
+        entry.name === '.' ||
+        entry.name === '..' ||
+        /[\\/:\0]/u.test(entry.name) ||
+        entry.name === ''
+      )
+        throw new Error(`Unsupported directory entry name: ${entry.name}`);
+      if (entry.type !== 'file' && entry.type !== 'directory')
+        throw new Error(`Unsupported file type: ${entry.name}`);
+      signal.throwIfAborted();
+      const copied = await transferArctlFiles(
+        agent,
+        direction,
+        direction === 'put'
+          ? join(source, entry.name)
+          : win32.join(source, entry.name),
+        direction === 'put'
+          ? win32.join(destination, entry.name)
+          : join(destination, entry.name),
+        entry.type === 'directory',
+        signal
+      );
+      files += copied.files;
+      directories += copied.directories;
+      bytes += copied.bytes;
+    }
+    return { source, destination, files, directories, bytes };
+  }
   let data: Buffer;
   if (direction === 'put') {
     if ((await localType(source)) !== 'file')

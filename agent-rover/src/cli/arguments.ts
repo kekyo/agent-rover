@@ -21,6 +21,7 @@ export type ArctlOperation =
       /** Transfer direction. */ readonly command: 'put' | 'get';
       /** Exact source path. */ readonly source: string;
       /** Exact destination path. */ readonly destination: string;
+      /** Copy the source directory's contents. */ readonly recursive: boolean;
     };
 
 /** Parsed invocation of the standalone CLI. */
@@ -168,11 +169,26 @@ export const parseArctlArguments = (
         '<destination>',
         command === 'put' ? 'Remote file' : 'Local file'
       )
-      .action((source: string, destination: string) => {
-        if (source.trim() === '' || destination.trim() === '')
-          throw new Error('Source and destination must not be empty.');
-        operation = { command, source, destination };
-      });
+      .option(
+        '-r, --recursive',
+        'Copy directory contents, including empty directories; keep destination-only entries'
+      )
+      .action(
+        (
+          source: string,
+          destination: string,
+          values: { readonly recursive: boolean | undefined }
+        ) => {
+          if (source.trim() === '' || destination.trim() === '')
+            throw new Error('Source and destination must not be empty.');
+          operation = {
+            command,
+            source,
+            destination,
+            recursive: values.recursive ?? false,
+          };
+        }
+      );
   }
   try {
     program.parse(args, { from: 'user' });

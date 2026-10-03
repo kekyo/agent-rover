@@ -60,6 +60,7 @@ const main = async (): Promise<number> => {
         parsed.command,
         parsed.source,
         parsed.destination,
+        parsed.recursive,
         interruption.signal
       );
       if (interrupted) return 130;

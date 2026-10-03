@@ -5,7 +5,14 @@
 
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -52,6 +59,210 @@ const runArctl = async (args: readonly string[], env: NodeJS.ProcessEnv) =>
   );
 
 describe('arctl', () => {
+  it('recursively copies directory contents including empty directories, preserving extra entries', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'arctl-tree-'));
+    const fake = await startFakeTcpAgent({});
+    const env = {
+      AGENT_ROVER_HOST: fake.host,
+      AGENT_ROVER_PORT: String(fake.port),
+    };
+    const observer = await connectRemoteAgent({
+      host: fake.host,
+      port: fake.port,
+    });
+    const source = join(directory, 'source');
+    const target = join(directory, 'target');
+    try {
+      await mkdir(join(source, 'deep', '日本語 folder'), { recursive: true });
+      await mkdir(join(source, 'empty'));
+      await writeFile(
+        join(source, 'deep', '日本語 folder', 'data.bin'),
+        Buffer.from([0, 255, 1])
+      );
+      await writeFile(join(source, 'zero'), Buffer.alloc(0));
+      await mkdir(target);
+      await writeFile(join(target, 'local-extra'), 'local keeper');
+      await observer.files.writeFile(
+        'C:/tree/remote-extra',
+        Buffer.from('remote keeper')
+      );
+      const put = await runArctl(
+        ['put', '-r', source + '/', 'C:/tree/', '--json'],
+        env
+      );
+      expect(put.code, put.stderr).toBe(0);
+      expect(JSON.parse(put.stdout).result).toMatchObject({
+        files: 2,
+        directories: 4,
+        bytes: 3,
+      });
+      expect((await observer.files.stat('C:/tree/empty')).type).toBe(
+        'directory'
+      );
+      expect(
+        await observer.files.readFile('C:/tree/deep/日本語 folder/data.bin')
+      ).toEqual(Buffer.from([0, 255, 1]));
+      expect(
+        (await observer.files.readFile('C:/tree/remote-extra')).toString()
+      ).toBe('remote keeper');
+      const get = await runArctl(
+        ['get', 'C:/tree/', target + '/', '-r', '--json'],
+        env
+      );
+      expect(get.code, get.stderr).toBe(0);
+      expect(JSON.parse(get.stdout).result).toMatchObject({
+        files: 3,
+        directories: 4,
+        bytes: 16,
+      });
+      expect((await stat(join(target, 'empty'))).isDirectory()).toBe(true);
+      expect(
+        await readFile(join(target, 'deep', '日本語 folder', 'data.bin'))
+      ).toEqual(Buffer.from([0, 255, 1]));
+      expect(await readFile(join(target, 'local-extra'), 'utf8')).toBe(
+        'local keeper'
+      );
+      expect(await readFile(join(target, 'remote-extra'), 'utf8')).toBe(
+        'remote keeper'
+      );
+      for (const args of [
+        ['put', '-r', join(source, 'zero'), 'C:/bad'],
+        ['get', '-r', 'C:/tree/zero', join(target, 'bad')],
+      ]) {
+        expect((await runArctl(args, env)).code).toBe(1);
+      }
+    } finally {
+      observer.release();
+      await fake.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['put', 'get'] as const)(
+    'keeps completed copies after a later %s failure without deleting or killing',
+    async (command) => {
+      const directory = await mkdtemp(join(tmpdir(), 'arctl-partial-'));
+      let enabled = false;
+      const forbidden: string[] = [];
+      const fake = await startFakeTcpAgent({
+        beforeRequest: (method, params) => {
+          if (method.includes('remove') || method.includes('kill'))
+            forbidden.push(method);
+          const path =
+            typeof params === 'object' && params !== null && 'path' in params
+              ? String(params.path).replaceAll('\\', '/')
+              : '';
+          if (
+            enabled &&
+            method === (command === 'put' ? 'file.write' : 'file.read') &&
+            path.endsWith('/z-failure')
+          )
+            return {
+              code: 'OPERATION_FAILED',
+              message: 'Injected transfer failure',
+            };
+          return undefined;
+        },
+      });
+      const observer = await connectRemoteAgent({
+        host: fake.host,
+        port: fake.port,
+      });
+      try {
+        await writeFile(join(directory, 'a-first'), 'completed');
+        await writeFile(join(directory, 'z-failure'), 'not copied');
+        await observer.files.writeFile(
+          'C:/tree/a-first',
+          Buffer.from('completed')
+        );
+        await observer.files.writeFile(
+          'C:/tree/z-failure',
+          Buffer.from('not copied')
+        );
+        enabled = true;
+        const args =
+          command === 'put'
+            ? ['put', '-r', directory, 'C:/target']
+            : ['get', '-r', 'C:/tree', join(directory, 'target')];
+        const result = await runArctl(args, {
+          AGENT_ROVER_HOST: fake.host,
+          AGENT_ROVER_PORT: String(fake.port),
+        });
+        expect(result.code).toBe(1);
+        expect(result.stdout).toBe('');
+        expect(result.stderr).toContain('Injected transfer failure');
+        expect(
+          command === 'put'
+            ? (await observer.files.readFile('C:/target/a-first')).toString()
+            : await readFile(join(directory, 'target', 'a-first'), 'utf8')
+        ).toBe('completed');
+        expect(forbidden).toEqual([]);
+      } finally {
+        observer.release();
+        await fake.close();
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it.each(['put', 'get'] as const)(
+    'preserves both types of nested conflict during recursive %s',
+    async (command) => {
+      const directory = await mkdtemp(join(tmpdir(), 'arctl-tree-collision-'));
+      const fake = await startFakeTcpAgent({});
+      const observer = await connectRemoteAgent({
+        host: fake.host,
+        port: fake.port,
+      });
+      const env = {
+        AGENT_ROVER_HOST: fake.host,
+        AGENT_ROVER_PORT: String(fake.port),
+      };
+      try {
+        for (const sourceIsDirectory of [true, false]) {
+          const name = sourceIsDirectory ? 'directory-source' : 'file-source';
+          const local = join(directory, name);
+          const remote = `C:/${name}`;
+          await mkdir(local);
+          if ((command === 'put') === sourceIsDirectory)
+            await mkdir(join(local, 'item'));
+          else await writeFile(join(local, 'item'), 'local keeper');
+          if ((command === 'get') === sourceIsDirectory)
+            await observer.files.mkdir(`${remote}/item`, { recursive: true });
+          else
+            await observer.files.writeFile(
+              `${remote}/item`,
+              Buffer.from('remote keeper')
+            );
+          const args =
+            command === 'put'
+              ? ['put', '-r', local, remote]
+              : ['get', '-r', remote, local];
+          const result = await runArctl(args, env);
+          expect(result.code, result.stderr).toBe(1);
+          expect((await stat(join(local, 'item'))).isDirectory()).toBe(
+            (command === 'put') === sourceIsDirectory
+          );
+          expect((await observer.files.stat(`${remote}/item`)).type).toBe(
+            (command === 'get') === sourceIsDirectory ? 'directory' : 'file'
+          );
+          if ((command === 'put') !== sourceIsDirectory)
+            expect(await readFile(join(local, 'item'), 'utf8')).toBe(
+              'local keeper'
+            );
+          if ((command === 'get') !== sourceIsDirectory)
+            expect(
+              (await observer.files.readFile(`${remote}/item`)).toString()
+            ).toBe('remote keeper');
+        }
+      } finally {
+        observer.release();
+        await fake.close();
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+  );
+
   it.each([Buffer.alloc(0), Buffer.from([0, 255, 10, 128, 0, 1])])(
     'round-trips and overwrites a single file (%j)',
     async (data) => {

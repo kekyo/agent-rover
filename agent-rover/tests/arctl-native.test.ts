@@ -5,7 +5,14 @@
 
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -54,6 +61,59 @@ it('round-trips binary and empty files through the Windows file API', async () =
     await arctl(['get', remote, destination]);
     expect(await readFile(destination)).toEqual(data);
   }
+});
+
+it('copies real directory trees and preserves extra files and conflicting entries', async () => {
+  const source = join(directory, 'tree');
+  const destination = join(directory, 'download-tree');
+  const remote = `${remoteDirectory}\\remote-tree`;
+  await mkdir(join(source, '日本語 folder', 'deep'), { recursive: true });
+  await mkdir(join(source, 'empty'));
+  await writeFile(join(source, '日本語 folder', 'deep', 'data'), 'contents');
+  await observer!.files.writeFile(
+    `${remote}\\keeper`,
+    Buffer.from('keep remote')
+  );
+  await arctl(['put', '-r', source, remote]);
+  await mkdir(destination);
+  await writeFile(join(destination, 'local-keeper'), 'keep local');
+  await arctl(['get', '-r', remote, destination]);
+  expect(
+    await readFile(join(destination, '日本語 folder', 'deep', 'data'), 'utf8')
+  ).toBe('contents');
+  expect((await stat(join(destination, 'empty'))).isDirectory()).toBe(true);
+  expect(await readFile(join(destination, 'keeper'), 'utf8')).toBe(
+    'keep remote'
+  );
+  expect(await readFile(join(destination, 'local-keeper'), 'utf8')).toBe(
+    'keep local'
+  );
+  await observer!.files.writeFile(
+    `${remote}\\empty\\keeper`,
+    Buffer.from('still here')
+  );
+  await writeFile(join(source, 'keeper'), 'replacement');
+  await arctl(['put', '-r', source, remote]);
+  expect(
+    (await observer!.files.readFile(`${remote}\\empty\\keeper`)).toString()
+  ).toBe('still here');
+  expect((await observer!.files.readFile(`${remote}\\keeper`)).toString()).toBe(
+    'replacement'
+  );
+  await writeFile(join(source, 'conflict'), 'preserve local');
+  await observer!.files.mkdir(`${remote}\\conflict`);
+  await expect(arctl(['put', '-r', source, remote])).rejects.toMatchObject({
+    code: 1,
+  });
+  await expect(arctl(['get', '-r', remote, source])).rejects.toMatchObject({
+    code: 1,
+  });
+  expect(await readFile(join(source, 'conflict'), 'utf8')).toBe(
+    'preserve local'
+  );
+  expect((await observer!.files.stat(`${remote}\\conflict`)).type).toBe(
+    'directory'
+  );
 });
 
 beforeAll(async () => {
