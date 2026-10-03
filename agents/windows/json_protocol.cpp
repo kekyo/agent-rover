@@ -484,6 +484,10 @@ static bool FindJsonObjectField(
   return false;
 }
 
+static bool agent_video_supported = false;
+
+void SetAgentVideoCapability(bool supported) { agent_video_supported = supported; }
+
 static std::string CapabilitiesJson() {
   std::string output =
       "{\"features\":["
@@ -529,7 +533,7 @@ static std::string CapabilitiesJson() {
       "\"process.snapshot\","
       "\"eventLogs.read\","
       "\"";
-  if (IsVideoCaptureSupported()) {
+  if (agent_video_supported) {
     const size_t feature_end = output.size() - 1;
     output.insert(
         feature_end,
@@ -1095,6 +1099,22 @@ std::string CreateReadyEventJson() {
   output += kProtocolVersion;
   output += "\"},\"kind\":\"event\",\"name\":\"agent.ready\"}";
   return output;
+}
+
+bool ReadAgentRequest(const std::string& payload, std::string* id, std::string* method) {
+  std::string kind;
+  return FindJsonStringField(payload, "kind", &kind) && kind == "request" &&
+      FindJsonStringField(payload, "id", id) && !id->empty() && id->size() <= 128 &&
+      FindJsonStringField(payload, "method", method) && !method->empty() && method->size() <= 128;
+}
+
+std::string CreateCapabilitiesResponse(const std::string& id) {
+  return SuccessResponseJson(id, CapabilitiesJson());
+}
+
+std::string CreateAgentFailure(const std::string& id, const std::string& code, const std::string& message) {
+  return "{\"id\":\"" + JsonEscape(id) + "\",\"kind\":\"response\",\"ok\":false,\"error\":{\"code\":\"" +
+      JsonEscape(code) + "\",\"message\":\"" + JsonEscape(message) + "\"}}";
 }
 
 std::string HandleJsonRequest(

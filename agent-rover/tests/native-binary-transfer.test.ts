@@ -91,7 +91,34 @@ int main() {
     std::fprintf(stderr, "%s\n", error.c_str());
     return 1;
   }
-  return completed == data ? 0 : 1;
+  if (completed != data) return 1;
+  agent_rover::BinaryTransferStore bounded = {};
+  agent_rover::BinaryTransferChunk part = {};
+  part.content_type = "application/octet-stream";
+  part.data = {1};
+  for (unsigned int i = 0; i < 16; ++i) {
+    part.transfer_id = "pending-" + std::to_string(i);
+    if (!agent_rover::AcceptBinaryTransferChunk(&bounded, part, &error)) return 2;
+  }
+  part.transfer_id = "one-too-many";
+  if (agent_rover::AcceptBinaryTransferChunk(&bounded, part, &error) || bounded.pending.size() != 16) {
+    std::fputs("Pending transfers grew beyond the session limit.\n", stderr);
+    return 3;
+  }
+  bounded = {};
+  part.transfer_id = "byte-limit";
+  part.data.assign(4 * 1024 * 1024, 0);
+  for (unsigned int i = 0; i < 16; ++i) {
+    part.sequence = i;
+    if (!agent_rover::AcceptBinaryTransferChunk(&bounded, part, &error)) return 4;
+  }
+  part.sequence = 16;
+  if (agent_rover::AcceptBinaryTransferChunk(&bounded, part, &error) ||
+      bounded.pending.begin()->second.data.size() != 64 * 1024 * 1024) {
+    std::fputs("Binary bytes grew beyond the session limit.\n", stderr);
+    return 5;
+  }
+  return 0;
 }
 `,
       'utf8'

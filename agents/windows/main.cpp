@@ -3,38 +3,46 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
-#include <cstdio>
-#include <windows.h>
+#include "operation_worker.h"
+#include <shellapi.h>
 
 #include "auth.h"
 #include "command_line.h"
 #include "tcp_server.h"
 #include "version_banner.h"
+#include "win32_util.h"
 
 namespace agent_rover {
 
-static void PrintUsage() {
-  std::wprintf(
+static void ShowUsage() {
+  MessageBoxW(nullptr,
       L"agent-rover native windows agent\n\n"
       L"Usage:\n"
       L"  agent-rover-agent.exe [--host <host>] [--port <port>] [--unsafe-token <token>] [-n|--no-auth]\n"
-      L"  agent-rover-agent.exe --help\n");
+      L"  agent-rover-agent.exe --help\n", L"agent-rover", MB_OK);
 }
 
 }  // namespace agent_rover
 
-int wmain(int argc, wchar_t** argv) {
-  agent_rover::PrintAgentVersionBanner();
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, wchar_t*, int) {
+  int argc = 0;
+  wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+  if (!argv) return 1;
+  if (argc == 2 && (std::wstring(argv[1]) == L"--agent-worker" || std::wstring(argv[1]) == L"--agent-probe")) {
+    const bool probe = std::wstring(argv[1]) == L"--agent-probe";
+    LocalFree(argv);
+    return agent_rover::RunOperationWorker(probe);
+  }
 
   const agent_rover::AgentCommandLineParseResult parsed =
       agent_rover::ParseAgentCommandLine(argc, argv);
+  LocalFree(argv);
   if (parsed.help_requested) {
-    agent_rover::PrintUsage();
+    agent_rover::ShowUsage();
     return 0;
   }
   if (!parsed.ok) {
-    std::fwprintf(stderr, L"%ls\n", parsed.error.c_str());
-    agent_rover::PrintUsage();
+    MessageBoxW(nullptr, parsed.error.c_str(), L"agent-rover", MB_OK | MB_ICONERROR);
     return 1;
   }
 
@@ -47,22 +55,15 @@ int wmain(int argc, wchar_t** argv) {
   if (options.auth_required && options.auth_token.empty()) {
     std::string error;
     if (!agent_rover::GenerateAuthToken(&options.auth_token, &error)) {
-      std::fprintf(stderr, "%s\n", error.c_str());
+      MessageBoxW(nullptr, agent_rover::Utf8ToWide(error).c_str(), L"agent-rover", MB_OK | MB_ICONERROR);
       return 1;
     }
   }
 
-  std::printf("agent-rover native agent listening on %s:%u\n",
-              options.host.c_str(), static_cast<unsigned int>(options.port));
-  if (options.auth_required) {
-    std::printf("agent-rover agent token: %s\n", options.auth_token.c_str());
-  }
-  std::fflush(stdout);
-
   std::string error;
   const int exit_code = agent_rover::RunTcpServer(options, &error);
   if (exit_code != 0) {
-    std::fprintf(stderr, "%s\n", error.c_str());
+    MessageBoxW(nullptr, agent_rover::Utf8ToWide(error).c_str(), L"agent-rover", MB_OK | MB_ICONERROR);
   }
   return exit_code;
 }

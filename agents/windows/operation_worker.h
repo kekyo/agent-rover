@@ -1,0 +1,47 @@
+// agent-rover - A multi-platform TypeScript test driver for GUI applications
+// Copyright (c) Kouji Matsui. (@kekyo@mi.kekyo.net)
+// Under MIT.
+// https://github.com/kekyo/agent-rover
+
+#ifndef AGENT_ROVER_WINDOWS_OPERATION_WORKER_H
+#define AGENT_ROVER_WINDOWS_OPERATION_WORKER_H
+#include "async_io.h"
+#include "frame.h"
+
+namespace agent_rover {
+/** Private IPC message types; never accepted from network clients. */
+enum class WorkerMessageKind : uint32_t {
+  /** JSON response or command. */ Json = 1,
+  /** Binary response or command. */ Binary = 2,
+  /** Operation completed, including all binary chunks. */ Complete = 100,
+  /** Bounded diagnostic event. */ Log = 101,
+  /** Detected video support as one byte. */ Capability = 102,
+};
+/** A bounded IPC message. */
+struct WorkerMessage {
+  /** Message discriminator. */ WorkerMessageKind kind;
+  /** Bytes, limited to one network frame. */ std::vector<unsigned char> payload;
+};
+/** Owned child and IPC handles, retained by pending native operations. */
+struct OperationWorker;
+/** Shared child ownership; all access is dispatcher-confined. */
+using Worker = std::shared_ptr<OperationWorker>;
+/** Starts a private instance of this executable with two unidirectional pipes.
+ * @param probe Whether to detect capabilities and exit. @return Owned helper. */
+Worker StartOperationWorker(bool probe);
+/** Sends one message to an isolated worker.
+ * @param worker Child. @param message Message retained in the coroutine.
+ * @param cancellation Deadline or shutdown signal. @return Completion promise. */
+cardio::promise<void> WriteWorker(Worker worker, WorkerMessage message, cardio::cancellation cancellation);
+/** Reads one message while retaining all native I/O resources.
+ * @param worker Child. @param cancellation Deadline or shutdown signal.
+ * @return Message. */
+cardio::promise<WorkerMessage> ReadWorker(Worker worker, cardio::cancellation cancellation);
+/** Stops a helper with a finite grace period, then terminates only that helper.
+ * @param worker Child. @return True if native process termination was confirmed. */
+cardio::promise<bool> StopOperationWorker(Worker worker);
+/** Runs the private child protocol. Standard handles carry IPC, never console text.
+ * @param probe Whether only capability detection is required. @return Process exit code. */
+int RunOperationWorker(bool probe);
+}  // namespace agent_rover
+#endif

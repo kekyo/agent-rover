@@ -334,6 +334,22 @@ bool AcceptBinaryTransferChunk(
     BinaryTransferStore* store,
     const BinaryTransferChunk& chunk,
     std::string* error) {
+  if (chunk.transfer_id.empty() || chunk.transfer_id.size() > 128 || chunk.content_type.size() > 256 ||
+      store->completed.contains(chunk.transfer_id)) {
+    *error = "Invalid or already completed binary transfer id.";
+    return false;
+  }
+  if (!store->pending.contains(chunk.transfer_id) && store->pending.size() + store->completed.size() >= 16) {
+    *error = "Binary transfer count exceeds the session limit (16).";
+    return false;
+  }
+  uint64_t bytes = chunk.data.size();
+  for (const auto& entry : store->pending) bytes += entry.second.data.size();
+  for (const auto& entry : store->completed) bytes += entry.second.data.size();
+  if (bytes > 64 * 1024 * 1024) {
+    *error = "Binary transfer data exceeds the session limit (64 MiB).";
+    return false;
+  }
   BinaryTransfer& transfer = store->pending[chunk.transfer_id];
   uint32_t& next_sequence = store->next_sequence[chunk.transfer_id];
   if (transfer.transfer_id.empty()) {
@@ -371,7 +387,7 @@ bool AcceptBinaryTransferChunk(
     return false;
   }
   transfer.sha256 = chunk.sha256;
-  store->completed[chunk.transfer_id] = transfer;
+  store->completed[chunk.transfer_id] = std::move(transfer);
   store->pending.erase(chunk.transfer_id);
   store->next_sequence.erase(chunk.transfer_id);
   return true;

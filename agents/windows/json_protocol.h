@@ -21,6 +21,21 @@ namespace agent_rover {
  */
 std::string CreateReadyEventJson();
 
+/** Sets the cached video capability after isolated detection.
+ * @param supported Whether Media Foundation was successfully detected. */
+void SetAgentVideoCapability(bool supported);
+/** Decodes the envelope without executing an operation.
+ * @param payload JSON request. @param id Request identifier. @param method Operation name.
+ * @return Whether a bounded request envelope was decoded. */
+bool ReadAgentRequest(const std::string& payload, std::string* id, std::string* method);
+/** Builds a capability response using cached data only.
+ * @param id Request identifier. @return JSON response. */
+std::string CreateCapabilitiesResponse(const std::string& id);
+/** Builds an operation failure response without exposing request contents.
+ * @param id Request identifier. @param code Stable failure code.
+ * @param message Diagnostic description. @return JSON response. */
+std::string CreateAgentFailure(const std::string& id, const std::string& code, const std::string& message);
+
 /**
  * Handles one JSON request payload.
  *

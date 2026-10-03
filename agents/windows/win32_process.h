@@ -25,9 +25,9 @@ struct ApplicationLaunchOptions {
   std::string working_directory;
   /** Environment variables to add or override. */
   std::map<std::string, std::string> environment;
-  /** File path receiving stdout, or empty to inherit stdout. */
+  /** File path receiving stdout; an uncaptured stream uses NUL when its peer is redirected. */
   std::string stdout_path;
-  /** File path receiving stderr, or empty to inherit stderr. */
+  /** File path receiving stderr; an uncaptured stream uses NUL when its peer is redirected. */
   std::string stderr_path;
   /** Whether to suppress console window creation. */
   bool create_no_window;

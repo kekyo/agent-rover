@@ -277,14 +277,24 @@ static bool CreateApplicationProcess(
   }
   const bool inherit_handles =
       stdout_handle != nullptr || stderr_handle != nullptr;
+  HANDLE null_handle = INVALID_HANDLE_VALUE;
   if (inherit_handles) {
+    SECURITY_ATTRIBUTES security = {sizeof(security), nullptr, TRUE};
+    null_handle = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (null_handle == INVALID_HANDLE_VALUE) {
+      *error = MakeOperationError("CreateFileW", "NUL", GetLastError());
+      if (stdout_handle) CloseHandle(stdout_handle);
+      if (stderr_handle) CloseHandle(stderr_handle);
+      return false;
+    }
     startup.dwFlags |= STARTF_USESTDHANDLES;
-    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    startup.hStdInput = null_handle;
     startup.hStdOutput =
-        stdout_handle == nullptr ? GetStdHandle(STD_OUTPUT_HANDLE)
+        stdout_handle == nullptr ? null_handle
                                  : stdout_handle;
     startup.hStdError =
-        stderr_handle == nullptr ? GetStdHandle(STD_ERROR_HANDLE)
+        stderr_handle == nullptr ? null_handle
                                  : stderr_handle;
   }
   DWORD creation_flags = options.create_no_window ? CREATE_NO_WINDOW : 0;
@@ -301,6 +311,7 @@ static bool CreateApplicationProcess(
       working_directory.empty() ? nullptr : working_directory.c_str(),
       &startup, process_information);
   const DWORD create_error = created ? ERROR_SUCCESS : GetLastError();
+  if (null_handle != INVALID_HANDLE_VALUE) CloseHandle(null_handle);
   if (stdout_handle != nullptr) {
     CloseHandle(stdout_handle);
   }
@@ -336,6 +347,15 @@ bool LaunchManagedProcess(
     OperationError* error) {
   HANDLE job = CreateJobObjectW(nullptr, nullptr);
   if (job == nullptr) { *error = MakeOperationError("CreateJobObjectW", options.launch.path, GetLastError()); return false; }
+  if (options.kill_tree_on_release) {
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+      *error = MakeOperationError("SetInformationJobObject", options.launch.path, GetLastError());
+      CloseHandle(job);
+      return false;
+    }
+  }
   PROCESS_INFORMATION process_information = {};
   ApplicationProcess application_process = {};
   if (!CreateApplicationProcess(options.launch, CREATE_SUSPENDED, &process_information, &application_process, error)) { CloseHandle(job); return false; }

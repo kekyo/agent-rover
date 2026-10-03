@@ -7,8 +7,19 @@
 
 #include <cstdio>
 #include <ctime>
+#include <utility>
 
 namespace agent_rover {
+
+static std::deque<AgentLogRecord> log_records;
+static uint64_t log_sequence = 0;
+static std::function<void(const AgentLogRecord&)> log_sink;
+
+void SetAgentLogSink(std::function<void(const AgentLogRecord&)> sink) {
+  log_sink = std::move(sink);
+}
+
+const std::deque<AgentLogRecord>& AgentLogRecords() { return log_records; }
 
 static std::string CurrentLogTimestamp() {
   const std::time_t now = std::time(nullptr);
@@ -128,9 +139,18 @@ std::string CreateAgentProcessKillFailedLogEvent(
 }
 
 void PrintAgentLogEvent(const std::string& event) {
-  const std::string line = CreateAgentLogLine(CurrentLogTimestamp(), event);
-  std::printf("%s\n", line.c_str());
-  std::fflush(stdout);
+  std::string text = event.substr(0, 4096);
+  if (event.size() > 4096) {
+    text.resize(4084);
+    // Do not leave a partial UTF-8 code point before the truncation marker.
+    while (!text.empty() && (static_cast<unsigned char>(event[text.size()]) & 0xc0) == 0x80)
+      text.pop_back();
+    text += " [truncated]";
+  }
+  AgentLogRecord record = {++log_sequence, CurrentLogTimestamp(), SanitizeAgentLogField(text)};
+  if (log_records.size() == 1000) log_records.pop_front();
+  log_records.push_back(std::move(record));
+  if (log_sink) log_sink(log_records.back());
 }
 
 }  // namespace agent_rover
