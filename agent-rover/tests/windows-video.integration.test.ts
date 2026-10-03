@@ -237,9 +237,7 @@ describe('Windows video capture integration', () => {
         testAgent?.release();
         if (testAgentProcess !== undefined) {
           try {
-            await bootstrap.request('process.releaseManaged', {
-              managedProcessId: testAgentProcess.managedProcessId,
-            });
+            await bootstrap.releaseManaged(testAgentProcess.managedProcessId);
             await waitForResult(
               async () => {
                 const state = (await bootstrap.request('process.snapshot', {
@@ -622,9 +620,7 @@ describe('Windows cleanup integration', () => {
           try {
             agent?.release();
             if (agentId !== undefined) {
-              await bootstrap.request('process.releaseManaged', {
-                managedProcessId: managedAgentId!,
-              });
+              await bootstrap.releaseManaged(managedAgentId!);
               await waitForResult(
                 async () => {
                   const state = (await bootstrap.request('process.snapshot', {

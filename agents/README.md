@@ -81,7 +81,12 @@ errors and close the connection.
 
 Agents must respond to `Ping` with `Pong`. A received `Pong` requires no action.
 When an agent receives `Close`, it should close the socket. During normal
-shutdown the driver sends a `Close` frame and then ends the socket.
+shutdown after `agent.ready`, the driver sends a `Close` frame and ends the
+socket. Before readiness it destroys the socket without an application frame.
+Driver request and transfer deadlines close the whole session, cancelling its
+queued native operations. Already submitted native side effects may still occur.
+Individual writes use the configured request timeout; close waits no longer than
+one second (or the configured timeout, if shorter). Frame and JSON formats are unchanged.
 
 `AuthChallenge` is only valid from the agent before authentication completes.
 `AuthResponse` is only valid from the driver after receiving a challenge. Any
@@ -89,8 +94,8 @@ other use should close the connection.
 
 ## Authentication
 
-Authentication is optional. The native agent enables it by default and prints a
-token at startup. The driver sends a token through
+Authentication is optional. The native Windows agent enables it by default and
+shows the token in the tray log viewer, above the log list. The driver sends a token through
 `connectRemoteAgent({ authToken })` or through the `AGENT_ROVER_AUTH_TOKEN`
 environment variable.
 
@@ -699,7 +704,7 @@ Params:
 ```
 
 `rect` is optional. When omitted, record the full virtual screen. `durationMs`
-must be a positive uint32. `fps` must be from 1 through 240 and `quality` must
+must be an integer from 1 through 600000 (ten minutes). `fps` must be from 1 through 240 and `quality` must
 be from 1 through 100.
 
 Start recording asynchronously and return:

@@ -4,6 +4,7 @@
 // https://github.com/kekyo/agent-rover
 
 import { randomUUID } from 'node:crypto';
+import { waitForResult } from '../../src/wait';
 import { createTcpFrameTransport } from '../../src/driver/transport';
 import {
   createPendingRequestTable,
@@ -20,6 +21,8 @@ export interface WindowsBootstrap {
   ) => Promise<JsonValue | undefined>;
   /** Uploads a file using binary transfer frames. */
   readonly upload: (path: string, data: Buffer) => Promise<void>;
+  /** Releases a deployment Job after its native children actually finish. */
+  readonly releaseManaged: (id: number) => Promise<void>;
   /** Closes the deployment connection. */
   readonly close: () => Promise<void>;
 }
@@ -84,6 +87,27 @@ export const connectWindowsBootstrap = async (): Promise<WindowsBootstrap> => {
   };
   return {
     request,
+    releaseManaged: async (managedProcessId) => {
+      await waitForResult(
+        async () => {
+          try {
+            await request('process.releaseManaged', { managedProcessId });
+          } catch (error) {
+            // The bootstrap version waits only 25 ms per attempt and may report
+            // ERROR_BUSY while a terminated agent's helpers are still exiting.
+            if (
+              error instanceof Error &&
+              /win32Error=170\b/u.test(error.message)
+            )
+              throw new Error('Deployment Job is still exiting.', {
+                cause: error,
+              });
+            throw error;
+          }
+        },
+        { timeoutMs: 10000 }
+      );
+    },
     close: async () => {
       await transport.close();
     },

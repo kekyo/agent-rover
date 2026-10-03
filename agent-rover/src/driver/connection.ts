@@ -768,11 +768,11 @@ const validateVideoDuration = (durationMs: number): void => {
   if (
     !Number.isSafeInteger(durationMs) ||
     durationMs <= 0 ||
-    durationMs > 0xffffffff
+    durationMs > 600000
   ) {
     throw createRemoteAgentError(
       'INVALID_ARGUMENT',
-      'durationMs must be a positive integer no greater than 4294967295.'
+      'durationMs must be a positive integer no greater than 600000 (ten minutes).'
     );
   }
 };
@@ -1789,6 +1789,7 @@ export const connectRemoteAgent = async (
     );
     const timer = setTimeout(() => {
       controller.abort();
+      releaseAgent();
     }, transferTimeoutMs);
     const deferred = createDeferred<CompletedFileBinaryTransfer>(
       controller.signal
@@ -1863,6 +1864,8 @@ export const connectRemoteAgent = async (
               `Timed out waiting for binary transfer: ${reference.transferId}.`
             )
           );
+          binaryReceiver.cancel(reference.transferId);
+          releaseAgent();
         }, timeoutMs),
       };
       waitingBinaryTransfers.set(reference.transferId, [
@@ -2026,17 +2029,31 @@ export const connectRemoteAgent = async (
     assertConnected();
     recordProtocolOperation('request', method, params);
     const request = pending.createRequest(method, params);
+    const sending = (async (): Promise<void> => {
+      try {
+        await activeTransport.send(request.message);
+      } catch (error) {
+        releaseAgent();
+        throw createRemoteAgentError(
+          'DISCONNECTED',
+          error instanceof Error
+            ? `Failed to send protocol message: ${error.message}`
+            : 'Failed to send protocol message.'
+        );
+      }
+    })();
     try {
-      await activeTransport.send(request.message);
+      // Observe both promises immediately: the request can expire while the
+      // socket is still backpressured. A deadline ends the entire session so
+      // the native agent can cancel queued work and reap its active worker.
+      const [, result] = await Promise.all([sending, request.result]);
+      return result;
     } catch (error) {
-      throw createRemoteAgentError(
-        'DISCONNECTED',
-        error instanceof Error
-          ? `Failed to send protocol message: ${error.message}`
-          : 'Failed to send protocol message.'
-      );
+      if (typeof error === 'object' && error !== null && 'code' in error) {
+        if (error.code === 'TIMEOUT') releaseAgent();
+      }
+      throw error;
     }
-    return await request.result;
   };
 
   const sendBinaryTransfer = async (
@@ -2061,6 +2078,7 @@ export const connectRemoteAgent = async (
       try {
         await activeTransport.sendBinaryChunk(chunk);
       } catch (error) {
+        releaseAgent();
         throw createRemoteAgentError(
           'DISCONNECTED',
           error instanceof Error

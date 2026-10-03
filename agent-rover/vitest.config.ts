@@ -20,6 +20,29 @@ export default defineConfig({
     root: projectRoot,
     testTimeout: 30000,
     teardownTimeout: 30000,
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: 'unit',
+          exclude: [
+            '**/node_modules/**',
+            '**/dist/**',
+            'tests/windows-*.integration.test.ts',
+          ],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: 'windows',
+          include: ['tests/windows-*.integration.test.ts'],
+          // These tests share the interactive desktop and bootstrap listener.
+          fileParallelism: false,
+          sequence: { groupOrder: 1 },
+        },
+      },
+    ],
   },
   build: {
     target: 'node20',

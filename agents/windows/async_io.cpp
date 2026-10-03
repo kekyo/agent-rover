@@ -4,6 +4,7 @@
 // https://github.com/kekyo/agent-rover
 
 #include "async_io.h"
+#include "agent_log.h"
 #include <algorithm>
 #include <stdexcept>
 #include <utility>
@@ -138,6 +139,7 @@ cardio::promise<void> ReadSocket(SocketConnection connection, std::span<unsigned
 
 cardio::promise<void> WriteSocket(SocketConnection connection, std::span<const unsigned char> bytes,
     cardio::cancellation cancellation) {
+  bool reported_wait = false;
   while (!bytes.empty()) {
     cancellation.throw_if_cancellation_requested();
     if (connection->closed || connection->eof) throw std::runtime_error("Socket closed while sending.");
@@ -146,6 +148,11 @@ cardio::promise<void> WriteSocket(SocketConnection connection, std::span<const u
     if (count > 0) { bytes = bytes.subspan(count); continue; }
     const auto error = WSAGetLastError();
     if (count == 0 || error != WSAEWOULDBLOCK) throw SocketError("send", error);
+    if (!reported_wait) {
+      PrintAgentLogEvent("socket=" + std::to_string(connection->socket) + " phase=send-backpressure remainingBytes=" +
+          std::to_string(bytes.size()) + " wsaCode=" + std::to_string(error));
+      reported_wait = true;
+    }
     co_await connection->writable.Wait(cancellation);
   }
 }

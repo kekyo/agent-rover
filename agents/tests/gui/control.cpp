@@ -34,7 +34,7 @@ static int LoggerThreads(DWORD parent, const std::wstring& mode) {
   return result ? result : count ? 0 : 23;
 }
 
-static int VerifyLogs(const std::wstring& directory) {
+static int VerifyLogs(const std::wstring& directory, bool backpressure) {
   WIN32_FIND_DATAW entry = {};
   const auto search = FindFirstFileW((directory + L"\\agent-rover\\logs\\agent-rover-*.log").c_str(), &entry);
   if (search == INVALID_HANDLE_VALUE) return 30;
@@ -49,6 +49,7 @@ static int VerifyLogs(const std::wstring& directory) {
     CloseHandle(file); ++files;
   } while (FindNextFileW(search, &entry));
   FindClose(search);
+  if (backpressure) return all.find("phase=send-backpressure") == std::string::npos ? 37 : 0;
   if (files > 5 || std::count(all.begin(), all.end(), '\n') <= 1000) return 32;
   for (const auto text : {" seq=1 ", "version=", "method=agent.capabilities phase=received", "phase=sent", "elapsedMs=", "phase=shutdown"})
     if (all.find(text) == std::string::npos) return 33;
@@ -58,7 +59,7 @@ static int VerifyLogs(const std::wstring& directory) {
   return 0;
 }
 
-static HANDLE entered = nullptr, release = nullptr;
+static HANDLE entered = nullptr, release = nullptr, settled = nullptr;
 static bool armed = false;
 static LRESULT CALLBACK BlockedWindow(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
   if (armed && message == WM_WINDOWPOSCHANGING) {
@@ -67,6 +68,7 @@ static LRESULT CALLBACK BlockedWindow(HWND window, UINT message, WPARAM wparam, 
     std::fflush(stdout);
     WaitForSingleObject(release, INFINITE);
   }
+  if (armed && message == WM_WINDOWPOSCHANGED) SetEvent(settled);
   if (message == WM_DESTROY) { PostQuitMessage(0); return 0; }
   return DefWindowProcW(window, message, wparam, lparam);
 }
@@ -74,7 +76,14 @@ static LRESULT CALLBACK BlockedWindow(HWND window, UINT message, WPARAM wparam, 
 int wmain(int argc, wchar_t** argv) {
   if (argc != 3) return 2;
   const std::wstring mode = argv[1], name = argv[2];
-  if (mode == L"logs") return VerifyLogs(name);
+  if (mode == L"logs" || mode == L"backpressure") return VerifyLogs(name, mode == L"backpressure");
+  if (mode == L"make-transfer") {
+    const auto file = CreateFileW(name.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, 0, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return 43;
+    SetFilePointer(file, 32 * 1024 * 1024, nullptr, FILE_BEGIN);
+    const auto ok = SetEndOfFile(file); CloseHandle(file);
+    return ok ? 0 : 44;
+  }
   if (mode == L"capture-file") {
     using FinalPath = DWORD (WINAPI*)(HANDLE, LPWSTR, DWORD, DWORD);
     const auto path = reinterpret_cast<FinalPath>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetFinalPathNameByHandleW"));
@@ -86,6 +95,7 @@ int wmain(int argc, wchar_t** argv) {
   if (mode == L"block") {
     entered = CreateEventW(nullptr, TRUE, FALSE, (L"Local\\" + name + L"-entered").c_str());
     release = CreateEventW(nullptr, TRUE, FALSE, (L"Local\\" + name + L"-release").c_str());
+    settled = CreateEventW(nullptr, TRUE, FALSE, (L"Local\\" + name + L"-settled").c_str());
     WNDCLASSW type = {};
     type.hInstance = GetModuleHandleW(nullptr);
     type.lpszClassName = L"AgentRoverBlockedFixture";
@@ -101,11 +111,19 @@ int wmain(int argc, wchar_t** argv) {
     while (GetMessageW(&message, nullptr, 0, 0) > 0) { TranslateMessage(&message); DispatchMessageW(&message); }
     return 0;
   }
-  if (mode == L"entered" || mode == L"release") {
-    const auto event = OpenEventW(mode == L"entered" ? SYNCHRONIZE : EVENT_MODIFY_STATE, FALSE,
-        (L"Local\\" + name + (mode == L"entered" ? L"-entered" : L"-release")).c_str());
+  if (mode == L"reset") {
+    for (const auto suffix : {L"-entered", L"-release", L"-settled"}) {
+      const auto event = OpenEventW(EVENT_MODIFY_STATE, FALSE, (L"Local\\" + name + suffix).c_str());
+      if (!event || !ResetEvent(event)) return 42;
+      CloseHandle(event);
+    }
+    return 0;
+  }
+  if (mode == L"entered" || mode == L"release" || mode == L"settled") {
+    const auto event = OpenEventW(mode == L"release" ? EVENT_MODIFY_STATE : SYNCHRONIZE, FALSE,
+        (L"Local\\" + name + L"-" + mode).c_str());
     if (!event) return 5;
-    const bool success = mode == L"entered" ? WaitForSingleObject(event, 15000) == WAIT_OBJECT_0 : SetEvent(event);
+    const bool success = mode == L"release" ? SetEvent(event) : WaitForSingleObject(event, 15000) == WAIT_OBJECT_0;
     CloseHandle(event);
     return success ? 0 : 6;
   }

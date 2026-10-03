@@ -213,9 +213,7 @@ it.skipIf(!enabled)(
       agent?.release();
       try {
         if (deployment !== undefined)
-          await bootstrap.request('process.releaseManaged', {
-            managedProcessId: deployment.managedProcessId,
-          });
+          await bootstrap.releaseManaged(deployment.managedProcessId);
         await waitForResult(
           async () => {
             await bootstrap.request('file.remove', {
