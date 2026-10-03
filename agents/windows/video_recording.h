@@ -53,9 +53,11 @@ bool TakeVideoRecordingResult(
     std::string* error);
 
 /**
- * Cancels a retained recording and removes any temporary output.
+ * Requests cancellation, waiting at most 200 ms for native completion.
  *
  * @param store Connection-owned recording state.
+ * @remarks A still-running thread and context remain owned by the store. The
+ * isolated process owner must retain them until completion or process termination.
  */
 void CancelVideoRecording(VideoRecordingStore* store);
 

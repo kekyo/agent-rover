@@ -12,6 +12,7 @@
 #include "file_logger.h"
 #include "json_protocol.h"
 #include "operation_worker.h"
+#include "operation_limits.h"
 #include "version_banner.h"
 #include "win32_util.h"
 #include <algorithm>
@@ -26,13 +27,14 @@ namespace agent_rover {
 static constexpr size_t kMaxConnections = 16, kMaxWorkers = 8, kMaxRequests = 64;
 static constexpr size_t kConnectionQueueBytes = 32 * 1024 * 1024;
 static constexpr size_t kServerQueueBytes = 64 * 1024 * 1024;
-static constexpr uint32_t kAuthenticationMs = 10000, kFrameMs = 30000, kOperationMs = 180000;
+static constexpr uint32_t kAuthenticationMs = 10000, kFrameMs = 30000;
 using MonotonicClock = std::chrono::steady_clock;
 
 struct QueuedRequest {
   Frame frame;
   std::string id, method;
   MonotonicClock::time_point received;
+  uint32_t budget_ms = 120000;
 };
 
 struct QueuedResponse {
@@ -56,6 +58,7 @@ struct ClientSession {
   std::shared_ptr<ServerState> server;
   SocketConnection socket;
   uint32_t id;
+  uint32_t video_duration_ms = 0;
   bool closed = false;
   cardio::cancellation_source stop;
   std::deque<QueuedRequest> requests;
@@ -213,14 +216,16 @@ static cardio::promise<void> ExecuteRequests(std::shared_ptr<ClientSession> sess
       session->requests.pop_front();
       const auto size = request.frame.payload.size() + kFrameHeaderBytes;
       const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(MonotonicClock::now() - request.received).count();
-      if (elapsed >= kOperationMs) {
+      const auto remaining = RemainingOperationMs(request.budget_ms, elapsed);
+      if (!remaining) {
         PrintAgentLogEvent(context + " phase=expired-before-execution" + Elapsed(request.received));
         if (!request.id.empty()) EnqueueOutput(session, JsonFrame(CreateAgentFailure(request.id, "TIMEOUT", "Operation expired before execution.")));
         session->request_bytes -= size;
         session->server->request_bytes -= size;
+        if (request.frame.kind == FrameKind::Binary) { CloseSession(session, "Binary operation expired."); break; }
         continue;
       }
-      auto timeout = cardio::cancellations::timeout(kOperationMs - elapsed);
+      auto timeout = cardio::cancellations::timeout(remaining);
       auto cancel = cardio::cancellations::any(timeout.get_cancellation(), session->stop.get_cancellation());
       bool desktop = false;
       std::string failure;
@@ -313,6 +318,9 @@ static cardio::promise<void> ServeClient(std::shared_ptr<ClientSession> session)
       if (request.frame.kind == FrameKind::Json) {
         const std::string text(request.frame.payload.begin(), request.frame.payload.end());
         if (!ReadAgentRequest(text, &request.id, &request.method)) throw std::runtime_error("Invalid JSON request envelope.");
+        if (request.method == "agent.recordVideo" || request.method == "window.recordVideo")
+          session->video_duration_ms = ReadAgentVideoDuration(text);
+        request.budget_ms = OperationBudgetMs(request.method, session->video_duration_ms);
         const auto context = RequestContext(session->id, request);
         PrintAgentLogEvent(context + " phase=received");
         if (request.method == "agent.capabilities") {

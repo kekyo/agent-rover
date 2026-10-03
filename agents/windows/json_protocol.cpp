@@ -957,10 +957,10 @@ static bool ReadVideoParameters(
   if (!FindJsonUInt32Field(payload, "durationMs", duration_ms) ||
       !FindJsonUInt32Field(payload, "fps", fps) ||
       !FindJsonUInt32Field(payload, "quality", quality) ||
-      *duration_ms == 0 || *fps == 0 || *fps > 240 || *quality == 0 ||
+      *duration_ms == 0 || *duration_ms > 600000 || *fps == 0 || *fps > 240 || *quality == 0 ||
       *quality > 100) {
     *error =
-        "Video capture requires durationMs, fps 1 through 240, and quality "
+        "Video capture requires durationMs 1 through 600000, fps 1 through 240, and quality "
         "1 through 100.";
     return false;
   }
@@ -1106,6 +1106,11 @@ bool ReadAgentRequest(const std::string& payload, std::string* id, std::string* 
   return FindJsonStringField(payload, "kind", &kind) && kind == "request" &&
       FindJsonStringField(payload, "id", id) && !id->empty() && id->size() <= 128 &&
       FindJsonStringField(payload, "method", method) && !method->empty() && method->size() <= 128;
+}
+
+uint32_t ReadAgentVideoDuration(const std::string& payload) {
+  uint32_t duration = 0;
+  return FindJsonUInt32Field(payload, "durationMs", &duration) && duration <= 600000 ? duration : 0;
 }
 
 std::string CreateCapabilitiesResponse(const std::string& id) {

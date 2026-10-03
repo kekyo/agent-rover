@@ -3,6 +3,8 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+#include <winsock2.h>
+#include "../vendor/cardio/cardio.h"
 #include "win32_input.h"
 
 #include <windows.h>
@@ -198,9 +200,9 @@ static bool SendKeyPress(
   return SendModifiers(modifiers, false, error);
 }
 
-static bool SendUnicodeText(const std::string& text, std::string* error) {
+static cardio::promise<void> SendUnicodeTextAsync(const std::string& text, std::string* error, bool* succeeded) {
   if (!ReleaseShortcutModifiers(error)) {
-    return false;
+    co_return;
   }
   const std::wstring wide = Utf8ToWide(text);
   for (const wchar_t ch : wide) {
@@ -214,11 +216,20 @@ static bool SendUnicodeText(const std::string& text, std::string* error) {
     const UINT sent = SendInput(2, inputs, sizeof(INPUT));
     if (sent != 2) {
       *error = "SendInput unicode text failed.";
-      return false;
+      co_return;
     }
-    Sleep(20);
+    co_await cardio::promises::delay(20);
   }
-  return ReleaseShortcutModifiers(error);
+  *succeeded = ReleaseShortcutModifiers(error);
+}
+
+static bool SendUnicodeText(const std::string& text, std::string* error) {
+  // Pacing uses the isolated worker's dispatcher; input order stays serial.
+  bool succeeded = false;
+  cardio::dispatcher_host_win32_auto dispatcher;
+  auto typing = SendUnicodeTextAsync(text, error, &succeeded);
+  dispatcher.park();
+  return succeeded;
 }
 
 static bool MouseButtonFlags(

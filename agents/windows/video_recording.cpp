@@ -3,6 +3,8 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+#include <winsock2.h>
+#include "../vendor/cardio/cardio.h"
 #include "video_recording.h"
 
 #include <windows.h>
@@ -13,6 +15,20 @@
 #include "win32_video.h"
 
 namespace agent_rover {
+
+static cardio::promise<void> WaitRecording(HANDLE thread, uint32_t milliseconds, bool* finished) {
+  auto timeout = cardio::cancellations::timeout(milliseconds);
+  try { co_await cardio::from_win32_handle(thread, timeout.get_cancellation()); *finished = true; }
+  catch (const std::exception&) {}
+}
+
+static bool FinishRecordingWait(HANDLE thread, uint32_t milliseconds) {
+  bool finished = false;
+  cardio::dispatcher_host_win32_auto dispatcher;
+  auto wait = WaitRecording(thread, milliseconds, &finished);
+  dispatcher.park();
+  return finished;
+}
 
 struct VideoRecordingContext {
   std::string recording_id;
@@ -84,8 +100,8 @@ bool TakeVideoRecordingResult(
     *error = "Unknown video recording id.";
     return false;
   }
-  if (WaitForSingleObject(store->thread, INFINITE) != WAIT_OBJECT_0) {
-    *error = "Waiting for the video recording worker failed.";
+  if (!FinishRecordingWait(store->thread, std::min<uint32_t>(context->request.duration_ms, 600000) + 120000)) {
+    *error = "Video result deadline exceeded; native recording ownership is retained.";
     return false;
   }
 
@@ -111,7 +127,9 @@ void CancelVideoRecording(VideoRecordingStore* store) {
     return;
   }
   InterlockedExchange(&context->cancelled, 1);
-  WaitForSingleObject(store->thread, INFINITE);
+  // This is the isolated process's EOF path. If the codec is still executing,
+  // the parent terminates the process; never free memory under a live thread.
+  if (!FinishRecordingWait(store->thread, 200)) return;
   CloseHandle(store->thread);
   if (context->succeeded) {
     RemoveVideoCaptureResult(context->result);

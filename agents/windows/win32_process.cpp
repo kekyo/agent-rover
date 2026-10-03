@@ -345,6 +345,10 @@ bool LaunchManagedProcess(
     const ManagedProcessLaunchOptions& options,
     ManagedProcess* process,
     OperationError* error) {
+  if (g_managed_processes.size() >= 64) {
+    *error = MakeOperationError("ManagedProcessLimit", options.launch.path, ERROR_TOO_MANY_OPEN_FILES);
+    return false;
+  }
   HANDLE job = CreateJobObjectW(nullptr, nullptr);
   if (job == nullptr) { *error = MakeOperationError("CreateJobObjectW", options.launch.path, GetLastError()); return false; }
   if (options.kill_tree_on_release) {

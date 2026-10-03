@@ -28,6 +28,9 @@ void SetAgentVideoCapability(bool supported);
  * @param payload JSON request. @param id Request identifier. @param method Operation name.
  * @return Whether a bounded request envelope was decoded. */
 bool ReadAgentRequest(const std::string& payload, std::string* id, std::string* method);
+/** Reads a bounded recording duration for the operation scheduler.
+ * @param payload Request JSON. @return Duration up to ten minutes, or zero if invalid. */
+uint32_t ReadAgentVideoDuration(const std::string& payload);
 /** Builds a capability response using cached data only.
  * @param id Request identifier. @return JSON response. */
 std::string CreateCapabilitiesResponse(const std::string& id);
