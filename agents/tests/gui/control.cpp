@@ -76,6 +76,14 @@ static LRESULT CALLBACK BlockedWindow(HWND window, UINT message, WPARAM wparam, 
 int wmain(int argc, wchar_t** argv) {
   if (argc != 3) return 2;
   const std::wstring mode = argv[1], name = argv[2];
+  if (mode == L"wait-exit" || mode == L"running" || mode == L"kill-process") {
+    const auto process = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, FALSE, std::stoul(name));
+    if (!process) return mode == L"wait-exit" && GetLastError() == ERROR_INVALID_PARAMETER ? 0 : 50;
+    if (mode == L"kill-process") TerminateProcess(process, 202);
+    const auto waited = WaitForSingleObject(process, mode == L"running" ? 0 : 15000);
+    CloseHandle(process);
+    return waited == (mode == L"running" ? WAIT_TIMEOUT : WAIT_OBJECT_0) ? 0 : 51;
+  }
   if (mode == L"logs" || mode == L"backpressure") return VerifyLogs(name, mode == L"backpressure");
   if (mode == L"make-transfer") {
     const auto file = CreateFileW(name.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, 0, nullptr);
@@ -91,6 +99,26 @@ int wmain(int argc, wchar_t** argv) {
     if (!path || !path(GetStdHandle(STD_OUTPUT_HANDLE), wide, 32768, 0)) return 40;
     if (!WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, sizeof(utf8), nullptr, nullptr)) return 41;
     std::puts(utf8); return 0;
+  }
+  if (mode == L"hold-file") {
+    // Fault injection: keep a capture file open without delete sharing until
+    // the test explicitly releases it. The event removes any timing race.
+    const auto file = CreateFileW(name.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return 45;
+    const auto event_name = L"Local\\AgentRoverFileHold-" + std::to_wstring(GetCurrentProcessId());
+    const auto event = CreateEventW(nullptr, TRUE, FALSE, event_name.c_str());
+    if (!event) { CloseHandle(file); return 46; }
+    std::printf("held %lu\n", GetCurrentProcessId()); std::fflush(stdout);
+    const auto waited = WaitForSingleObject(event, 120000);
+    CloseHandle(event); CloseHandle(file);
+    return waited == WAIT_OBJECT_0 ? 0 : 47;
+  }
+  if (mode == L"release-file") {
+    const auto event = OpenEventW(EVENT_MODIFY_STATE, FALSE, (L"Local\\AgentRoverFileHold-" + name).c_str());
+    if (!event) return 48;
+    const auto released = SetEvent(event); CloseHandle(event);
+    return released ? 0 : 49;
   }
   if (mode == L"block") {
     entered = CreateEventW(nullptr, TRUE, FALSE, (L"Local\\" + name + L"-entered").c_str());
@@ -129,6 +157,13 @@ int wmain(int argc, wchar_t** argv) {
   }
   const auto window = FindWindowW(L"AgentRoverLogViewer", (L"agent-rover logs (" + name + L")").c_str());
   if (!window) return 7;
+  if (mode == L"kill-server") {
+    DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
+    const auto process = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
+    if (!process || !TerminateProcess(process, 203)) return 52;
+    const auto waited = WaitForSingleObject(process, 15000); CloseHandle(process);
+    return waited == WAIT_OBJECT_0 ? 0 : 53;
+  }
   if (mode == L"hold-logger" || mode == L"logger-held" || mode == L"resume-logger") {
     DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
     return LoggerThreads(pid, mode);

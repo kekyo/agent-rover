@@ -132,6 +132,13 @@ cardio::promise<WorkerMessage> ReadWorker(Worker worker, cardio::cancellation ca
   co_return message;
 }
 
+cardio::promise<void> InitializeOperationWorker(Worker worker) {
+  auto deadline = cardio::cancellations::timeout(3000);
+  const auto ownership = co_await ReadWorker(worker, deadline.get_cancellation());
+  if (ownership.kind != WorkerMessageKind::CaptureRoot)
+    throw std::runtime_error("Missing capture ownership message.");
+}
+
 cardio::promise<bool> StopOperationWorker(Worker worker) {
   if (!worker || !worker->process) co_return true;
   // Only call after pending pipe I/O has completed (including native cancellation).
@@ -149,11 +156,22 @@ cardio::promise<bool> StopOperationWorker(Worker worker) {
     try { co_await cardio::from_win32_handle(worker->process, deadline.get_cancellation()); exited = true; }
     catch (const cardio::canceled_exception&) {}
   }
-  if (!exited || worker->role != HelperRole::Operations || worker->resources_recovered) co_return exited;
-  // An initialization failure before ownership was delivered may have created
-  // a directory. Keep the slot quarantined instead of guessing a deletion path.
-  if (worker->capture_root.empty()) co_return false;
+  co_return exited;
+}
+
+cardio::promise<bool> RecoverOperationWorker(Worker worker) {
+  if (worker->role != HelperRole::Operations || worker->resources_recovered) co_return true;
+  // Never guess a deletion path after a failed startup. Execution and desktop
+  // ownership are independent of this diagnostic and file-recovery record.
+  if (worker->capture_root.empty()) {
+    PrintAgentLogEvent("phase=cleanup-unavailable reason=capture ownership was not delivered");
+    co_return false;
+  }
   bool recovered = false;
+  if (worker->recovery) {
+    if (!co_await StopOperationWorker(worker->recovery)) co_return false;
+    worker->recovery.reset();
+  }
   try {
     worker->recovery = StartOperationWorker(HelperRole::Cleanup);
     auto deadline = cardio::cancellations::timeout(3000);
@@ -231,7 +249,8 @@ int RunCleanupWorker() {
       return 0;
     }
     SendWorkerReplyText(WorkerMessageKind::LogError,
-        error.native_operation + " Win32=" + std::to_string(error.os_code) + " path=" + path);
+        error.native_operation + " Win32=" + std::to_string(error.os_code) +
+        " stage=" + error.stage + " path=" + error.path);
   } catch (...) {}
   return 1;
 }

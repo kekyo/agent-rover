@@ -54,9 +54,17 @@ cardio::promise<void> WriteWorker(Worker worker, WorkerMessage message, cardio::
  * @param worker Child. @param cancellation Deadline or shutdown signal.
  * @return Message. */
 cardio::promise<WorkerMessage> ReadWorker(Worker worker, cardio::cancellation cancellation);
+/** Receives capture ownership before executing or waiting for desktop access.
+ * Startup has its own deadline so client cancellation cannot discard ownership.
+ * @param worker Newly started operation helper. @return Completion promise. */
+cardio::promise<void> InitializeOperationWorker(Worker worker);
 /** Stops a helper with a finite grace period, then terminates only that helper.
  * @param worker Child. @return True if native process termination was confirmed. */
 cardio::promise<bool> StopOperationWorker(Worker worker);
+/** Attempts file recovery separately from process termination.
+ * @param worker Stopped helper whose ownership record is retained for retries.
+ * @return True if all owned temporary files were recovered. */
+cardio::promise<bool> RecoverOperationWorker(Worker worker);
 /** Runs the private child protocol. Standard handles carry IPC, never console text.
  * @param probe Whether only capability detection is required.
  * @param max_transfer_bytes Maximum whole-file read and retained incoming bytes.
