@@ -165,9 +165,16 @@ static int RunTests(int argc, wchar_t** argv) {
   // A registered directory cannot lend automatic repair to a replacement.
   std::string captured;
   if (!CreateCaptureDirectory(&captured, &error)) return 50;
+  CaptureIdentity identity = {};
+  if (!GetCaptureIdentity(captured, &identity)) return 80;
+  capture_directories.clear();
+  auto wrong_identity = identity; ++wrong_identity.index_low;
+  if (RestoreCaptureIdentity(captured, wrong_identity, &error) ||
+      !RestoreCaptureIdentity(captured, identity, &error)) return 81;
   const auto original = Utf8ToWide(captured);
   if (!MoveFileW(original.c_str(), (original + L"-old").c_str()) || !CreateDirectoryW(original.c_str(), nullptr) ||
       !Touch(original + L"\\retained") || !SetFileAttributesW((original + L"\\retained").c_str(), FILE_ATTRIBUTE_READONLY)) return 51;
+  if (RestoreCaptureIdentity(captured, identity, &error)) return 82;
   auto managed = policy; managed.managed_cleanup = true;
   if (RemoveWithPolicy(captured, managed, &error) || error.native_operation != "CleanupOwnership" ||
       (GetFileAttributesW((original + L"\\retained").c_str()) & FILE_ATTRIBUTE_READONLY) == 0) return 52;

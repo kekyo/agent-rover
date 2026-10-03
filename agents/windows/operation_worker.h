@@ -22,12 +22,14 @@ enum class WorkerMessageKind : uint32_t {
   /** File logger failure, with the failed native API and code. */ LogError = 106,
   /** Opens the initialized log directory through the shell. */ LogOpenFolder = 107,
   /** Requests an explicit flush before shutdown. */ LogFlush = 108,
+  /** Trusted temporary-root path and native identity, or cleanup command. */ CaptureRoot = 109,
 };
 /** Private process roles for this executable. */
 enum class HelperRole {
   /** Synchronous target operations. */ Operations,
   /** One startup capability/address probe. */ Probe,
   /** Isolated file persistence and shell integration. */ FileLogger,
+  /** Finite recovery of one stopped worker's resources. */ Cleanup,
 };
 /** A bounded IPC message. */
 struct WorkerMessage {
@@ -55,6 +57,9 @@ cardio::promise<bool> StopOperationWorker(Worker worker);
 /** Runs the private child protocol. Standard handles carry IPC, never console text.
  * @param probe Whether only capability detection is required. @return Process exit code. */
 int RunOperationWorker(bool probe);
+/** Runs private recovery with no access to network commands.
+ * @return Exit code after returning an explicit cleanup result. */
+int RunCleanupWorker();
 /** Reads a private command synchronously; only for an isolated helper process.
  * @param message Receives the command. @return False on pipe EOF/failure. */
 bool ReadWorkerCommand(WorkerMessage* message);

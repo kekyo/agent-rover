@@ -29,6 +29,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, wchar_t*, int) {
   int argc = 0;
   wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
   if (!argv) return 1;
+  if (argc == 2 && std::wstring(argv[1]) == L"--agent-cleanup-worker") {
+    LocalFree(argv);
+    return agent_rover::RunCleanupWorker();
+  }
   if (argc == 2 && std::wstring(argv[1]) == L"--agent-log-worker") {
     LocalFree(argv);
     return agent_rover::RunFileLogWorker();

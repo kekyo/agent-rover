@@ -33,6 +33,7 @@ it.skipIf(!enabled)(
     let deployment: { managedProcessId: number } | undefined;
     let fixture: { managedProcessId: number } | undefined;
     let operation: Promise<unknown> | undefined;
+    let capturedPath: string | undefined;
     const launch = async (
       path: string,
       args: string[],
@@ -131,6 +132,13 @@ it.skipIf(!enabled)(
       second.release();
       second = undefined;
       for (let i = 0; i < 1005; ++i) await first.capabilities();
+      const captured = await first.processes.launchManaged({
+        path: `${remote}\\control.exe`, arguments: ['capture-file', 'unused'],
+        captureStdout: true, createNoWindow: true, killTreeOnRelease: true,
+      });
+      await captured.waitForExit();
+      capturedPath = (await captured.stdoutText()).trim().replace(/^\\\\\?\\/u, '');
+      expect(capturedPath).toMatch(/stdout/u);
       fixture = await launch(`${remote}\\control.exe`, ['block', unique]);
       const window = await first.waitForWindow({
         title: unique,
@@ -159,9 +167,15 @@ it.skipIf(!enabled)(
       // Only now release the target; the checks above cannot pass by unblocking it.
       await control('release', unique);
       expect(await observed).not.toHaveProperty('error');
+      first.release(); first = undefined;
+      await waitForResult(async () => {
+        const result = await bootstrap.request('file.exists', { path: capturedPath! }) as { exists: boolean };
+        if (result.exists)
+          throw new Error('Disconnected worker still owns its capture file.');
+      }, { timeoutMs: 10000 });
       await control('exit', String(port));
       await control('logs', remote);
-      first.release();
+      first?.release();
       first = undefined;
       second.release();
       second = undefined;
@@ -224,6 +238,9 @@ it.skipIf(!enabled)(
             }),
           { timeoutMs: 30000 }
         );
+        if (capturedPath) await bootstrap.request('file.remove', {
+          path: capturedPath.replace(/\\[^\\]+$/u, ''), recursive: true, ignoreMissing: true,
+        });
       } finally {
         await bootstrap.close();
         await rm(local, { recursive: true, force: true });

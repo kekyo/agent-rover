@@ -241,6 +241,7 @@ static cardio::promise<void> ExecuteRequests(std::shared_ptr<ClientSession> sess
         co_await WriteWorker(session->worker, std::move(command), cancel.get_cancellation());
         for (;;) {
           auto response = co_await ReadWorker(session->worker, cancel.get_cancellation());
+          if (response.kind == WorkerMessageKind::CaptureRoot) continue;
           if (response.kind == WorkerMessageKind::Complete) break;
           if (response.kind == WorkerMessageKind::Log) {
             PrintAgentLogEvent(context + " " + std::string(response.payload.begin(), response.payload.end()) + Elapsed(request.received));

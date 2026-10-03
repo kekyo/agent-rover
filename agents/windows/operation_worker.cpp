@@ -9,6 +9,7 @@
 #include "json_protocol.h"
 #include "win32_util.h"
 #include "win32_video.h"
+#include "win32_cleanup.h"
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
@@ -20,6 +21,10 @@ struct OperationWorker {
   HANDLE input = INVALID_HANDLE_VALUE;
   HANDLE output = INVALID_HANDLE_VALUE;
   HANDLE process = nullptr;
+  HelperRole role = HelperRole::Probe;
+  std::vector<unsigned char> capture_root;
+  Worker recovery;
+  bool resources_recovered = false;
   ~OperationWorker() {
     if (input != INVALID_HANDLE_VALUE) CloseHandle(input);
     if (output != INVALID_HANDLE_VALUE) CloseHandle(output);
@@ -50,6 +55,7 @@ static HANDLE CreateWorkerPipe(HANDLE* child, bool parent_reads) {
 
 Worker StartOperationWorker(HelperRole role) {
   auto worker = std::make_shared<OperationWorker>();
+  worker->role = role;
   HANDLE input = INVALID_HANDLE_VALUE, output = INVALID_HANDLE_VALUE;
   try {
     worker->input = CreateWorkerPipe(&input, false);
@@ -57,7 +63,8 @@ Worker StartOperationWorker(HelperRole role) {
     wchar_t path[32768] = {};
     if (!GetModuleFileNameW(nullptr, path, 32768)) throw NativeFailure("GetModuleFileNameW");
     const auto mode = role == HelperRole::Probe ? L"--agent-probe" :
-        role == HelperRole::FileLogger ? L"--agent-log-worker" : L"--agent-worker";
+        role == HelperRole::FileLogger ? L"--agent-log-worker" :
+        role == HelperRole::Cleanup ? L"--agent-cleanup-worker" : L"--agent-worker";
     auto command = BuildCommandLine(path, {mode});
     STARTUPINFOW startup = {};
     startup.cb = sizeof(startup);
@@ -112,6 +119,11 @@ cardio::promise<WorkerMessage> ReadWorker(Worker worker, cardio::cancellation ca
   if (header[1] > kMaxJsonPayloadBytes) throw std::runtime_error("Worker message limit exceeded.");
   WorkerMessage message = {static_cast<WorkerMessageKind>(header[0]), std::vector<unsigned char>(header[1])};
   co_await ReadPipe(worker->output, message.payload, cancellation);
+  if (worker->role == HelperRole::Operations && message.kind == WorkerMessageKind::CaptureRoot) {
+    if (!worker->capture_root.empty() || message.payload.size() <= sizeof(CaptureIdentity) || message.payload.size() > 32768)
+      throw std::runtime_error("Invalid capture ownership message.");
+    worker->capture_root = message.payload;
+  }
   co_return message;
 }
 
@@ -132,7 +144,24 @@ cardio::promise<bool> StopOperationWorker(Worker worker) {
     try { co_await cardio::from_win32_handle(worker->process, deadline.get_cancellation()); exited = true; }
     catch (const cardio::canceled_exception&) {}
   }
-  co_return exited;
+  if (!exited || worker->role != HelperRole::Operations || worker->resources_recovered) co_return exited;
+  // An initialization failure before ownership was delivered may have created
+  // a directory. Keep the slot quarantined instead of guessing a deletion path.
+  if (worker->capture_root.empty()) co_return false;
+  bool recovered = false;
+  try {
+    worker->recovery = StartOperationWorker(HelperRole::Cleanup);
+    auto deadline = cardio::cancellations::timeout(3000);
+    WorkerMessage command = {WorkerMessageKind::CaptureRoot, worker->capture_root};
+    co_await WriteWorker(worker->recovery, std::move(command), deadline.get_cancellation());
+    const auto response = co_await ReadWorker(worker->recovery, deadline.get_cancellation());
+    recovered = response.kind == WorkerMessageKind::Complete;
+    if (!recovered) PrintAgentLogEvent("phase=cleanup-failed " + std::string(response.payload.begin(), response.payload.end()));
+  } catch (const std::exception& error) { PrintAgentLogEvent(std::string("phase=cleanup-failed reason=") + error.what()); }
+  const auto cleanup_exited = co_await StopOperationWorker(worker->recovery);
+  if (cleanup_exited) worker->recovery.reset();
+  worker->resources_recovered = recovered && cleanup_exited;
+  co_return worker->resources_recovered;
 }
 
 static void BlockingWrite(const void* data, size_t size) {
@@ -176,6 +205,30 @@ bool ReadWorkerCommand(WorkerMessage* message) {
   message->kind = static_cast<WorkerMessageKind>(header[0]);
   message->payload.resize(header[1]);
   return BlockingRead(message->payload.data(), message->payload.size());
+}
+
+int RunCleanupWorker() {
+  SetHandleInformation(GetStdHandle(STD_INPUT_HANDLE), HANDLE_FLAG_INHERIT, 0);
+  SetHandleInformation(GetStdHandle(STD_OUTPUT_HANDLE), HANDLE_FLAG_INHERIT, 0);
+  try {
+    WorkerMessage command;
+    if (!ReadWorkerCommand(&command) || command.kind != WorkerMessageKind::CaptureRoot ||
+        command.payload.size() <= sizeof(CaptureIdentity) || command.payload.size() > 32768) return 1;
+    CaptureIdentity identity = {};
+    std::memcpy(&identity, command.payload.data(), sizeof(identity));
+    const std::string path(command.payload.begin() + sizeof(identity), command.payload.end());
+    OperationError error;
+    CleanupPolicy policy; policy.recursive = true; policy.ignore_missing = true; policy.managed_cleanup = true;
+    const auto owned = RestoreCaptureIdentity(path, identity, &error);
+    const auto missing = !owned && (error.os_code == ERROR_FILE_NOT_FOUND || error.os_code == ERROR_PATH_NOT_FOUND);
+    if (missing || (owned && RemoveWithPolicy(path, policy, &error))) {
+      SendWorkerReply(WorkerMessageKind::Complete, {});
+      return 0;
+    }
+    SendWorkerReplyText(WorkerMessageKind::LogError,
+        error.native_operation + " Win32=" + std::to_string(error.os_code) + " path=" + path);
+  } catch (...) {}
+  return 1;
 }
 
 static void SendWorkerChunk(const BinaryTransferChunk& chunk) {
@@ -245,6 +298,16 @@ int RunOperationWorker(bool probe) {
       WSACleanup();
       return 0;
     }
+    std::string directory;
+    OperationError directory_error;
+    CaptureIdentity identity = {};
+    if (!CreateCaptureDirectory(&directory, &directory_error) || !GetCaptureIdentity(directory, &identity))
+      throw std::runtime_error("Could not establish connection capture ownership.");
+    std::vector<unsigned char> ownership(sizeof(identity));
+    std::memcpy(ownership.data(), &identity, sizeof(identity));
+    ownership.insert(ownership.end(), directory.begin(), directory.end());
+    SendWorkerReply(WorkerMessageKind::CaptureRoot, ownership);
+    SetCaptureRoot(directory);
     SetAgentLogSink([](const AgentLogRecord& record) { SendWorkerReplyText(WorkerMessageKind::Log, record.event); });
     for (;;) {
       uint32_t header[2] = {};

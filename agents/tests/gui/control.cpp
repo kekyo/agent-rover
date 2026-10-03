@@ -75,6 +75,14 @@ int wmain(int argc, wchar_t** argv) {
   if (argc != 3) return 2;
   const std::wstring mode = argv[1], name = argv[2];
   if (mode == L"logs") return VerifyLogs(name);
+  if (mode == L"capture-file") {
+    using FinalPath = DWORD (WINAPI*)(HANDLE, LPWSTR, DWORD, DWORD);
+    const auto path = reinterpret_cast<FinalPath>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetFinalPathNameByHandleW"));
+    wchar_t wide[32768] = {}; char utf8[32768] = {};
+    if (!path || !path(GetStdHandle(STD_OUTPUT_HANDLE), wide, 32768, 0)) return 40;
+    if (!WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, sizeof(utf8), nullptr, nullptr)) return 41;
+    std::puts(utf8); return 0;
+  }
   if (mode == L"block") {
     entered = CreateEventW(nullptr, TRUE, FALSE, (L"Local\\" + name + L"-entered").c_str());
     release = CreateEventW(nullptr, TRUE, FALSE, (L"Local\\" + name + L"-release").c_str());

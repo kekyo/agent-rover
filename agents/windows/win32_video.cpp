@@ -4,6 +4,7 @@
 // https://github.com/kekyo/agent-rover
 
 #include "win32_video.h"
+#include "win32_cleanup.h"
 
 #include <windows.h>
 #include <mfapi.h>
@@ -580,14 +581,13 @@ static bool CreateVideoTempPath(
     std::string* directory,
     std::wstring* path,
     std::string* error) {
-  wchar_t temp_directory[MAX_PATH] = {};
-  const DWORD length = GetTempPathW(MAX_PATH, temp_directory);
-  if (length == 0 || length >= MAX_PATH) {
+  const auto temp_directory = Utf8ToWide(CaptureRoot());
+  if (temp_directory.empty() || temp_directory.size() >= MAX_PATH) {
     *error = "GetTempPathW failed while creating video output.";
     return false;
   }
   wchar_t unique_path[MAX_PATH] = {};
-  if (GetTempFileNameW(temp_directory, L"arv", 0, unique_path) == 0) {
+  if (GetTempFileNameW(temp_directory.c_str(), L"arv", 0, unique_path) == 0) {
     *error = "GetTempFileNameW failed while creating video output.";
     return false;
   }
