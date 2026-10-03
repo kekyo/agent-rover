@@ -24,6 +24,9 @@ enum class WorkerMessageKind : uint32_t {
   /** Opens the initialized log directory through the shell. */ LogOpenFolder = 107,
   /** Requests an explicit flush before shutdown. */ LogFlush = 108,
   /** Trusted temporary-root path and native identity, or cleanup command. */ CaptureRoot = 109,
+  /** Parent-owned managed application launch. */ Launch = 110,
+  /** Structured native launch failure. */ LaunchError = 111,
+  /** Releases an acknowledged parent launch registry entry. */ ReleaseLaunch = 112,
 };
 /** Private process roles for this executable. */
 enum class HelperRole {
@@ -31,6 +34,8 @@ enum class HelperRole {
   /** One startup capability/address probe. */ Probe,
   /** Isolated file persistence and shell integration. */ FileLogger,
   /** Finite recovery of one stopped worker's resources. */ Cleanup,
+  /** Creates one application inside a parent-owned Job. */ Launch,
+  /** Launch whose application tree survives session release. */ PersistentLaunch,
 };
 /** A bounded IPC message. */
 struct WorkerMessage {
@@ -58,6 +63,10 @@ cardio::promise<WorkerMessage> ReadWorker(Worker worker, cardio::cancellation ca
  * Startup has its own deadline so client cancellation cannot discard ownership.
  * @param worker Newly started operation helper. @return Completion promise. */
 cardio::promise<void> InitializeOperationWorker(Worker worker);
+/** Handles private launch/release messages while retaining parent ownership.
+ * @param worker Operation helper. @param message Private reply.
+ * @param cancellation Operation deadline. @return Whether the message was handled. */
+cardio::promise<bool> HandleWorkerOwnership(Worker worker, WorkerMessage message, cardio::cancellation cancellation);
 /** Stops a helper with a finite grace period, then terminates only that helper.
  * @param worker Child. @return True if native process termination was confirmed. */
 cardio::promise<bool> StopOperationWorker(Worker worker);

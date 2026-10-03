@@ -120,7 +120,19 @@ int wmain(int argc, wchar_t** argv) {
     const auto released = SetEvent(event); CloseHandle(event);
     return released ? 0 : 49;
   }
-  if (mode == L"block") {
+  if (mode == L"block-tree") {
+    auto command = L"\"" + std::wstring(argv[0]) + L"\" block \"" + name + L"-child\"";
+    STARTUPINFOW startup = {}; startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    PROCESS_INFORMATION process = {};
+    if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &startup, &process)) return 55;
+    std::printf("child=%lu\n", process.dwProcessId); std::fflush(stdout);
+    CloseHandle(process.hThread); CloseHandle(process.hProcess);
+  }
+  if (mode == L"block" || mode == L"block-tree") {
     entered = CreateEventW(nullptr, TRUE, FALSE, (L"Local\\" + name + L"-entered").c_str());
     release = CreateEventW(nullptr, TRUE, FALSE, (L"Local\\" + name + L"-release").c_str());
     settled = CreateEventW(nullptr, TRUE, FALSE, (L"Local\\" + name + L"-settled").c_str());
@@ -157,6 +169,23 @@ int wmain(int argc, wchar_t** argv) {
   }
   const auto window = FindWindowW(L"AgentRoverLogViewer", (L"agent-rover logs (" + name + L")").c_str());
   if (!window) return 7;
+  if (mode == L"children") {
+    DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
+    const auto snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    PROCESSENTRY32W process = {}; process.dwSize = sizeof(process);
+    if (Process32FirstW(snapshot, &process)) do {
+      if (process.th32ParentProcessID == pid) std::printf("%lu\n", process.th32ProcessID);
+    } while (Process32NextW(snapshot, &process));
+    CloseHandle(snapshot); return 0;
+  }
+  if (mode == L"metrics") {
+    DWORD pid = 0, handles = 0; GetWindowThreadProcessId(window, &pid);
+    const auto process = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!process || !GetProcessHandleCount(process, &handles)) return 54;
+    CloseHandle(process);
+    std::printf("pid=%lu handles=%lu\n", pid, handles);
+    return 0;
+  }
   if (mode == L"kill-server") {
     DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
     const auto process = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);

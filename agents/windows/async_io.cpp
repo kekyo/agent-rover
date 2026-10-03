@@ -76,6 +76,10 @@ static cardio::promise<void> DispatchSocketEvents(AsyncSocket* connection) {
 SocketConnection AdoptSocket(SOCKET socket, bool listener) {
   auto connection = std::make_shared<AsyncSocket>();
   connection->socket = socket;
+  // The pipe helpers inherit only their IPC handles, never a listening or
+  // accepted socket that could keep a dead host's TCP session alive.
+  if (!SetHandleInformation(reinterpret_cast<HANDLE>(socket), HANDLE_FLAG_INHERIT, 0))
+    throw SocketError("SetHandleInformation(socket)", GetLastError());
   connection->event = WSACreateEvent();
   if (connection->event == WSA_INVALID_EVENT)
     throw SocketError("WSACreateEvent", WSAGetLastError());

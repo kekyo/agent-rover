@@ -9,6 +9,7 @@
 #include "operation_error.h"
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -60,6 +61,25 @@ struct ManagedProcess {
   /** Captured stderr path, or empty when stderr is not captured. */
   std::string stderr_path;
 };
+
+/** Native ownership transferred by the parent launch broker. */
+struct ManagedProcessHandles {
+  /** Process handle owned by the receiving worker. */ void* process = nullptr;
+  /** Job handle owned by the receiving worker. */ void* job = nullptr;
+  /** Native root process id. */ uint32_t process_id = 0;
+  /** Parent registry entry, zero for a local launch. */ uint32_t ownership_id = 0;
+};
+/** Delegates application creation to a parent-owned Job before it can run. */
+using ManagedLaunch = std::function<bool(const ManagedProcessLaunchOptions&, ManagedProcessHandles*, OperationError*)>;
+/** Releases the parent's ownership entry after normal managed release. */
+using ManagedRelease = std::function<bool(uint32_t, OperationError*)>;
+/** Installs launch/release delegates in an isolated operation worker.
+ * @param launch Owned application launcher. @param release Parent ownership release. */
+void SetManagedProcessBroker(ManagedLaunch launch, ManagedRelease release);
+/** Launches inside the calling launch helper's already assigned Job.
+ * @param options Application settings. @param handles Receives the process handle and id.
+ * @param error Native failure. @return Whether launch succeeded. */
+bool LaunchInOwnedJob(const ApplicationLaunchOptions& options, ManagedProcessHandles* handles, OperationError* error);
 
 /** Process snapshot returned to the driver. */
 struct ProcessSnapshot {

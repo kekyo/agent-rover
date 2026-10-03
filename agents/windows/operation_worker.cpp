@@ -10,6 +10,7 @@
 #include "win32_util.h"
 #include "win32_video.h"
 #include "win32_cleanup.h"
+#include "managed_launch.h"
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
@@ -21,14 +22,19 @@ struct OperationWorker {
   HANDLE input = INVALID_HANDLE_VALUE;
   HANDLE output = INVALID_HANDLE_VALUE;
   HANDLE process = nullptr;
+  HANDLE job = nullptr;
   HelperRole role = HelperRole::Probe;
   std::vector<unsigned char> capture_root;
   Worker recovery;
   bool resources_recovered = false;
+  std::map<uint32_t, Worker> applications;
+  uint32_t next_application = 0;
+  bool captures_output = false;
   ~OperationWorker() {
     if (input != INVALID_HANDLE_VALUE) CloseHandle(input);
     if (output != INVALID_HANDLE_VALUE) CloseHandle(output);
     if (process) CloseHandle(process);
+    if (job) CloseHandle(job);
   }
 };
 
@@ -58,12 +64,23 @@ Worker StartOperationWorker(HelperRole role, uint64_t max_transfer_bytes) {
   worker->role = role;
   HANDLE input = INVALID_HANDLE_VALUE, output = INVALID_HANDLE_VALUE;
   try {
+    worker->job = CreateJobObjectW(nullptr, nullptr);
+    if (!worker->job) throw NativeFailure("CreateJobObjectW(worker)");
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {};
+    if (role != HelperRole::PersistentLaunch)
+      limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (role == HelperRole::Operations) limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+    // Opening the log folder must not tie a new Explorer process to the logger.
+    if (role == HelperRole::FileLogger) limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+    if (!SetInformationJobObject(worker->job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)))
+      throw NativeFailure("SetInformationJobObject(worker)");
     worker->input = CreateWorkerPipe(&input, false);
     worker->output = CreateWorkerPipe(&output, true);
     wchar_t path[32768] = {};
     if (!GetModuleFileNameW(nullptr, path, 32768)) throw NativeFailure("GetModuleFileNameW");
     const auto mode = role == HelperRole::Probe ? L"--agent-probe" :
         role == HelperRole::FileLogger ? L"--agent-log-worker" :
+        (role == HelperRole::Launch || role == HelperRole::PersistentLaunch) ? L"--agent-launch-worker" :
         role == HelperRole::Cleanup ? L"--agent-cleanup-worker" : L"--agent-worker";
     std::vector<std::wstring> arguments = {mode};
     if (role == HelperRole::Operations) {
@@ -82,6 +99,13 @@ Worker StartOperationWorker(HelperRole role, uint64_t max_transfer_bytes) {
         nullptr, nullptr, &startup, &process)) throw NativeFailure("CreateProcessW(worker)");
     worker->process = process.hProcess;
     CloseHandle(process.hThread);
+    // Helpers wait for their first command before launching user code. A parent
+    // death before assignment closes the pipe; no suspended orphan is created.
+    if (!AssignProcessToJobObject(worker->job, worker->process)) {
+      const auto error = NativeFailure("AssignProcessToJobObject(worker)");
+      TerminateProcess(worker->process, ERROR_PROCESS_ABORTED);
+      throw error;
+    }
   } catch (...) {
     if (input != INVALID_HANDLE_VALUE) CloseHandle(input);
     if (output != INVALID_HANDLE_VALUE) CloseHandle(output);
@@ -139,6 +163,89 @@ cardio::promise<void> InitializeOperationWorker(Worker worker) {
     throw std::runtime_error("Missing capture ownership message.");
 }
 
+cardio::promise<bool> HandleWorkerOwnership(Worker worker, WorkerMessage message, cardio::cancellation cancellation) {
+  if (message.kind == WorkerMessageKind::ReleaseLaunch) {
+    if (message.payload.size() != sizeof(uint32_t)) throw std::runtime_error("Invalid launch release.");
+    uint32_t id = 0; std::memcpy(&id, message.payload.data(), sizeof(id));
+    if (!worker->applications.erase(id)) throw std::runtime_error("Unknown launch owner.");
+    WorkerMessage reply = {WorkerMessageKind::Complete, {}};
+    co_await WriteWorker(worker, std::move(reply), cancellation);
+    co_return true;
+  }
+  if (message.kind != WorkerMessageKind::Launch) co_return false;
+  if (worker->applications.size() >= 64) throw std::runtime_error("Owned launch limit reached.");
+  const auto options = DecodeManagedLaunch(message.payload);
+  const auto id = ++worker->next_application;
+  if (!id) throw std::runtime_error("Owned launch identifier exhausted.");
+  auto launcher = StartOperationWorker(options.kill_tree_on_release ? HelperRole::Launch : HelperRole::PersistentLaunch);
+  launcher->captures_output = !options.launch.stdout_path.empty() || !options.launch.stderr_path.empty();
+  worker->applications.emplace(id, launcher);
+  co_await WriteWorker(launcher, std::move(message), cancellation);
+  auto reply = co_await ReadWorker(launcher, cancellation);
+  if (reply.kind == WorkerMessageKind::Launch) {
+    ManagedProcessHandles handles;
+    if (reply.payload.size() != sizeof(handles)) throw std::runtime_error("Invalid launch handles.");
+    std::memcpy(&handles, reply.payload.data(), sizeof(handles));
+    HANDLE target = nullptr;
+    if (!DuplicateHandle(launcher->process, handles.process, worker->process,
+        &target, 0, FALSE, DUPLICATE_SAME_ACCESS)) throw NativeFailure("DuplicateHandle(launched process)");
+    handles.process = target;
+    if (!DuplicateHandle(GetCurrentProcess(), launcher->job, worker->process,
+        &target, 0, FALSE, DUPLICATE_SAME_ACCESS)) throw NativeFailure("DuplicateHandle(owned Job)");
+    handles.job = target;
+    handles.ownership_id = id;
+    std::memcpy(reply.payload.data(), &handles, sizeof(handles));
+    PrintAgentLogEvent("phase=owned-launch process=" + std::to_string(handles.process_id) +
+        " killOnRelease=" + std::to_string(options.kill_tree_on_release));
+  } else if (reply.kind != WorkerMessageKind::LaunchError) throw std::runtime_error("Invalid launch reply.");
+  if (!co_await StopOperationWorker(launcher)) throw std::runtime_error("Launch helper termination unconfirmed.");
+  if (reply.kind == WorkerMessageKind::LaunchError) worker->applications.erase(id);
+  co_await WriteWorker(worker, std::move(reply), cancellation);
+  co_return true;
+}
+
+static bool JobEmpty(HANDLE job) {
+  JOBOBJECT_BASIC_ACCOUNTING_INFORMATION state = {};
+  if (!QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &state, sizeof(state), nullptr))
+    throw NativeFailure("QueryInformationJobObject(owned processes)");
+  return state.ActiveProcesses == 0;
+}
+
+static cardio::promise<void> WaitForJobExit(HANDLE job, cardio::cancellation cancellation) {
+  // Termination prevents successful new launches in this Job. Wait on native
+  // process handles rather than polling an accounting counter or a Job handle
+  // (a Job is not generally signaled when its last process exits).
+  for (unsigned int snapshot = 0; snapshot < 16 && !JobEmpty(job); ++snapshot) {
+    cancellation.throw_if_cancellation_requested();
+    std::vector<ULONG_PTR> storage(130);
+    for (;;) {
+      if (QueryInformationJobObject(job, JobObjectBasicProcessIdList, storage.data(),
+          storage.size() * sizeof(ULONG_PTR), nullptr)) break;
+      if (GetLastError() != ERROR_MORE_DATA || storage.size() >= 65538)
+        throw NativeFailure("QueryInformationJobObject(process ids)");
+      storage.resize(storage.size() * 2);
+    }
+    const auto list = reinterpret_cast<const JOBOBJECT_BASIC_PROCESS_ID_LIST*>(storage.data());
+    bool observed = false;
+    for (DWORD i = 0; i < list->NumberOfProcessIdsInList; ++i) {
+      const auto process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE, list->ProcessIdList[i]);
+      if (!process) {
+        if (GetLastError() == ERROR_INVALID_PARAMETER) continue;
+        throw NativeFailure("OpenProcess(owned exit)");
+      }
+      BOOL member = FALSE;
+      if (!IsProcessInJob(process, job, &member)) { const auto error = NativeFailure("IsProcessInJob"); CloseHandle(process); throw error; }
+      if (!member) { CloseHandle(process); continue; } // A recycled PID is never a termination target.
+      try { co_await cardio::from_win32_handle(process, cancellation); }
+      catch (...) { CloseHandle(process); throw; }
+      CloseHandle(process);
+      observed = true;
+    }
+    if (!observed) break;
+  }
+  if (!JobEmpty(job)) throw std::runtime_error("Owned process exit could not be confirmed.");
+}
+
 cardio::promise<bool> StopOperationWorker(Worker worker) {
   if (!worker || !worker->process) co_return true;
   // Only call after pending pipe I/O has completed (including native cancellation).
@@ -156,11 +263,39 @@ cardio::promise<bool> StopOperationWorker(Worker worker) {
     try { co_await cardio::from_win32_handle(worker->process, deadline.get_cancellation()); exited = true; }
     catch (const cardio::canceled_exception&) {}
   }
-  co_return exited;
+  if (!exited || worker->role != HelperRole::Operations) co_return exited;
+  try {
+    auto deadline = cardio::cancellations::timeout(5000);
+    for (const auto& [id, launcher] : worker->applications) {
+      if (launcher->role == HelperRole::PersistentLaunch) {
+        if (!co_await StopOperationWorker(launcher)) co_return false;
+        continue;
+      }
+      if (!TerminateJobObject(launcher->job, ERROR_PROCESS_ABORTED)) throw NativeFailure("TerminateJobObject(owned launch)");
+      co_await WaitForJobExit(launcher->job, deadline.get_cancellation());
+    }
+    std::erase_if(worker->applications, [](const auto& entry) {
+      return entry.second->role == HelperRole::PersistentLaunch && !entry.second->captures_output;
+    });
+    PrintAgentLogEvent("phase=owned-processes-stopped count=" + std::to_string(worker->applications.size()));
+  } catch (const std::exception& error) {
+    PrintAgentLogEvent(std::string("phase=owned-processes-stop-failed reason=") + error.what());
+    co_return false;
+  }
+  co_return true;
 }
 
 cardio::promise<bool> RecoverOperationWorker(Worker worker) {
   if (worker->role != HelperRole::Operations || worker->resources_recovered) co_return true;
+  try {
+    // Opted-out applications may still write captured output. Their Job stays
+    // registered, but they neither hold a desktop permit nor an execution slot.
+    for (const auto& [id, launcher] : worker->applications) if (!JobEmpty(launcher->job)) co_return false;
+    worker->applications.clear();
+  } catch (const std::exception& error) {
+    PrintAgentLogEvent(std::string("phase=capture-wait reason=") + error.what());
+    co_return false;
+  }
   // Never guess a deletion path after a failed startup. Execution and desktop
   // ownership are independent of this diagnostic and file-recovery record.
   if (worker->capture_root.empty()) {
@@ -333,6 +468,7 @@ int RunOperationWorker(bool probe, uint64_t max_transfer_bytes) {
     ownership.insert(ownership.end(), directory.begin(), directory.end());
     SendWorkerReply(WorkerMessageKind::CaptureRoot, ownership);
     SetCaptureRoot(directory);
+    InstallManagedLaunchBroker();
     SetAgentLogSink([](const AgentLogRecord& record) { SendWorkerReplyText(WorkerMessageKind::Log, record.event); });
     for (;;) {
       uint32_t header[2] = {};
