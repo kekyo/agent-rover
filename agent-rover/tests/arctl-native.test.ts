@@ -129,16 +129,15 @@ it('captures visible desktop and window pixels without changing the active windo
   const process_ = await observer!.applications.launch({
     path: remoteDisplay,
     arguments: [title],
+    createNoWindow: true,
   });
+  let foregroundPid: number | undefined;
   try {
     await exec('wine', [fixture, 'wait-ready', `${title}-ready`], {
       env: environment,
       timeout: 40000,
     });
     const window = await observer!.waitForWindow({ title, visible: true });
-    const active = (await observer!.windows())
-      .filter((window) => window.active)
-      .map((window) => window.id);
     const expectedPixel = [36, 180, 90, 255];
     // WM_PAINT completes before the desktop compositor finishes showing a
     // new window. Observe the rendered content without activating the window.
@@ -151,6 +150,30 @@ it('captures visible desktop and window pixels without changing the active windo
       expect([...reference.data.subarray(offset, offset + 4)]).toEqual(
         expectedPixel
       );
+    });
+    // Own the foreground reference so an unrelated window's lifetime cannot
+    // decide which window is expected to remain active after capture.
+    const foregroundProcess = await observer!.applications.launch({
+      path: remoteDisplay,
+      arguments: [`${title}-foreground`],
+      createNoWindow: true,
+    });
+    foregroundPid = foregroundProcess.id;
+    const foreground = await observer!.waitForWindow({
+      processId: foregroundPid,
+      visible: true,
+    });
+    await foreground.setBounds({
+      ...foreground.bounds,
+      x: window.bounds.x + window.bounds.width + 20,
+    });
+    await foreground.activate();
+    await waitForResult(async () => {
+      expect(
+        (await observer!.windows())
+          .filter((entry) => entry.active)
+          .map((entry) => entry.id)
+      ).toEqual([foreground.id]);
     });
     for (const wholeScreen of [true, false]) {
       const path = join(directory, wholeScreen ? 'desktop.png' : 'window.png');
@@ -191,8 +214,10 @@ it('captures visible desktop and window pixels without changing the active windo
       (await observer!.windows())
         .filter((window) => window.active)
         .map((window) => window.id)
-    ).toEqual(active);
+    ).toEqual([foreground.id]);
   } finally {
+    if (foregroundPid !== undefined)
+      await observer!.processes.kill(foregroundPid);
     await observer!.processes.kill(process_.id);
   }
 }, 60000);

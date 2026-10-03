@@ -94,7 +94,7 @@ export const parseArctlArguments = (
     .option('--token <TOKEN>', 'Authentication token (AGENT_ROVER_AUTH_TOKEN)')
     .option(
       '--timeout <SECONDS>',
-      'Connection and request timeout (default 30)'
+      'Connection and request timeout, 0.001 to 2147483.647 seconds (default 30)'
     )
     .option('--json', 'Print one JSON result on stdout')
     .helpOption('-h, --help', 'Show help without connecting')

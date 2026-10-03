@@ -23,6 +23,9 @@
   "files": [
     "dist"
   ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "vite build && vite build --mode cli",
     "test": "npm run build && vitest run",
