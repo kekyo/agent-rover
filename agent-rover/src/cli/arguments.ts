@@ -28,6 +28,14 @@ export type ArctlOperation =
       /** Local output path. */ readonly output: string;
       /** Exact window ID, or the whole virtual desktop. */ readonly window:
         string | undefined;
+    }
+  | {
+      /** Record an H.264 MP4. */ readonly command: 'record';
+      /** Local output path. */ readonly output: string;
+      /** Exact window ID, or the whole virtual desktop. */ readonly window:
+        string | undefined;
+      /** Recording duration in milliseconds. */ readonly durationMs: number;
+      /** Encoded frames per second. */ readonly fps: number;
     };
 
 /** Parsed invocation of the standalone CLI. */
@@ -209,6 +217,62 @@ export const parseArctlArguments = (
         if (values.window !== undefined && values.window.trim() === '')
           throw new Error('--window must not be empty.');
         operation = { command: 'screenshot', output, window: values.window };
+      }
+    );
+  program
+    .command('record')
+    .description(
+      'Save an H.264 MP4 without activation; omit --window for the entire virtual desktop. Existing outputs are never overwritten. Ctrl+C cancels; partial video is not guaranteed.'
+    )
+    .argument('<output.mp4>', 'Local output file')
+    .requiredOption(
+      '--seconds <SECONDS>',
+      'Duration greater than 0 and at most 600 seconds, in millisecond increments'
+    )
+    .option(
+      '--window <ID>',
+      'Window ID from arctl windows; follows its position'
+    )
+    .option('--fps <FPS>', 'Frames per second, integer from 1 to 240', '60')
+    .action(
+      (
+        output: string,
+        values: {
+          readonly seconds: string;
+          readonly window: string | undefined;
+          readonly fps: string;
+        }
+      ) => {
+        if (output.trim() === '') throw new Error('Output must not be empty.');
+        if (values.window !== undefined && values.window.trim() === '')
+          throw new Error('--window must not be empty.');
+        const scaled = Number(values.seconds) * 1000;
+        const durationMs = Math.round(scaled);
+        if (
+          !Number.isFinite(scaled) ||
+          durationMs <= 0 ||
+          durationMs > 600000 ||
+          Math.abs(scaled - durationMs) >
+            Number.EPSILON * Math.max(1, Math.abs(scaled)) * 4
+        )
+          throw new Error(
+            '--seconds must be greater than 0 and at most 600, in millisecond increments.'
+          );
+        const fps = Number(values.fps);
+        if (
+          !/^\d+$/u.test(values.fps) ||
+          !Number.isInteger(fps) ||
+          fps < 1 ||
+          fps > 240
+        )
+          throw new Error('--fps must be an integer from 1 through 240.');
+        operation = {
+          command: 'record',
+          output,
+          window: values.window,
+          durationMs,
+          fps,
+        };
       }
     );
   try {

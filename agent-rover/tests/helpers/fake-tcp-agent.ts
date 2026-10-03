@@ -51,6 +51,10 @@ import {
 export interface FakeTcpAgentOptions {
   /** Complete the operation, then close the socket instead of acknowledging it. */
   readonly disconnectAfterRequest?: readonly string[];
+  /** Close after flushing the successful response. */
+  readonly disconnectAfterResponse?: readonly string[];
+  /** Send only the first video chunk before closing the connection. */
+  readonly interruptVideoTransfer?: boolean;
   readonly beforeRequest?: (
     method: string,
     params: JsonValue | undefined
@@ -591,6 +595,7 @@ export const startFakeTcpAgent = async (
     let bufferedAuth = Buffer.alloc(0);
     let authPayloadLength: number | undefined = undefined;
     const interruptedRequests = new Set<string>();
+    const interruptedResponses = new Set<string>();
 
     const sendAuthChallenge = (): void => {
       socket.write(
@@ -623,6 +628,7 @@ export const startFakeTcpAgent = async (
         kind: 'response',
         ok: true,
       });
+      if (interruptedResponses.delete(id)) socket.end();
     };
 
     const sendFailure = (id: string, message: string): void => {
@@ -644,6 +650,8 @@ export const startFakeTcpAgent = async (
     ): void => {
       if (options.disconnectAfterRequest?.includes(method))
         interruptedRequests.add(id);
+      if (options.disconnectAfterResponse?.includes(method))
+        interruptedResponses.add(id);
       const failure = options.beforeRequest?.(method, params);
       if (failure !== undefined) {
         sendTcpProtocolMessage(socket, {
@@ -1170,6 +1178,22 @@ export const startFakeTcpAgent = async (
             totalBytes: videoData.byteLength,
             transferId,
           });
+          if (options.interruptVideoTransfer) {
+            const [chunk] = createBinaryTransferChunks({
+              contentType: 'video/mp4',
+              data: videoData,
+              transferId,
+              chunkSize: 65536,
+            });
+            socket.write(
+              encodeTcpFrame({
+                kind: tcpFrameKindBinary,
+                payload: encodeBinaryTransferChunkPayload(chunk!),
+              })
+            );
+            socket.end();
+            return;
+          }
           sendTcpBinaryTransfer(socket, {
             contentType: 'video/mp4',
             data: videoData,

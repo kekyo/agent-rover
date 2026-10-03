@@ -72,3 +72,33 @@ export const captureArctlScreenshot = async (
   await writeFile(path, image, { flag: 'wx', signal });
   return { path, bounds, visibleBounds, clipped };
 };
+
+/**
+ * Records and saves an MP4 through the existing SDK transfer implementation.
+ * @param agent Connected agent.
+ * @param output New local destination path.
+ * @param windowId Exact window ID, or undefined for the whole desktop.
+ * @param durationMs Recording duration in milliseconds.
+ * @param fps Encoded frames per second.
+ * @param signal CLI interruption signal.
+ * @returns Output path and the SDK's recording metadata.
+ */
+export const recordArctlVideo = async (
+  agent: RemoteAgent,
+  output: string,
+  windowId: string | undefined,
+  durationMs: number,
+  fps: number,
+  signal: AbortSignal
+) => {
+  const path = await prepareArctlCapture(output, signal);
+  const window = await resolveArctlWindow(agent, windowId);
+  const feature =
+    window === undefined ? 'agent.recordVideo' : 'window.recordVideo';
+  if (!(await agent.capabilities()).features.includes(feature))
+    throw new Error(`The connected agent does not support ${feature}.`);
+  signal.throwIfAborted();
+  return window === undefined
+    ? await agent.recordVideo(durationMs, path, { fps, quality: 90 })
+    : await window.recordVideo(durationMs, path, { fps, quality: 90 });
+};

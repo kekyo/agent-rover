@@ -10,7 +10,7 @@ import { version } from './generated/packageMetadata';
 import { parseArctlArguments } from './cli/arguments';
 import { launchArctlApplication, listArctlWindows } from './cli/commands';
 import { transferArctlFiles } from './cli/files';
-import { captureArctlScreenshot } from './cli/capture';
+import { captureArctlScreenshot, recordArctlVideo } from './cli/capture';
 
 const main = async (): Promise<number> => {
   const args = process.argv.slice(2);
@@ -55,6 +55,23 @@ const main = async (): Promise<number> => {
     executing = true;
     agent = await connectRemoteAgent(parsed.connection);
     if (interrupted) return 130;
+    if (parsed.command === 'record') {
+      const result = await recordArctlVideo(
+        agent,
+        parsed.output,
+        parsed.window,
+        parsed.durationMs,
+        parsed.fps,
+        interruption.signal
+      );
+      if (interrupted) return 130;
+      process.stdout.write(
+        parsed.json
+          ? `${JSON.stringify({ command: parsed.command, result })}\n`
+          : `Saved MP4: ${result.path}\n${result.durationMs} ms, ${result.fps} fps, ${result.frameCount} frames\n`
+      );
+      return 0;
+    }
     if (parsed.command === 'screenshot') {
       const result = await captureArctlScreenshot(
         agent,
