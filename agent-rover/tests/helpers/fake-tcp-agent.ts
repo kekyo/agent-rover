@@ -49,6 +49,8 @@ import {
 } from '../../src/driver/tcp-frame';
 
 export interface FakeTcpAgentOptions {
+  /** Complete the operation, then close the socket instead of acknowledging it. */
+  readonly disconnectAfterRequest?: readonly string[];
   readonly beforeRequest?: (
     method: string,
     params: JsonValue | undefined
@@ -588,6 +590,7 @@ export const startFakeTcpAgent = async (
       : randomBytes(authChallengeBytes);
     let bufferedAuth = Buffer.alloc(0);
     let authPayloadLength: number | undefined = undefined;
+    const interruptedRequests = new Set<string>();
 
     const sendAuthChallenge = (): void => {
       socket.write(
@@ -610,6 +613,10 @@ export const startFakeTcpAgent = async (
     };
 
     const sendSuccess = (id: string, result: JsonValue | undefined): void => {
+      if (interruptedRequests.delete(id)) {
+        socket.destroy();
+        return;
+      }
       sendTcpProtocolMessage(socket, {
         ...(result === undefined ? {} : { result }),
         id,
@@ -635,6 +642,8 @@ export const startFakeTcpAgent = async (
       method: string,
       params: JsonValue | undefined
     ): void => {
+      if (options.disconnectAfterRequest?.includes(method))
+        interruptedRequests.add(id);
       const failure = options.beforeRequest?.(method, params);
       if (failure !== undefined) {
         sendTcpProtocolMessage(socket, {
