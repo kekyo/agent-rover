@@ -35,10 +35,18 @@ struct ManagedProcessEntry {
   HANDLE capture_guard = nullptr;
   std::string stdout_path = {};
   std::string stderr_path = {};
+  uint32_t ownership_id = 0;
 };
 
 static std::map<uint32_t, ManagedProcessEntry> g_managed_processes;
 static uint32_t g_next_managed_process_id = 1;
+static ManagedLaunch g_managed_launch;
+static ManagedRelease g_managed_release;
+
+void SetManagedProcessBroker(ManagedLaunch launch, ManagedRelease release) {
+  g_managed_launch = std::move(launch);
+  g_managed_release = std::move(release);
+}
 
 static std::string Basename(const std::string& path) {
   const size_t slash = path.find_last_of("\\/");
@@ -333,11 +341,30 @@ bool LaunchApplication(
     ApplicationProcess* process,
     OperationError* error) {
   PROCESS_INFORMATION process_information = {};
-  if (!CreateApplicationProcess(options, 0, &process_information, process, error)) {
+  // Unmanaged applications retain their existing independent lifetime. The
+  // operation worker's Job explicitly permits this breakaway.
+  if (!CreateApplicationProcess(options, g_managed_launch ? CREATE_BREAKAWAY_FROM_JOB : 0,
+      &process_information, process, error)) {
     return false;
   }
   CloseHandle(process_information.hThread);
   CloseHandle(process_information.hProcess);
+  return true;
+}
+
+bool LaunchInOwnedJob(const ApplicationLaunchOptions& options, ManagedProcessHandles* handles, OperationError* error) {
+  BOOL assigned = FALSE;
+  if (!IsProcessInJob(GetCurrentProcess(), nullptr, &assigned) || !assigned) {
+    *error = MakeOperationError("IsProcessInJob(launch)", options.path, ERROR_INVALID_STATE);
+    return false;
+  }
+  PROCESS_INFORMATION native = {};
+  ApplicationProcess process = {};
+  // Job membership is inherited at creation, including during CreateProcessW.
+  if (!CreateApplicationProcess(options, 0, &native, &process, error)) return false;
+  CloseHandle(native.hThread);
+  handles->process = native.hProcess;
+  handles->process_id = native.dwProcessId;
   return true;
 }
 
@@ -349,38 +376,50 @@ bool LaunchManagedProcess(
     *error = MakeOperationError("ManagedProcessLimit", options.launch.path, ERROR_TOO_MANY_OPEN_FILES);
     return false;
   }
-  HANDLE job = CreateJobObjectW(nullptr, nullptr);
-  if (job == nullptr) { *error = MakeOperationError("CreateJobObjectW", options.launch.path, GetLastError()); return false; }
-  if (options.kill_tree_on_release) {
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {};
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
-      *error = MakeOperationError("SetInformationJobObject", options.launch.path, GetLastError());
+  HANDLE job = nullptr;
+  PROCESS_INFORMATION process_information = {};
+  ApplicationProcess application_process = {};
+  uint32_t ownership_id = 0;
+  if (g_managed_launch) {
+    ManagedProcessHandles handles;
+    if (!g_managed_launch(options, &handles, error)) return false;
+    job = handles.job;
+    process_information.hProcess = handles.process;
+    process_information.dwProcessId = handles.process_id;
+    application_process = {handles.process_id, Basename(options.launch.path)};
+    ownership_id = handles.ownership_id;
+  } else {
+    job = CreateJobObjectW(nullptr, nullptr);
+    if (job == nullptr) { *error = MakeOperationError("CreateJobObjectW", options.launch.path, GetLastError()); return false; }
+    if (options.kill_tree_on_release) {
+      JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {};
+      limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+      if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+        *error = MakeOperationError("SetInformationJobObject", options.launch.path, GetLastError());
+        CloseHandle(job);
+        return false;
+      }
+    }
+    if (!CreateApplicationProcess(options.launch, CREATE_SUSPENDED, &process_information, &application_process, error)) { CloseHandle(job); return false; }
+    const bool assigned = AssignProcessToJobObject(job, process_information.hProcess);
+    if (!assigned || ResumeThread(process_information.hThread) == static_cast<DWORD>(-1)) {
+      const DWORD code = GetLastError();
+      *error = MakeOperationError(assigned ? "ResumeThread" : "AssignProcessToJobObject", options.launch.path, code);
+      error->stage = "launchRollback";
+      TerminateProcess(process_information.hProcess, 1);
+      WaitForSingleObject(process_information.hProcess, 5000);
+      CloseHandle(process_information.hThread);
+      CloseHandle(process_information.hProcess);
       CloseHandle(job);
       return false;
     }
-  }
-  PROCESS_INFORMATION process_information = {};
-  ApplicationProcess application_process = {};
-  if (!CreateApplicationProcess(options.launch, CREATE_SUSPENDED, &process_information, &application_process, error)) { CloseHandle(job); return false; }
-  const bool assigned = AssignProcessToJobObject(job, process_information.hProcess);
-  if (!assigned || ResumeThread(process_information.hThread) == static_cast<DWORD>(-1)) {
-    const DWORD code = GetLastError();
-    *error = MakeOperationError(assigned ? "ResumeThread" : "AssignProcessToJobObject", options.launch.path, code);
-    error->stage = "launchRollback";
-    TerminateProcess(process_information.hProcess, 1);
-    WaitForSingleObject(process_information.hProcess, 5000);
     CloseHandle(process_information.hThread);
-    CloseHandle(process_information.hProcess);
-    CloseHandle(job);
-    return false;
   }
 
   const std::string process_path = ReadProcessPath(process_information.hProcess);
   if (!process_path.empty()) {
     application_process.name = Basename(process_path);
   }
-  CloseHandle(process_information.hThread);
 
   uint32_t managed_id = 0;
   managed_id = g_next_managed_process_id;
@@ -401,6 +440,7 @@ bool LaunchManagedProcess(
   if (!options.launch.stderr_path.empty()) entry.capture_paths.push_back(options.launch.stderr_path);
   entry.stdout_path = options.launch.stdout_path;
   entry.stderr_path = options.launch.stderr_path;
+  entry.ownership_id = ownership_id;
   g_managed_processes[managed_id] = entry;
 
   *process = {
@@ -618,6 +658,10 @@ bool ReleaseManagedProcess(uint32_t managed_id, OperationError* error) {
     entry.process = nullptr;
   }
   if (entry.job != nullptr) {
+    if (entry.ownership_id) {
+      if (!g_managed_release(entry.ownership_id, error)) return false;
+      entry.ownership_id = 0;
+    }
     if (!CloseHandle(entry.job)) { *error = MakeOperationError("CloseHandle", entry.path, GetLastError()); error->stage = "jobHandle"; return false; }
     entry.job = nullptr;
   }

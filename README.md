@@ -120,27 +120,14 @@ Double-click the tray icon or choose “Show logs” to open the viewer.
 The version banner and copyable token field appear above the log list.
 Copy the token into the driver's `authToken` option.
 Closing the viewer keeps the agent running; choose “Exit” from the tray to stop it.
-The Windows agent has no console output, so Quick Edit needs no configuration.
-
-The resizable list shows the latest 1,000 records. Older records are saved as
-UTF-8 files in `%APPDATA%\agent-rover\logs`. Choose “Open log folder” from the
-tray to browse them. Normally, five files of up to 10 MiB each are retained.
-Active files belonging to other instances are preserved, so concurrent instances
-can exceed five files in total. The status area reports save failures and records
-that were dropped or whose persistence could not be confirmed.
 
 Logs include connection, authentication and process events, request IDs and
 methods, execution results, response transmission and elapsed time. Sequence
 numbers match between the viewer and files. Authentication tokens, request
 bodies, environment variables and clipboard contents are not copied to logs.
 
-- The default TCP port is 39397. Open it in the OS firewall.
-- Start the Windows agent from the user's interactive desktop. Running it as a Windows service is not supported.
-- Driver requests have a default deadline of 30 seconds. An expired request closes the entire connection and cancels its queued operations. Reconnect to continue. Side effects already submitted to the target application cannot be undone.
-- Windows operation budgets are 30 seconds for windows, input and clipboard, and normally 120 seconds for other operations. Recording is limited to ten minutes; result retrieval allows the recording duration plus 120 seconds.
-- Windows accepts up to 16 connections and reserves operation workers for up to eight connections. Unrecoverable operations retain their slots and are recorded in the log.
-- Whole-file reads and the combined incoming transfer data retained per connection are limited to 64 MiB by default. Set `--max-transfer-size 128` at agent startup to change the limit to a positive integer number of MiB. The same limit applies when retrieving captured stdout or stderr.
-- Each Windows connection can own up to 64 managed processes. Split larger workloads.
+The default TCP port is 39397. Open it in the OS firewall.
+Start the Windows agent from the user's interactive desktop. Running it as a Windows service is not supported.
 
 Then install agent-rover in your npm project:
 
@@ -194,6 +181,74 @@ The preferred setup is to run the agent inside a virtual machine placed on the s
 > The communication path uses TCP with a custom protocol, rather than HTTPS or a similar protocol, to reduce the agent's library dependencies as much as possible.
 > For example, the Windows agent targets Windows XP SP2 and later, which makes it possible to automate tests for older GUI applications.
 > Future improvements may address this limitation.
+
+---
+
+### Agent Limits (Advanced topic)
+
+Driver requests have a default deadline of 30 seconds. An expired request closes
+the entire connection and cancels its queued operations.
+Reconnect to continue. Side effects already submitted to the target application
+cannot be undone.
+
+Windows operation budgets are 30 seconds for windows, input and clipboard, and
+normally 120 seconds for other operations.
+Recording is limited to ten minutes; result retrieval allows the recording
+duration plus 120 seconds.
+
+Windows accepts up to 16 connections and reserves operation workers for up to
+eight connections. Capture directories are limited to 64 connections, including
+active and pending recovery.
+At capacity, new captures and recordings cannot start; operations that do not
+require captured output remain available.
+
+Whole-file reads and the combined incoming transfer data retained per connection
+are limited to 64 MiB by default.
+Set `--max-transfer-size 128` at agent startup to change the limit to a positive
+integer number of MiB. The same limit applies when retrieving captured stdout
+or stderr.
+
+Each Windows connection can own up to 64 managed processes. Split larger workloads.
+
+### Process Supervision And Management (Advanced topic)
+
+An independent supervisor starts with the agent. If the host stops making progress
+for 15 seconds or exits unexpectedly, the supervisor confirms termination and
+restarts it. Startup has a 30-second allowance.
+
+Automatic host restarts retain the authentication token, port, transfer limit
+and other startup settings.
+Reconnect the driver to continue; requests from the disconnected session are
+never replayed.
+
+Starts are limited to three in any 60-second period, with delayed retries after
+repeated failures. Choosing “Exit” stops both the host and its supervisor.
+
+TCP disconnects stop the session's work and reclaim managed application trees
+that are configured to terminate. Once termination is confirmed, other connections
+can operate even if capture-file deletion fails; file cleanup retries independently.
+
+Applications with `killTreeOnRelease: false` keep running. Their captured output
+is retained while it is still in use. Pending recovery survives automatic host restarts.
+Logs record restart reasons and the failing cleanup stage and path, including
+directories that could not be removed at shutdown.
+
+A replacement host waits until the old processes have been confirmed stopped.
+Automatic recovery does not cover an OS-wide failure or termination of the
+supervisor itself.
+
+### Log Management (Advanced topic)
+
+The resizable list shows the latest 1,000 records. Older records are saved as
+UTF-8 files in `%APPDATA%\agent-rover\logs`.
+
+Choose “Open log folder” from the tray to browse them.
+Normally, five files of up to 10 MiB each are retained.
+Active files belonging to other instances are preserved, so concurrent instances
+can exceed five files in total.
+
+The status area reports save failures and records that were dropped or whose
+persistence could not be confirmed.
 
 ---
 

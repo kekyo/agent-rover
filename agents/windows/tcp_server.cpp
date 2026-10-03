@@ -15,6 +15,8 @@
 #include "operation_limits.h"
 #include "version_banner.h"
 #include "win32_util.h"
+#include "supervisor.h"
+#include "recovery_registry.h"
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -67,6 +69,7 @@ struct ClientSession {
   AsyncSignal request_ready, request_space, output_ready, output_space;
   Worker worker;
   cardio::promise<void> lifetime;
+  MonotonicClock::time_point health_deadline = MonotonicClock::time_point::max();
 };
 
 struct ServerState {
@@ -77,8 +80,13 @@ struct ServerState {
   std::string listen_status = "Starting...", log_status;
   cardio::cancellation_source stop;
   std::list<std::shared_ptr<ClientSession>> sessions;
-  // Failed reaping occupies a slot permanently instead of spawning unbounded replacements.
+  // Only unconfirmed process termination retains an execution slot. Files are
+  // retried independently, with bounded admission and one active cleanup attempt.
   std::vector<Worker> quarantine;
+  std::deque<Worker> pending_recovery;
+  AsyncSignal recovery_ready;
+  cardio::promise<void> recovery;
+  bool recovery_stopping = false;
   AsyncSignal sessions_changed;
   AsyncSignal sessions_drained;
   size_t workers = 0, request_bytes = 0, output_bytes = 0, reading_bytes = 0;
@@ -111,6 +119,7 @@ static void SetListenStatus(const std::shared_ptr<ServerState>& server, const st
 static void CloseSession(const std::shared_ptr<ClientSession>& session, const std::string& reason) {
   if (session->closed) return;
   session->closed = true;
+  session->health_deadline = MonotonicClock::now() + std::chrono::seconds(10);
   session->stop.cancel();
   CloseSocket(session->socket);
   session->request_ready.Notify();
@@ -239,6 +248,36 @@ static cardio::promise<void> AcquireDesktop(std::shared_ptr<ServerState> server,
   // A grant racing a cancellation still owns the permit; the caller releases it.
 }
 
+static void QueueRecovery(const std::shared_ptr<ServerState>& server, Worker worker) {
+  if (!WorkerHasCaptureRoot(worker)) return;
+  server->pending_recovery.push_back(std::move(worker));
+  server->recovery_ready.Notify();
+}
+
+// ServerState owns this coroutine and Serve joins it before the state is
+// released. A raw observer avoids a completed coroutine retaining its owner.
+static cardio::promise<void> RecoverFiles(ServerState* server) {
+  while (!server->recovery_stopping) {
+    if (server->pending_recovery.empty()) {
+      co_await server->recovery_ready.Wait({});
+      continue;
+    }
+    const auto worker = server->pending_recovery.front();
+    // Retain the record in the queue while asynchronous cleanup is in flight;
+    // admission includes both live workers and every unrecovered record.
+    const auto recovered = co_await RecoverOperationWorker(worker);
+    server->pending_recovery.pop_front();
+    if (!recovered) server->pending_recovery.push_back(worker);
+    else PrintAgentLogEvent("phase=cleanup-complete pending=" + std::to_string(server->pending_recovery.size()));
+    if (!recovered && !server->recovery_stopping) {
+      try { co_await cardio::promises::delay(1000, server->stop.get_cancellation()); }
+      catch (const cardio::canceled_exception&) { break; }
+    }
+  }
+  if (!server->pending_recovery.empty())
+    PrintAgentLogEvent("phase=cleanup-pending-shutdown count=" + std::to_string(server->pending_recovery.size()));
+}
+
 static cardio::promise<void> ExecuteRequests(std::shared_ptr<ClientSession> session) {
   try {
     while (!session->closed) {
@@ -261,6 +300,7 @@ static cardio::promise<void> ExecuteRequests(std::shared_ptr<ClientSession> sess
       }
       auto timeout = cardio::cancellations::timeout(remaining);
       auto cancel = cardio::cancellations::any(timeout.get_cancellation(), session->stop.get_cancellation());
+      session->health_deadline = request.received + std::chrono::milliseconds(request.budget_ms + 10000);
       bool desktop = false;
       std::string failure;
       try {
@@ -268,6 +308,7 @@ static cardio::promise<void> ExecuteRequests(std::shared_ptr<ClientSession> sess
           if (session->server->workers >= kMaxWorkers) throw std::runtime_error("Operation worker limit reached.");
           session->worker = StartOperationWorker(HelperRole::Operations, session->server->options.max_transfer_bytes);
           ++session->server->workers;
+          co_await InitializeOperationWorker(session->worker);
         }
         if (UsesDesktop(request.method)) {
           co_await AcquireDesktop(session->server, cancel.get_cancellation());
@@ -280,7 +321,11 @@ static cardio::promise<void> ExecuteRequests(std::shared_ptr<ClientSession> sess
         co_await WriteWorker(session->worker, std::move(command), cancel.get_cancellation());
         for (;;) {
           auto response = co_await ReadWorker(session->worker, cancel.get_cancellation());
-          if (response.kind == WorkerMessageKind::CaptureRoot) continue;
+          if (response.kind == WorkerMessageKind::Launch || response.kind == WorkerMessageKind::ReleaseLaunch ||
+              response.kind == WorkerMessageKind::CaptureRoot || response.kind == WorkerMessageKind::ReserveCapture) {
+            co_await HandleWorkerOwnership(session->worker, std::move(response), cancel.get_cancellation());
+            continue;
+          }
           if (response.kind == WorkerMessageKind::Complete) break;
           if (response.kind == WorkerMessageKind::Log) {
             PrintAgentLogEvent(context + " " + std::string(response.payload.begin(), response.payload.end()) + Elapsed(request.received));
@@ -304,10 +349,14 @@ static cardio::promise<void> ExecuteRequests(std::shared_ptr<ClientSession> sess
           // Cancellation of IPC is not cancellation of the remote Win32 call.
           // Keep desktop ownership until the old worker really has stopped.
           const auto reaped = co_await StopOperationWorker(session->worker);
-          if (reaped) { --session->server->workers; ReleaseDesktop(session->server); }
+          if (reaped) {
+            --session->server->workers;
+            ReleaseDesktop(session->server);
+            QueueRecovery(session->server, session->worker);
+          }
           else {
             session->server->quarantine.push_back(session->worker);
-            PrintAgentLogEvent("desktop worker cleanup failed; desktop execution remains unavailable");
+            PrintAgentLogEvent("desktop worker termination unconfirmed; desktop execution remains unavailable");
           }
           session->worker.reset();
         }
@@ -316,6 +365,7 @@ static cardio::promise<void> ExecuteRequests(std::shared_ptr<ClientSession> sess
         break;
       }
       if (desktop) ReleaseDesktop(session->server);
+      if (!session->closed) session->health_deadline = MonotonicClock::time_point::max();
     }
   } catch (const std::exception& error) { CloseSession(session, std::string("operation: ") + error.what()); }
 }
@@ -378,10 +428,13 @@ static cardio::promise<void> ServeClient(std::shared_ptr<ClientSession> session)
   session->output.clear();
   if (session->worker) {
     const auto reaped = co_await StopOperationWorker(session->worker);
-    if (reaped) --session->server->workers;
+    if (reaped) {
+      --session->server->workers;
+      QueueRecovery(session->server, session->worker);
+    }
     else {
       session->server->quarantine.push_back(session->worker);
-      PrintAgentLogEvent("worker cleanup deadline exceeded; slot quarantined");
+      PrintAgentLogEvent("worker termination deadline exceeded; slot quarantined");
     }
     session->worker.reset();
   }
@@ -402,6 +455,17 @@ static cardio::promise<void> ReapSessions(std::shared_ptr<ServerState> server) {
       break;
     }
     co_await server->sessions_changed.Wait({});
+  }
+}
+
+static cardio::promise<void> ReportProgress(std::shared_ptr<ServerState> server, cardio::cancellation stop) {
+  while (!stop.is_cancellation_requested()) {
+    const auto now = MonotonicClock::now();
+    bool healthy = server->quarantine.empty();
+    for (const auto& session : server->sessions) healthy = healthy && now <= session->health_deadline;
+    PulseSupervisor(healthy);
+    try { co_await cardio::promises::delay(1000, stop); }
+    catch (const cardio::canceled_exception&) { break; }
   }
 }
 
@@ -469,6 +533,9 @@ static cardio::promise<void> Serve(std::shared_ptr<ServerState> server, int* res
     if (!reaped) server->quarantine.push_back(probe);
   }
   while (!server->sessions.empty()) co_await server->sessions_drained.Wait({});
+  server->recovery_stopping = true;
+  server->recovery_ready.Notify();
+  co_await server->recovery;
   PrintAgentLogEvent("phase=shutdown connections drained");
   co_await StopFileLogger(server->logger);
 }
@@ -482,7 +549,10 @@ int RunTcpServer(const ServerOptions& options, std::string* error) {
     auto server = std::make_shared<ServerState>();
     server->options = options;
     const auto weak = std::weak_ptr<ServerState>(server);
-    server->gui = CreateAgentGui(options, [weak] { if (auto state = weak.lock()) StopServer(state); });
+    server->gui = CreateAgentGui(options, [weak] {
+      RequestSupervisorExit();
+      if (auto state = weak.lock()) StopServer(state);
+    });
     server->logger = CreateFileLogger([weak](const std::string& status) {
       if (auto state = weak.lock()) {
         state->log_status = status;
@@ -494,6 +564,8 @@ int RunTcpServer(const ServerOptions& options, std::string* error) {
       if (auto state = weak.lock()) { NotifyAgentGuiLog(state->gui); EnqueueFileLog(state->logger, record); }
     });
     auto reaping = ReapSessions(server);
+    server->recovery = RecoverFiles(server.get());
+    auto progress = ReportProgress(server, server->stop.get_cancellation());
     auto serving = Serve(server, &result, error);
     dispatcher.park();
     SetAgentLogSink({});
