@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterAll, beforeAll, expect, it } from 'vitest';
+import { PNG } from 'pngjs';
 import { connectRemoteAgent, type RemoteAgent } from '../src/index';
 import { waitForResult } from '../src/wait';
 import { nativeTestPaths } from './helpers/native-paths';
@@ -115,6 +116,86 @@ it('copies real directory trees and preserves extra files and conflicting entrie
     'directory'
   );
 });
+
+it('captures visible desktop and window pixels without changing the active window', async () => {
+  const remoteDisplay = (
+    await exec(
+      'winepath',
+      ['-w', join(agentsDirectory, '.build/arctl/display-amd64.exe')],
+      { env: environment }
+    )
+  ).stdout.trim();
+  const title = `arctl-capture-${process.pid}`;
+  const process_ = await observer!.applications.launch({
+    path: remoteDisplay,
+    arguments: [title],
+  });
+  try {
+    await exec('wine', [fixture, 'wait-ready', `${title}-ready`], {
+      env: environment,
+      timeout: 40000,
+    });
+    const window = await observer!.waitForWindow({ title, visible: true });
+    const active = (await observer!.windows())
+      .filter((window) => window.active)
+      .map((window) => window.id);
+    const expectedPixel = [36, 180, 90, 255];
+    // WM_PAINT completes before the desktop compositor finishes showing a
+    // new window. Observe the rendered content without activating the window.
+    await waitForResult(async () => {
+      const reference = PNG.sync.read((await window.screenshot()).image);
+      const offset =
+        (Math.floor(reference.height / 2) * reference.width +
+          Math.floor(reference.width / 2)) *
+        4;
+      expect([...reference.data.subarray(offset, offset + 4)]).toEqual(
+        expectedPixel
+      );
+    });
+    for (const wholeScreen of [true, false]) {
+      const path = join(directory, wholeScreen ? 'desktop.png' : 'window.png');
+      const captured = await arctl([
+        'screenshot',
+        path,
+        '--json',
+        ...(wholeScreen ? [] : ['--window', window.id]),
+      ]);
+      const result = JSON.parse(captured.stdout).result;
+      expect(result.bounds).toEqual(
+        wholeScreen ? await observer!.bounds() : window.frameBounds
+      );
+      const png = PNG.sync.read(await readFile(path));
+      expect(png.width).toBe(result.visibleBounds.width);
+      expect(png.height).toBe(result.visibleBounds.height);
+      const x = Math.floor(
+        window.frameBounds.x +
+          window.frameBounds.width / 2 -
+          result.visibleBounds.x
+      );
+      const y = Math.floor(
+        window.frameBounds.y +
+          window.frameBounds.height / 2 -
+          result.visibleBounds.y
+      );
+      expect([
+        ...png.data.subarray(
+          (y * png.width + x) * 4,
+          (y * png.width + x) * 4 + 4
+        ),
+      ]).toEqual(expectedPixel);
+      await expect(arctl(['screenshot', path])).rejects.toMatchObject({
+        code: 1,
+      });
+    }
+    expect(
+      (await observer!.windows())
+        .filter((window) => window.active)
+        .map((window) => window.id)
+    ).toEqual(active);
+  } finally {
+    await observer!.processes.kill(process_.id);
+  }
+}, 60000);
 
 beforeAll(async () => {
   await exec('make', ['-j4', 'amd64'], { cwd: agentsDirectory });

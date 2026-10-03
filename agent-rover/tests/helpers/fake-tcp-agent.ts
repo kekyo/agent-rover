@@ -699,7 +699,8 @@ export const startFakeTcpAgent = async (
             sendFailure(id, 'agent.screenshot rect is invalid.');
             return;
           }
-          const screenshotImage = Buffer.from('fake screen png bytes');
+          const screenshotImage =
+            options.screenshotImage ?? Buffer.from('fake screen png bytes');
           const transferId = `${id}-screen-screenshot`;
           sendTcpBinaryTransfer(socket, {
             contentType: 'image/png',

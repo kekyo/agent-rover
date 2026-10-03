@@ -22,6 +22,12 @@ export type ArctlOperation =
       /** Exact source path. */ readonly source: string;
       /** Exact destination path. */ readonly destination: string;
       /** Copy the source directory's contents. */ readonly recursive: boolean;
+    }
+  | {
+      /** Capture a PNG. */ readonly command: 'screenshot';
+      /** Local output path. */ readonly output: string;
+      /** Exact window ID, or the whole virtual desktop. */ readonly window:
+        string | undefined;
     };
 
 /** Parsed invocation of the standalone CLI. */
@@ -190,6 +196,21 @@ export const parseArctlArguments = (
         }
       );
   }
+  program
+    .command('screenshot')
+    .description(
+      'Save visible pixels as PNG without activation. Omit --window for the entire virtual desktop. Existing outputs are never overwritten.'
+    )
+    .argument('<output.png>', 'Local output file')
+    .option('--window <ID>', 'Window ID from arctl windows')
+    .action(
+      (output: string, values: { readonly window: string | undefined }) => {
+        if (output.trim() === '') throw new Error('Output must not be empty.');
+        if (values.window !== undefined && values.window.trim() === '')
+          throw new Error('--window must not be empty.');
+        operation = { command: 'screenshot', output, window: values.window };
+      }
+    );
   try {
     program.parse(args, { from: 'user' });
   } catch (error) {

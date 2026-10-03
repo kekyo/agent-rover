@@ -5,6 +5,7 @@
 
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { writeFileSync } from 'node:fs';
 import {
   mkdir,
   mkdtemp,
@@ -19,6 +20,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
+import { PNG } from 'pngjs';
 
 import {
   connectRemoteAgent,
@@ -59,6 +61,111 @@ const runArctl = async (args: readonly string[], env: NodeJS.ProcessEnv) =>
   );
 
 describe('arctl', () => {
+  it.each([undefined, defaultFakeWindow.id])(
+    'saves a PNG from the selected capture target (%s)',
+    async (windowId) => {
+      const directory = await mkdtemp(join(tmpdir(), 'arctl-shot-'));
+      const path = join(directory, 'nested', 'capture.png');
+      const png = new PNG({ width: 2, height: 1 });
+      png.data.set([255, 0, 0, 255, 0, 255, 0, 255]);
+      const requests: string[] = [];
+      const fake = await startFakeTcpAgent({
+        screenshotImage: PNG.sync.write(png),
+        beforeRequest: (method) => {
+          requests.push(method);
+          return undefined;
+        },
+      });
+      try {
+        const result = await runArctl(
+          [
+            'screenshot',
+            path,
+            '--json',
+            ...(windowId === undefined ? [] : ['--window', windowId]),
+          ],
+          { AGENT_ROVER_HOST: fake.host, AGENT_ROVER_PORT: String(fake.port) }
+        );
+        expect(result.code, result.stderr).toBe(0);
+        expect(result.stderr).toBe('');
+        expect(JSON.parse(result.stdout)).toMatchObject({
+          command: 'screenshot',
+          result: { path, clipped: false },
+        });
+        expect(PNG.sync.read(await readFile(path)).data).toEqual(png.data);
+        expect(
+          requests.filter((method) => method.endsWith('screenshot'))
+        ).toEqual([
+          windowId === undefined ? 'agent.screenshot' : 'window.screenshot',
+        ]);
+        expect(requests).not.toContain('window.activate');
+        expect(requests).not.toContain('window.show');
+      } finally {
+        await fake.close();
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it('does not capture with an invalid window or an unusable existing destination', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'arctl-shot-errors-'));
+    const path = join(directory, 'existing');
+    const requests: string[] = [];
+    const fake = await startFakeTcpAgent({
+      beforeRequest: (method) => {
+        requests.push(method);
+        return undefined;
+      },
+    });
+    const env = {
+      AGENT_ROVER_HOST: fake.host,
+      AGENT_ROVER_PORT: String(fake.port),
+    };
+    try {
+      await writeFile(path, 'keep original');
+      for (const args of [
+        ['screenshot', path],
+        ['screenshot', join(path, 'nested.png')],
+        ['screenshot', join(directory, 'invalid.png'), '--window', '0xmissing'],
+      ]) {
+        const result = await runArctl(args, env);
+        expect(result.code, result.stderr).toBe(1);
+        expect(result.stdout).toBe('');
+      }
+      expect(await readFile(path, 'utf8')).toBe('keep original');
+      expect(requests.some((method) => method.endsWith('screenshot'))).toBe(
+        false
+      );
+    } finally {
+      await fake.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves a destination created after screenshot preflight', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'arctl-shot-race-'));
+    const path = join(directory, 'capture.png');
+    const fake = await startFakeTcpAgent({
+      beforeRequest: (method) => {
+        if (method === 'agent.screenshot')
+          writeFileSync(path, 'competing output');
+        return undefined;
+      },
+    });
+    try {
+      const result = await runArctl(['screenshot', path], {
+        AGENT_ROVER_HOST: fake.host,
+        AGENT_ROVER_PORT: String(fake.port),
+      });
+      expect(result.code).toBe(1);
+      expect(result.stdout).toBe('');
+      expect(await readFile(path, 'utf8')).toBe('competing output');
+    } finally {
+      await fake.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('recursively copies directory contents including empty directories, preserving extra entries', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'arctl-tree-'));
     const fake = await startFakeTcpAgent({});
