@@ -6,7 +6,7 @@
 #include "win32_files.h"
 
 #include <winsock2.h>
-#include "../vendor/cardio/cardio.h"
+#include <cardio.h>
 
 #include <algorithm>
 #include <cstdio>

@@ -100,6 +100,9 @@ agent-roverは、GUIアプリケーション自体の監視や操作以外にも
 
 ## 準備
 
+ソースからビルドする場合は、`git submodule update --init --recursive`で依存コードを取得してください。
+`agents/deps/cardio`はcardio 1.3.0のgit submoduleです。ビルド手順は[BUILDING.md](BUILDING.md)を参照してください。
+
 [リリースページ](https://github.com/kekyo/agent-rover/releases/) から、ターゲットプラットフォームに対応するエージェントをダウンロードして下さい。
 エージェントは非常に小さく、そして他のライブラリへの実行時依存を可能な限り取り除いてあります。アーカイブを展開後、そのまま実行できます。インストールも不要です。
 

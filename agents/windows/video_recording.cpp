@@ -4,7 +4,7 @@
 // https://github.com/kekyo/agent-rover
 
 #include <winsock2.h>
-#include "../vendor/cardio/cardio.h"
+#include <cardio.h>
 #include "video_recording.h"
 
 #include <windows.h>

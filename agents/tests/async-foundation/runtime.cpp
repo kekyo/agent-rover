@@ -218,6 +218,6 @@ int main(int argc, char** argv) {
     CHECK(reused && timed_out && independent);
   }
   WSACleanup();
-  std::puts("cardio 1.2.0: independent sockets, cancellation/reuse, deadline, nested message loop passed");
+  std::puts("cardio: independent sockets, cancellation/reuse, deadline, nested message loop passed");
   return 0;
 }

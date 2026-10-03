@@ -18,7 +18,7 @@ const agent = await connectRemoteAgent({
 let directory;
 const results = [];
 try {
-  directory = await agent.files.mkdtemp('agent-rover-cardio120-');
+  directory = await agent.files.mkdtemp('agent-rover-cardio-');
   for (const architecture of ['amd64', 'i686']) {
     for (const probe of ['core', 'handles', 'runtime']) {
       const name = `${probe}-${architecture}.exe`;

@@ -23,7 +23,7 @@ SCREW_UP ?= ../node_modules/.bin/screw-up
 
 CXXFLAGS ?= -std=c++20 -Os -s -fno-rtti
 CPPFLAGS ?= -DPSAPI_VERSION=1
-CPPFLAGS += -I$(GENERATED_DIR) -Ivendor/cardio
+CPPFLAGS += -I$(GENERATED_DIR) -Ideps/cardio/include
 CPPFLAGS_AMD64 ?= -D_WIN32_WINNT=0x0502 -DWINVER=0x0502
 CPPFLAGS_I686 ?= -D_WIN32_WINNT=0x0501 -DWINVER=0x0501
 LDFLAGS ?= -static -static-libgcc -static-libstdc++ -s -municode -mwindows

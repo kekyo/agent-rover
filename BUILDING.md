@@ -9,11 +9,15 @@ distribution's package manager. Host MinGW packages are not needed.
 From the repository root:
 
 ```sh
+git submodule update --init --recursive
 npm ci
 ./prereq.sh
 npm run build
 npm test
 ```
+
+The `agents/deps/cardio` submodule pins cardio to version 1.3.0. Initialize it
+before building, including when updating an existing checkout.
 
 `prereq.sh` builds the Windows toolchain image on its first run. Later runs reuse
 the prepared image. The initial build needs registry and Debian snapshot network

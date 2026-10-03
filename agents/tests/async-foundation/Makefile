@@ -5,7 +5,7 @@
 include ../../toolchain/toolchain.mk
 
 OUTPUT_DIR ?= ../../.build/async-foundation
-CARDIO_INCLUDE ?= ../../vendor/cardio
+CARDIO_INCLUDE ?= ../../deps/cardio/include
 CXXFLAGS ?= -std=c++20 -Os -fno-exceptions -fno-rtti
 CPPFLAGS ?=
 LDFLAGS ?= -static -static-libgcc -static-libstdc++

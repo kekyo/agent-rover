@@ -1,0 +1,3 @@
+[submodule "agents/deps/cardio"]
+	path = agents/deps/cardio
+	url = https://github.com/kekyo/cardio.git
