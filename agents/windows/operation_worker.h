@@ -24,6 +24,11 @@ enum class WorkerMessageKind : uint32_t {
   /** Opens the initialized log directory through the shell. */ LogOpenFolder = 107,
   /** Requests an explicit flush before shutdown. */ LogFlush = 108,
   /** Trusted temporary-root path and native identity, or cleanup command. */ CaptureRoot = 109,
+  /** Parent-owned managed application launch. */ Launch = 110,
+  /** Structured native launch failure. */ LaunchError = 111,
+  /** Releases an acknowledged parent launch registry entry. */ ReleaseLaunch = 112,
+  /** Private server options, token and explicitly duplicated handles. */ HostConfiguration = 113,
+  /** Reserves recovery capacity before creating a capture directory. */ ReserveCapture = 114,
 };
 /** Private process roles for this executable. */
 enum class HelperRole {
@@ -31,6 +36,9 @@ enum class HelperRole {
   /** One startup capability/address probe. */ Probe,
   /** Isolated file persistence and shell integration. */ FileLogger,
   /** Finite recovery of one stopped worker's resources. */ Cleanup,
+  /** Creates one application inside a parent-owned Job. */ Launch,
+  /** Launch whose application tree survives session release. */ PersistentLaunch,
+  /** One monitored GUI/TCP host. */ Server,
 };
 /** A bounded IPC message. */
 struct WorkerMessage {
@@ -46,6 +54,18 @@ using Worker = std::shared_ptr<OperationWorker>;
  * @param max_transfer_bytes Transfer budget in bytes, a positive multiple of one MiB.
  * @return Owned helper. */
 Worker StartOperationWorker(HelperRole role, uint64_t max_transfer_bytes = kDefaultMaxTransferBytes);
+/** Selects breakaway creation inside the monitored host's Job.
+ * @param enabled Whether helpers leave the containing Job before assignment. */
+void SetHelperBreakaway(bool enabled);
+/** Gets a borrowed process handle, retained by the worker.
+ * @param worker Owned helper. @return Process handle. */
+HANDLE WorkerProcess(const Worker& worker);
+/** Recreates a file-recovery record after the original host has exited.
+ * @param ownership Verified private registry payload. @return File recovery owner. */
+Worker AdoptRecoveryRoot(const std::vector<unsigned char>& ownership);
+/** Tests whether a worker owns capture files requiring asynchronous recovery.
+ * @param worker Helper. @return Whether capture ownership was received. */
+bool WorkerHasCaptureRoot(const Worker& worker);
 /** Sends one message to an isolated worker.
  * @param worker Child. @param message Message retained in the coroutine.
  * @param cancellation Deadline or shutdown signal. @return Completion promise. */
@@ -54,9 +74,23 @@ cardio::promise<void> WriteWorker(Worker worker, WorkerMessage message, cardio::
  * @param worker Child. @param cancellation Deadline or shutdown signal.
  * @return Message. */
 cardio::promise<WorkerMessage> ReadWorker(Worker worker, cardio::cancellation cancellation);
-/** Stops a helper with a finite grace period, then terminates only that helper.
- * @param worker Child. @return True if native process termination was confirmed. */
+/** Confirms worker initialization before waiting for desktop access.
+ * Startup has its own deadline so client cancellation cannot discard the worker.
+ * @param worker Newly started operation helper. @return Completion promise. */
+cardio::promise<void> InitializeOperationWorker(Worker worker);
+/** Handles private launch/release messages while retaining parent ownership.
+ * @param worker Operation helper. @param message Private reply.
+ * @param cancellation Operation deadline. @return Whether the message was handled. */
+cardio::promise<bool> HandleWorkerOwnership(Worker worker, WorkerMessage message, cardio::cancellation cancellation);
+/** Stops a helper and its application trees configured for termination.
+ * Persistent applications keep running. File recovery is a separate operation.
+ * @param worker Child and retained ownership records.
+ * @return True after the helper and all termination-required trees have stopped. */
 cardio::promise<bool> StopOperationWorker(Worker worker);
+/** Attempts file recovery separately from process termination.
+ * @param worker Stopped helper whose ownership record is retained for retries.
+ * @return True if all owned temporary files were recovered. */
+cardio::promise<bool> RecoverOperationWorker(Worker worker);
 /** Runs the private child protocol. Standard handles carry IPC, never console text.
  * @param probe Whether only capability detection is required.
  * @param max_transfer_bytes Maximum whole-file read and retained incoming bytes.

@@ -2,6 +2,9 @@
   "name": "agent-rover",
   "version": "0.1.0",
   "type": "module",
+  "bin": {
+    "arctl": "./dist/arctl.mjs"
+  },
   "main": "./dist/index.mjs",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
@@ -20,14 +23,18 @@
   "files": [
     "dist"
   ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "build": "vite build",
+    "build": "vite build && vite build --mode cli",
     "test": "npm run build && vitest run",
     "pack": "npm run test && screw-up pack --pack-destination ../artifacts/"
   },
   "dependencies": {
     "@tesseract.js-data/eng": ">=1.0.0",
     "async-primitives": ">=1.7.0",
+    "commander": "^14.0.3",
     "pixelmatch": ">=7.2.0",
     "pngjs": ">=7.0.0",
     "ssim.js": ">=3.5.0",
@@ -38,6 +45,7 @@
     "@types/pixelmatch": ">=5.2.6",
     "@types/pngjs": "^6.0.5",
     "prettier-max": ">=1.16.0",
+    "resolved-killer": "^1.1.0",
     "screw-up": ">=1.33.0",
     "typescript": ">=5.0.0",
     "unplugin-dts": ">=1.0.3",

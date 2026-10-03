@@ -1606,6 +1606,7 @@ export const connectRemoteAgent = async (
     string,
     CompletedFileBinaryTransfer
   >();
+  const acceptingFileBinaryTransfers = new Set<Promise<void>>();
   const waitingBinaryTransfers = new Map<string, WaitingBinaryTransfer[]>();
   const waitingFileBinaryTransfers = new Map<
     string,
@@ -1613,6 +1614,7 @@ export const connectRemoteAgent = async (
   >();
   let nextBinaryTransferId = 1;
   let disconnected = false;
+  const recordingCancellation = new AbortController();
   let readyState: ReadyState | undefined = undefined;
   let transport: ProtocolTransport | undefined = undefined;
   let socketOpened = false;
@@ -1668,6 +1670,9 @@ export const connectRemoteAgent = async (
   };
 
   const cleanupFileBinaryTransfers = async (): Promise<void> => {
+    // A chunk may still be creating its temporary directory when the socket
+    // closes. Let every accepted chunk settle before collecting owned files.
+    await Promise.allSettled(acceptingFileBinaryTransfers);
     const completed = [...completedFileBinaryTransfers.values()];
     completedFileBinaryTransfers.clear();
     for (const transfer of completed) {
@@ -1715,34 +1720,43 @@ export const connectRemoteAgent = async (
     chunk: ProtocolBinaryTransferChunk
   ): Promise<void> => {
     if (chunk.contentType === 'video/mp4') {
-      const result = await fileBinaryReceiver.acceptChunk(chunk);
-      if (result === undefined) {
-        return;
-      }
-      const waiters = waitingFileBinaryTransfers.get(chunk.transferId);
-      if (waiters === undefined || waiters.length === 0) {
-        waitingFileBinaryTransfers.delete(chunk.transferId);
-        completedFileBinaryTransfers.set(chunk.transferId, result);
-        return;
-      }
-      waitingFileBinaryTransfers.delete(chunk.transferId);
-      for (const waiter of waiters) {
-        clearTimeout(waiter.timer);
-        if (
-          waiter.reference.contentType !== result.contentType ||
-          waiter.reference.totalBytes !== result.totalBytes ||
-          waiter.reference.sha256 !== result.sha256
-        ) {
-          await removeCompletedFileBinaryTransfer(result);
-          waiter.reject(
-            createRemoteAgentError(
-              'PROTOCOL_ERROR',
-              `Video binary transfer metadata mismatch: ${chunk.transferId}.`
-            )
-          );
-        } else {
-          waiter.resolve(result);
+      if (disconnected || recordingCancellation.signal.aborted) return;
+      const accepting = (async (): Promise<void> => {
+        const result = await fileBinaryReceiver.acceptChunk(chunk);
+        if (result === undefined) {
+          return;
         }
+        const waiters = waitingFileBinaryTransfers.get(chunk.transferId);
+        if (waiters === undefined || waiters.length === 0) {
+          waitingFileBinaryTransfers.delete(chunk.transferId);
+          completedFileBinaryTransfers.set(chunk.transferId, result);
+          return;
+        }
+        waitingFileBinaryTransfers.delete(chunk.transferId);
+        for (const waiter of waiters) {
+          clearTimeout(waiter.timer);
+          if (
+            waiter.reference.contentType !== result.contentType ||
+            waiter.reference.totalBytes !== result.totalBytes ||
+            waiter.reference.sha256 !== result.sha256
+          ) {
+            await removeCompletedFileBinaryTransfer(result);
+            waiter.reject(
+              createRemoteAgentError(
+                'PROTOCOL_ERROR',
+                `Video binary transfer metadata mismatch: ${chunk.transferId}.`
+              )
+            );
+          } else {
+            waiter.resolve(result);
+          }
+        }
+      })();
+      acceptingFileBinaryTransfers.add(accepting);
+      try {
+        await accepting;
+      } finally {
+        acceptingFileBinaryTransfers.delete(accepting);
       }
       return;
     }
@@ -1922,6 +1936,7 @@ export const connectRemoteAgent = async (
         readyState?.settled === true ? 'DISCONNECTED' : preReadyErrorCode(),
         message
       );
+      recordingCancellation.abort(wrapped);
       if (readyState !== undefined) {
         settleReady(readyState, 'reject', wrapped);
       }
@@ -1935,6 +1950,7 @@ export const connectRemoteAgent = async (
         readyState?.settled === true ? 'DISCONNECTED' : preReadyErrorCode(),
         error.message
       );
+      recordingCancellation.abort(wrapped);
       if (readyState !== undefined) {
         settleReady(readyState, 'reject', wrapped);
       }
@@ -2015,6 +2031,7 @@ export const connectRemoteAgent = async (
       'DISCONNECTED',
       'Remote agent connection is closed.'
     );
+    recordingCancellation.abort(wrapped);
     pending.rejectAll('DISCONNECTED', wrapped.message);
     rejectBinaryTransferWaiters(wrapped);
     rejectFileBinaryTransferWaiters(wrapped);
@@ -2114,13 +2131,23 @@ export const connectRemoteAgent = async (
       })
     );
 
-    await delay(durationMs);
+    try {
+      await delay(durationMs, recordingCancellation.signal);
+    } catch (error) {
+      if (recordingCancellation.signal.aborted)
+        throw recordingCancellation.signal.reason;
+      throw error;
+    }
     const video = parseVideoResult(
       await requestJson('video.result', {
         recordingId,
       })
     );
     const transfer = await readFileBinaryTransfer(video.transfer);
+    if (recordingCancellation.signal.aborted) {
+      await removeCompletedFileBinaryTransfer(transfer);
+      throw recordingCancellation.signal.reason;
+    }
     return outputPath === undefined
       ? createCapturedVideoStream(transfer, video.metadata)
       : await persistCapturedVideo(transfer, video.metadata, outputPath);
