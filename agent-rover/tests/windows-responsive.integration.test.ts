@@ -33,12 +33,17 @@ it.skipIf(!enabled)(
     let deployment: { managedProcessId: number } | undefined;
     let fixture: { managedProcessId: number } | undefined;
     let operation: Promise<unknown> | undefined;
-    const launch = async (path: string, args: string[]) =>
+    const launch = async (
+      path: string,
+      args: string[],
+      appData: string = remote
+    ) =>
       (await bootstrap.request('process.launchManaged', {
         path,
         arguments: args,
         createNoWindow: true,
         killTreeOnRelease: true,
+        environment: { APPDATA: appData, AGENT_ROVER_TEST_SECRET: token },
       })) as { managedProcessId: number };
     const control = async (mode: string, name: string) => {
       const child = await launch(`${remote}\\control.exe`, [mode, name]);
@@ -111,6 +116,21 @@ it.skipIf(!enabled)(
         },
         { timeoutMs: 30000 }
       );
+      await control('hold-logger', String(port));
+      expect((await first.capabilities()).platform).toBe('windows');
+      second = await connectRemoteAgent({
+        host: host!,
+        port,
+        authToken: token,
+        timeoutMs: 10000,
+      });
+      expect((await second.capabilities()).platform).toBe('windows');
+      await control('inspect', String(port));
+      await control('logger-held', String(port));
+      await control('resume-logger', String(port));
+      second.release();
+      second = undefined;
+      for (let i = 0; i < 1005; ++i) await first.capabilities();
       fixture = await launch(`${remote}\\control.exe`, ['block', unique]);
       const window = await first.waitForWindow({
         title: unique,
@@ -139,6 +159,43 @@ it.skipIf(!enabled)(
       // Only now release the target; the checks above cannot pass by unblocking it.
       await control('release', unique);
       expect(await observed).not.toHaveProperty('error');
+      await control('exit', String(port));
+      await control('logs', remote);
+      first.release();
+      first = undefined;
+      second.release();
+      second = undefined;
+      await bootstrap.request('process.releaseManaged', {
+        managedProcessId: deployment.managedProcessId,
+      });
+      deployment = undefined;
+      await bootstrap.upload(
+        `${remote}\\not-a-directory`,
+        Buffer.from('occupied')
+      );
+      deployment = await launch(
+        `${remote}\\agent.exe`,
+        ['--host', '0.0.0.0', '--port', String(port), '--unsafe-token', token],
+        `${remote}\\not-a-directory`
+      );
+      first = await waitForResult(
+        async () => {
+          try {
+            return await connectRemoteAgent({
+              host: host!,
+              port,
+              authToken: token,
+              timeoutMs: 5000,
+            });
+          } catch {
+            throw new Error('Agent with failing log destination is starting.');
+          }
+        },
+        { timeoutMs: 30000 }
+      );
+      expect((await first.capabilities()).platform).toBe('windows');
+      await control('log-failure', String(port));
+      await control('inspect', String(port));
       await control('exit', String(port));
     } finally {
       if (fixture) {

@@ -39,8 +39,8 @@ static void Layout(AgentGui* gui) {
   const int width = std::max(0L, bounds.right - 20);
   MoveWindow(gui->banner, 10, 10, width, 72, TRUE);
   MoveWindow(gui->token, 10, 88, width, 24, TRUE);
-  MoveWindow(gui->list, 10, 122, width, std::max(0L, bounds.bottom - 165), TRUE);
-  MoveWindow(gui->status, 10, std::max(124L, bounds.bottom - 33), width, 28, TRUE);
+  MoveWindow(gui->list, 10, 122, width, std::max(0L, bounds.bottom - 195), TRUE);
+  MoveWindow(gui->status, 10, std::max(124L, bounds.bottom - 63), width, 58, TRUE);
   ListView_SetColumnWidth(gui->list, 2, std::max(160, width - 280));
 }
 

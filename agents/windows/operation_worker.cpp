@@ -48,7 +48,7 @@ static HANDLE CreateWorkerPipe(HANDLE* child, bool parent_reads) {
   return parent;
 }
 
-Worker StartOperationWorker(bool probe) {
+Worker StartOperationWorker(HelperRole role) {
   auto worker = std::make_shared<OperationWorker>();
   HANDLE input = INVALID_HANDLE_VALUE, output = INVALID_HANDLE_VALUE;
   try {
@@ -56,7 +56,9 @@ Worker StartOperationWorker(bool probe) {
     worker->output = CreateWorkerPipe(&output, true);
     wchar_t path[32768] = {};
     if (!GetModuleFileNameW(nullptr, path, 32768)) throw NativeFailure("GetModuleFileNameW");
-    auto command = BuildCommandLine(path, {probe ? L"--agent-probe" : L"--agent-worker"});
+    const auto mode = role == HelperRole::Probe ? L"--agent-probe" :
+        role == HelperRole::FileLogger ? L"--agent-log-worker" : L"--agent-worker";
+    auto command = BuildCommandLine(path, {mode});
     STARTUPINFOW startup = {};
     startup.cb = sizeof(startup);
     startup.dwFlags = STARTF_USESTDHANDLES;
@@ -157,20 +159,29 @@ static bool BlockingRead(void* data, size_t size) {
   return true;
 }
 
-static void SendWorkerMessage(WorkerMessageKind kind, const std::vector<unsigned char>& payload) {
+void SendWorkerReply(WorkerMessageKind kind, const std::vector<unsigned char>& payload) {
   uint32_t header[2] = {static_cast<uint32_t>(kind), static_cast<uint32_t>(payload.size())};
   BlockingWrite(header, sizeof(header));
   BlockingWrite(payload.data(), payload.size());
 }
 
-static void SendWorkerText(WorkerMessageKind kind, const std::string& text) {
-  SendWorkerMessage(kind, {text.begin(), text.end()});
+void SendWorkerReplyText(WorkerMessageKind kind, const std::string& text) {
+  SendWorkerReply(kind, {text.begin(), text.end()});
+}
+
+bool ReadWorkerCommand(WorkerMessage* message) {
+  uint32_t header[2] = {};
+  if (!BlockingRead(header, sizeof(header))) return false;
+  if (header[1] > kMaxJsonPayloadBytes) throw std::runtime_error("Worker input exceeds limit.");
+  message->kind = static_cast<WorkerMessageKind>(header[0]);
+  message->payload.resize(header[1]);
+  return BlockingRead(message->payload.data(), message->payload.size());
 }
 
 static void SendWorkerChunk(const BinaryTransferChunk& chunk) {
   std::vector<unsigned char> payload;
   EncodeBinaryTransferChunkPayload(chunk, &payload);
-  SendWorkerMessage(WorkerMessageKind::Binary, payload);
+  SendWorkerReply(WorkerMessageKind::Binary, payload);
 }
 
 static void SendWorkerFile(const OutboundFileTransfer& transfer) {
@@ -230,11 +241,11 @@ int RunOperationWorker(bool probe) {
       std::vector<unsigned char> detected(5);
       detected[0] = static_cast<unsigned char>(IsVideoCaptureSupported());
       std::memcpy(detected.data() + 1, &address, sizeof(address));
-      SendWorkerMessage(WorkerMessageKind::Capability, detected);
+      SendWorkerReply(WorkerMessageKind::Capability, detected);
       WSACleanup();
       return 0;
     }
-    SetAgentLogSink([](const AgentLogRecord& record) { SendWorkerText(WorkerMessageKind::Log, record.event); });
+    SetAgentLogSink([](const AgentLogRecord& record) { SendWorkerReplyText(WorkerMessageKind::Log, record.event); });
     for (;;) {
       uint32_t header[2] = {};
       if (!BlockingRead(header, sizeof(header))) break;
@@ -250,9 +261,10 @@ int RunOperationWorker(bool probe) {
         std::vector<BinaryTransferChunk> chunks;
         OutboundFileTransfer file = {};
         const auto response = HandleJsonRequest({payload.begin(), payload.end()}, &transfers, &recordings, &chunks, &file);
+        PrintAgentLogEvent(CreateAgentResultLog(response));
         try {
           for (const auto& chunk : chunks) SendWorkerChunk(chunk);
-          SendWorkerText(WorkerMessageKind::Json, response);
+          SendWorkerReplyText(WorkerMessageKind::Json, response);
           if (file.present) SendWorkerFile(file);
         } catch (...) {
           if (file.present) { DeleteFileW(Utf8ToWide(file.path).c_str()); RemoveDirectoryW(Utf8ToWide(file.directory).c_str()); }
@@ -260,7 +272,7 @@ int RunOperationWorker(bool probe) {
         }
         if (file.present) { DeleteFileW(Utf8ToWide(file.path).c_str()); RemoveDirectoryW(Utf8ToWide(file.directory).c_str()); }
       } else throw std::runtime_error("Unknown worker command.");
-      SendWorkerMessage(WorkerMessageKind::Complete, {});
+      SendWorkerReply(WorkerMessageKind::Complete, {});
     }
     CancelVideoRecording(&recordings);
     return 0;

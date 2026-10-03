@@ -1117,6 +1117,20 @@ std::string CreateAgentFailure(const std::string& id, const std::string& code, c
       JsonEscape(code) + "\",\"message\":\"" + JsonEscape(message) + "\"}}";
 }
 
+std::string CreateAgentResultLog(const std::string& payload) {
+  bool success = false;
+  if (!FindJsonBoolField(payload, "ok", &success)) return "phase=failed code=INVALID_RESPONSE";
+  if (success) return "phase=succeeded";
+  std::string result = "phase=failed", value;
+  for (const auto key : {"code", "nativeOperation", "reason"}) {
+    if (FindJsonStringField(payload, key, &value))
+      result += std::string(" ") + key + "=" + SanitizeAgentLogField(value.substr(0, 128));
+  }
+  uint32_t code = 0;
+  if (FindJsonUInt32Field(payload, "osCode", &code)) result += " osCode=" + std::to_string(code);
+  return result;
+}
+
 std::string HandleJsonRequest(
     const std::string& payload,
     BinaryTransferStore* transfers,

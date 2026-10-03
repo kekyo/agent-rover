@@ -35,6 +35,9 @@ std::string CreateCapabilitiesResponse(const std::string& id);
  * @param id Request identifier. @param code Stable failure code.
  * @param message Diagnostic description. @return JSON response. */
 std::string CreateAgentFailure(const std::string& id, const std::string& code, const std::string& message);
+/** Describes a generated response without logging results, messages, paths or request contents.
+ * @param payload Internally generated response JSON. @return Bounded outcome and native failure fields. */
+std::string CreateAgentResultLog(const std::string& payload);
 
 /**
  * Handles one JSON request payload.

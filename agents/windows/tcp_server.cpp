@@ -9,6 +9,7 @@
 #include "agent_log.h"
 #include "auth.h"
 #include "frame.h"
+#include "file_logger.h"
 #include "json_protocol.h"
 #include "operation_worker.h"
 #include "version_banner.h"
@@ -34,6 +35,22 @@ struct QueuedRequest {
   MonotonicClock::time_point received;
 };
 
+struct QueuedResponse {
+  Frame frame;
+  std::string context;
+  MonotonicClock::time_point received;
+};
+
+static std::string RequestContext(uint32_t connection, const QueuedRequest& request) {
+  return "connection #" + std::to_string(connection) + " request=" +
+      SanitizeAgentLogField(request.id) + " method=" + SanitizeAgentLogField(request.method);
+}
+
+static std::string Elapsed(MonotonicClock::time_point received) {
+  return " elapsedMs=" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+      MonotonicClock::now() - received).count());
+}
+
 struct ServerState;
 struct ClientSession {
   std::shared_ptr<ServerState> server;
@@ -42,7 +59,7 @@ struct ClientSession {
   bool closed = false;
   cardio::cancellation_source stop;
   std::deque<QueuedRequest> requests;
-  std::deque<Frame> output;
+  std::deque<QueuedResponse> output;
   size_t request_bytes = 0, output_bytes = 0;
   AsyncSignal request_ready, output_ready, output_space;
   Worker worker;
@@ -53,17 +70,25 @@ struct ServerState {
   ServerOptions options;
   SocketConnection listener;
   AgentGuiHandle gui;
+  FileLoggerHandle logger;
+  std::string listen_status = "Starting...", log_status;
   cardio::cancellation_source stop;
   std::list<std::shared_ptr<ClientSession>> sessions;
   // Failed reaping occupies a slot permanently instead of spawning unbounded replacements.
   std::vector<Worker> quarantine;
   AsyncSignal sessions_changed;
+  AsyncSignal sessions_drained;
   size_t workers = 0, request_bytes = 0, output_bytes = 0, reading_bytes = 0;
   bool desktop_busy = false;
   std::deque<std::shared_ptr<cardio::promise_source<void>>> desktop_waiters;
 };
 
 static Frame JsonFrame(const std::string& text) { return {FrameKind::Json, {text.begin(), text.end()}}; }
+
+static void SetListenStatus(const std::shared_ptr<ServerState>& server, const std::string& status) {
+  server->listen_status = status;
+  SetAgentGuiStatus(server->gui, status + " | " + server->log_status);
+}
 
 static void CloseSession(const std::shared_ptr<ClientSession>& session, const std::string& reason) {
   if (session->closed) return;
@@ -82,10 +107,11 @@ static void StopServer(const std::shared_ptr<ServerState>& server) {
   CloseSocket(server->listener);
   for (const auto& session : server->sessions) CloseSession(session, "agent shutdown");
   server->sessions_changed.Notify();
-  SetAgentGuiStatus(server->gui, "Stopping...");
+  SetListenStatus(server, "Stopping...");
 }
 
-static void EnqueueOutput(const std::shared_ptr<ClientSession>& session, Frame frame) {
+static void EnqueueOutput(const std::shared_ptr<ClientSession>& session, Frame frame,
+    const std::string& context = "", MonotonicClock::time_point received = MonotonicClock::now()) {
   if (session->closed) throw std::runtime_error("Connection closed.");
   const auto size = frame.payload.size() + kFrameHeaderBytes;
   if (session->output.size() >= kMaxRequests || session->output_bytes + size > kConnectionQueueBytes ||
@@ -93,28 +119,36 @@ static void EnqueueOutput(const std::shared_ptr<ClientSession>& session, Frame f
     throw std::runtime_error("Outbound queue limit exceeded.");
   session->output_bytes += size;
   session->server->output_bytes += size;
-  session->output.push_back(std::move(frame));
+  session->output.push_back({std::move(frame), context, received});
   session->output_ready.Notify();
 }
 
 static cardio::promise<void> SendResponses(std::shared_ptr<ClientSession> session) {
+  std::string context;
   try {
     while (!session->closed) {
       if (session->output.empty()) {
         co_await session->output_ready.Wait(session->stop.get_cancellation());
         continue;
       }
-      const auto& frame = session->output.front();
-      const auto encoded = EncodeFrame(frame);
+      const auto& response = session->output.front();
+      context = response.context;
+      const auto encoded = EncodeFrame(response.frame);
+      if (!context.empty()) PrintAgentLogEvent(context + " phase=sending bytes=" + std::to_string(encoded.size()));
       auto timeout = cardio::cancellations::timeout(kFrameMs);
       auto cancelled = cardio::cancellations::any(timeout.get_cancellation(), session->stop.get_cancellation());
       co_await WriteSocket(session->socket, encoded, cancelled.get_cancellation());
+      if (!context.empty()) PrintAgentLogEvent(context + " phase=sent" + Elapsed(response.received));
       session->output_bytes -= encoded.size();
       session->server->output_bytes -= encoded.size();
       session->output.pop_front();
       session->output_space.Notify();
+      context.clear();
     }
-  } catch (const std::exception& error) { CloseSession(session, std::string("send: ") + error.what()); }
+  } catch (const std::exception& error) {
+    if (!context.empty()) PrintAgentLogEvent(context + " phase=send-failed reason=" + SanitizeAgentLogField(error.what()));
+    CloseSession(session, std::string("send: ") + error.what());
+  }
 }
 
 static cardio::promise<Frame> ReceiveFrame(std::shared_ptr<ClientSession> session,
@@ -175,10 +209,12 @@ static cardio::promise<void> ExecuteRequests(std::shared_ptr<ClientSession> sess
         continue;
       }
       auto request = std::move(session->requests.front());
+      const auto context = RequestContext(session->id, request);
       session->requests.pop_front();
       const auto size = request.frame.payload.size() + kFrameHeaderBytes;
       const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(MonotonicClock::now() - request.received).count();
       if (elapsed >= kOperationMs) {
+        PrintAgentLogEvent(context + " phase=expired-before-execution" + Elapsed(request.received));
         if (!request.id.empty()) EnqueueOutput(session, JsonFrame(CreateAgentFailure(request.id, "TIMEOUT", "Operation expired before execution.")));
         session->request_bytes -= size;
         session->server->request_bytes -= size;
@@ -191,7 +227,7 @@ static cardio::promise<void> ExecuteRequests(std::shared_ptr<ClientSession> sess
       try {
         if (!session->worker) {
           if (session->server->workers >= kMaxWorkers) throw std::runtime_error("Operation worker limit reached.");
-          session->worker = StartOperationWorker(false);
+          session->worker = StartOperationWorker(HelperRole::Operations);
           ++session->server->workers;
         }
         if (UsesDesktop(request.method)) {
@@ -199,9 +235,7 @@ static cardio::promise<void> ExecuteRequests(std::shared_ptr<ClientSession> sess
           desktop = true;
         }
         cancel.get_cancellation().throw_if_cancellation_requested();
-        const auto context = "connection #" + std::to_string(session->id) + " request=" +
-            SanitizeAgentLogField(request.id) + " method=" + SanitizeAgentLogField(request.method);
-        if (!request.id.empty()) PrintAgentLogEvent(context + " phase=execute");
+        if (!request.id.empty()) PrintAgentLogEvent(context + " phase=execute" + Elapsed(request.received));
         WorkerMessage command = {request.frame.kind == FrameKind::Json ? WorkerMessageKind::Json : WorkerMessageKind::Binary,
             std::move(request.frame.payload)};
         co_await WriteWorker(session->worker, std::move(command), cancel.get_cancellation());
@@ -209,7 +243,7 @@ static cardio::promise<void> ExecuteRequests(std::shared_ptr<ClientSession> sess
           auto response = co_await ReadWorker(session->worker, cancel.get_cancellation());
           if (response.kind == WorkerMessageKind::Complete) break;
           if (response.kind == WorkerMessageKind::Log) {
-            PrintAgentLogEvent(context + " " + std::string(response.payload.begin(), response.payload.end()));
+            PrintAgentLogEvent(context + " " + std::string(response.payload.begin(), response.payload.end()) + Elapsed(request.received));
             continue;
           }
           if (response.kind != WorkerMessageKind::Json && response.kind != WorkerMessageKind::Binary)
@@ -217,15 +251,16 @@ static cardio::promise<void> ExecuteRequests(std::shared_ptr<ClientSession> sess
           while (session->output_bytes + response.payload.size() + kFrameHeaderBytes > kConnectionQueueBytes ||
               session->output.size() >= kMaxRequests)
             co_await session->output_space.Wait(cancel.get_cancellation());
+          const auto response_context = response.kind == WorkerMessageKind::Json ? context : "";
           EnqueueOutput(session, {response.kind == WorkerMessageKind::Json ? FrameKind::Json : FrameKind::Binary,
-              std::move(response.payload)});
+              std::move(response.payload)}, response_context, request.received);
         }
-        if (!request.id.empty()) PrintAgentLogEvent(context + " phase=complete elapsedMs=" + std::to_string(
-            std::chrono::duration_cast<std::chrono::milliseconds>(MonotonicClock::now() - request.received).count()));
+        if (!request.id.empty()) PrintAgentLogEvent(context + " phase=execution-end" + Elapsed(request.received));
       } catch (const std::exception& error) { failure = error.what(); }
       session->request_bytes -= size;
       session->server->request_bytes -= size;
       if (!failure.empty()) {
+        PrintAgentLogEvent(context + " phase=interrupted reason=" + SanitizeAgentLogField(failure) + Elapsed(request.received));
         if (desktop) {
           // Cancellation of IPC is not cancellation of the remote Win32 call.
           // Keep desktop ownership until the old worker really has stopped.
@@ -277,8 +312,12 @@ static cardio::promise<void> ServeClient(std::shared_ptr<ClientSession> session)
       if (request.frame.kind == FrameKind::Json) {
         const std::string text(request.frame.payload.begin(), request.frame.payload.end());
         if (!ReadAgentRequest(text, &request.id, &request.method)) throw std::runtime_error("Invalid JSON request envelope.");
+        const auto context = RequestContext(session->id, request);
+        PrintAgentLogEvent(context + " phase=received");
         if (request.method == "agent.capabilities") {
-          EnqueueOutput(session, JsonFrame(CreateCapabilitiesResponse(request.id)));
+          PrintAgentLogEvent(context + " phase=execute");
+          EnqueueOutput(session, JsonFrame(CreateCapabilitiesResponse(request.id)), context, request.received);
+          PrintAgentLogEvent(context + " phase=succeeded" + Elapsed(request.received));
           continue;
         }
       } else if (request.frame.kind != FrameKind::Binary) throw std::runtime_error("Unexpected frame kind.");
@@ -320,7 +359,10 @@ static cardio::promise<void> ReapSessions(std::shared_ptr<ServerState> server) {
         it = server->sessions.erase(it);
       } else ++it;
     }
-    if (server->stop.get_cancellation().is_cancellation_requested() && server->sessions.empty()) break;
+    if (server->stop.get_cancellation().is_cancellation_requested() && server->sessions.empty()) {
+      server->sessions_drained.Notify();
+      break;
+    }
     co_await server->sessions_changed.Wait({});
   }
 }
@@ -328,7 +370,7 @@ static cardio::promise<void> ReapSessions(std::shared_ptr<ServerState> server) {
 static cardio::promise<void> Serve(std::shared_ptr<ServerState> server, int* result, std::string* error) {
   Worker probe;
   try {
-    probe = StartOperationWorker(true);
+    probe = StartOperationWorker(HelperRole::Probe);
     auto timeout = cardio::cancellations::timeout(kAuthenticationMs);
     auto cancel = cardio::cancellations::any(timeout.get_cancellation(), server->stop.get_cancellation());
     WorkerMessage probe_request;
@@ -356,7 +398,7 @@ static cardio::promise<void> Serve(std::shared_ptr<ServerState> server, int* res
       throw std::runtime_error("bind/listen failed WSA=" + std::to_string(WSAGetLastError()));
     const auto status = "Listening on " + server->options.host + ":" + std::to_string(server->options.port);
     PrintAgentLogEvent("version=" + BuildAgentVersionText() + " " + status);
-    SetAgentGuiStatus(server->gui, status);
+    SetListenStatus(server, status);
     uint32_t next_id = 0;
     for (;;) {
       std::string endpoint;
@@ -379,7 +421,7 @@ static cardio::promise<void> Serve(std::shared_ptr<ServerState> server, int* res
       *result = 1;
       *error = failure.what();
       PrintAgentLogEvent(*error);
-      SetAgentGuiStatus(server->gui, "Startup failed: " + *error);
+      SetListenStatus(server, "Startup failed: " + *error);
     }
   }
   StopServer(server);
@@ -388,6 +430,9 @@ static cardio::promise<void> Serve(std::shared_ptr<ServerState> server, int* res
     const auto reaped = co_await StopOperationWorker(probe);
     if (!reaped) server->quarantine.push_back(probe);
   }
+  while (!server->sessions.empty()) co_await server->sessions_drained.Wait({});
+  PrintAgentLogEvent("phase=shutdown connections drained");
+  co_await StopFileLogger(server->logger);
 }
 
 int RunTcpServer(const ServerOptions& options, std::string* error) {
@@ -400,7 +445,16 @@ int RunTcpServer(const ServerOptions& options, std::string* error) {
     server->options = options;
     const auto weak = std::weak_ptr<ServerState>(server);
     server->gui = CreateAgentGui(options, [weak] { if (auto state = weak.lock()) StopServer(state); });
-    SetAgentLogSink([weak](const AgentLogRecord&) { if (auto state = weak.lock()) NotifyAgentGuiLog(state->gui); });
+    server->logger = CreateFileLogger([weak](const std::string& status) {
+      if (auto state = weak.lock()) {
+        state->log_status = status;
+        SetListenStatus(state, state->listen_status);
+      }
+    });
+    SetAgentGuiOpenLogs(server->gui, [weak] { if (auto state = weak.lock()) OpenFileLogFolder(state->logger); });
+    SetAgentLogSink([weak](const AgentLogRecord& record) {
+      if (auto state = weak.lock()) { NotifyAgentGuiLog(state->gui); EnqueueFileLog(state->logger, record); }
+    });
     auto reaping = ReapSessions(server);
     auto serving = Serve(server, &result, error);
     dispatcher.park();
