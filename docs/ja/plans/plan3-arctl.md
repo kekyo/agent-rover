@@ -281,6 +281,7 @@ CLIは引数の解析、既存APIの呼び出し、結果の表示を分ける�
 公開APIを広げたり、エージェントの録画開始・停止プロトコルを追加したりしない。
 
 実装にはTypeScript、Vite、Vitest、npmを使う。
+引数解析には、実装開始後の利用者の指定に従いcommanderを使う。
 既存のprettier-maxとscrew-upを継続し、resolved-killerを含む指定ツールの適用箇所を実装前に確認する。
 外部ライブラリのAPIは、公式文書とインストールされた版のAPIコメントの両方で確認する。
 必要なパッケージや検証用コマンドが不足している場合は、利用者に導入を促す。
@@ -417,3 +418,24 @@ Wine固有の問題と特定できた場合はWine向けに製品を変更せず
 実装計画は各段階でCLIを動かせる単位に分け、テスト、コミット、完了条件を記載した。
 日本語の整理には[yomiyasu skill](https://github.com/nanaism/yomiyasu/blob/8d5abeebe2dd20c2db005deaddcc50be43c59c0a/SKILL.md)を使用した。
 この文書はビルドの入力ではないため、保存だけでは製品のビルドや全体テストを実行する必要はない。
+
+## 13. 実装の記録
+
+文書保存後に、本計画の実施を依頼された。以降は第11節の条件を実装の完了判定に使う。
+
+### 段階1の結果
+
+`windows`、共通オプション、ヘルプ、バージョン、出力と終了コードを実装した。
+引数解析とヘルプ生成にはcommanderを使い、Node.js 20に対応する14系を採用した。
+対応条件は[commander 14.0.3のpackage.json](https://github.com/tj/commander.js/blob/v14.0.3/package.json)で確認した。
+認証トークンはエラーから伏せ、接続準備中のCtrl+Cでも終了コード130で終了する。
+
+利用者の承認を得てresolved-killerを開発依存へ追加した。
+ルートの`package.json`に`dependencies: reskill`を設定し、ロックファイルへ適用した。
+SDKのESM/CJSビルドにCLIのESMビルドを追加し、起動行と実行権限を含めた。
+
+Linux、Node.js 24.15.0で、実装前のCLI試験8件の失敗を確認した。
+実装後はCLI試験9件と既存SDKの接続・公開API試験を合わせ、3ファイル54件が成功した。
+`npm run build --workspace agent-rover`が成功し、`npx --no-install arctl --version`で生成バージョンを表示できた。
+TCP接続による一覧取得と、接続を伴わないヘルプ・バージョン表示を確認し、段階1の完了条件を満たした。
+起動、転送、撮影、配布物の独立インストールとWindows実機での確認は、続く段階で実施する。
