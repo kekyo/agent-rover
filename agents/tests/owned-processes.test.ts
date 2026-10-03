@@ -9,7 +9,7 @@ import { waitForResult } from '../../agent-rover/src/wait';
 const root = resolve(import.meta.dirname, '..');
 const exec = promisify(execFile);
 
-it.each(['worker', 'host'])(
+it.each(['worker', 'host', 'supervisor'])(
   'reclaims the application tree when the %s dies, preserving opted-out applications',
   async (failure) => {
     await exec('make', ['-j4', 'amd64'], {
@@ -133,9 +133,18 @@ it.each(['worker', 'host'])(
         }
       })();
       await run('entered', title);
+      const supervisor = Number(
+        (await run('parent', String(port))).stdout.trim()
+      );
       await run(
         failure === 'host' ? 'kill-server' : 'kill-process',
-        String(failure === 'host' ? port : workers[0])
+        String(
+          failure === 'host'
+            ? port
+            : failure === 'supervisor'
+              ? supervisor
+              : workers[0]
+        )
       );
       await run('wait-exit', String(ownedPid));
       await run('wait-exit', String(childPid));

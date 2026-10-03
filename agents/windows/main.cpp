@@ -6,6 +6,7 @@
 #include "operation_worker.h"
 #include "file_logger.h"
 #include "managed_launch.h"
+#include "supervisor.h"
 #include <shellapi.h>
 
 #include "auth.h"
@@ -31,6 +32,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, wchar_t*, int) {
   int argc = 0;
   wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
   if (!argv) return 1;
+  if (argc == 2 && std::wstring(argv[1]) == L"--agent-server") {
+    LocalFree(argv);
+    return agent_rover::RunSupervisedServer();
+  }
   if (argc == 2 && std::wstring(argv[1]) == L"--agent-launch-worker") {
     LocalFree(argv);
     return agent_rover::RunManagedLaunchWorker();
@@ -79,7 +84,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, wchar_t*, int) {
   }
 
   std::string error;
-  const int exit_code = agent_rover::RunTcpServer(options, &error);
+  const int exit_code = agent_rover::RunSupervisor(options, &error);
   if (exit_code != 0) {
     MessageBoxW(nullptr, agent_rover::Utf8ToWide(error).c_str(), L"agent-rover", MB_OK | MB_ICONERROR);
   }

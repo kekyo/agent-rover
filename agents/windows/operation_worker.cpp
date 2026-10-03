@@ -11,6 +11,7 @@
 #include "win32_video.h"
 #include "win32_cleanup.h"
 #include "managed_launch.h"
+#include "recovery_registry.h"
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
@@ -30,6 +31,7 @@ struct OperationWorker {
   std::map<uint32_t, Worker> applications;
   uint32_t next_application = 0;
   bool captures_output = false;
+  uint32_t recovery_slot = kNoRecoverySlot, process_slot = kNoRecoverySlot;
   ~OperationWorker() {
     if (input != INVALID_HANDLE_VALUE) CloseHandle(input);
     if (output != INVALID_HANDLE_VALUE) CloseHandle(output);
@@ -37,6 +39,16 @@ struct OperationWorker {
     if (job) CloseHandle(job);
   }
 };
+static bool helper_breakaway = false;
+void SetHelperBreakaway(bool enabled) { helper_breakaway = enabled; }
+HANDLE WorkerProcess(const Worker& worker) { return worker->process; }
+bool WorkerHasCaptureRoot(const Worker& worker) { return !worker->capture_root.empty(); }
+Worker AdoptRecoveryRoot(const std::vector<unsigned char>& ownership) {
+  auto worker = std::make_shared<OperationWorker>();
+  worker->role = HelperRole::Operations;
+  worker->capture_root = ownership;
+  return worker;
+}
 
 static std::runtime_error NativeFailure(const char* operation) {
   const DWORD code = GetLastError();
@@ -69,7 +81,7 @@ Worker StartOperationWorker(HelperRole role, uint64_t max_transfer_bytes) {
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {};
     if (role != HelperRole::PersistentLaunch)
       limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    if (role == HelperRole::Operations) limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+    if (role == HelperRole::Operations || role == HelperRole::Server) limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_BREAKAWAY_OK;
     // Opening the log folder must not tie a new Explorer process to the logger.
     if (role == HelperRole::FileLogger) limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
     if (!SetInformationJobObject(worker->job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)))
@@ -79,6 +91,7 @@ Worker StartOperationWorker(HelperRole role, uint64_t max_transfer_bytes) {
     wchar_t path[32768] = {};
     if (!GetModuleFileNameW(nullptr, path, 32768)) throw NativeFailure("GetModuleFileNameW");
     const auto mode = role == HelperRole::Probe ? L"--agent-probe" :
+        role == HelperRole::Server ? L"--agent-server" :
         role == HelperRole::FileLogger ? L"--agent-log-worker" :
         (role == HelperRole::Launch || role == HelperRole::PersistentLaunch) ? L"--agent-launch-worker" :
         role == HelperRole::Cleanup ? L"--agent-cleanup-worker" : L"--agent-worker";
@@ -95,7 +108,8 @@ Worker StartOperationWorker(HelperRole role, uint64_t max_transfer_bytes) {
     startup.hStdOutput = output;
     startup.hStdError = output;
     PROCESS_INFORMATION process = {};
-    if (!CreateProcessW(path, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
+    if (!CreateProcessW(path, command.data(), nullptr, nullptr, TRUE,
+        CREATE_NO_WINDOW | (helper_breakaway ? CREATE_BREAKAWAY_FROM_JOB : 0),
         nullptr, nullptr, &startup, &process)) throw NativeFailure("CreateProcessW(worker)");
     worker->process = process.hProcess;
     CloseHandle(process.hThread);
@@ -106,6 +120,7 @@ Worker StartOperationWorker(HelperRole role, uint64_t max_transfer_bytes) {
       TerminateProcess(worker->process, ERROR_PROCESS_ABORTED);
       throw error;
     }
+    if (role == HelperRole::Operations) worker->process_slot = RegisterRecoveryWorker(worker->process);
   } catch (...) {
     if (input != INVALID_HANDLE_VALUE) CloseHandle(input);
     if (output != INVALID_HANDLE_VALUE) CloseHandle(output);
@@ -158,12 +173,20 @@ cardio::promise<WorkerMessage> ReadWorker(Worker worker, cardio::cancellation ca
 
 cardio::promise<void> InitializeOperationWorker(Worker worker) {
   auto deadline = cardio::cancellations::timeout(3000);
-  const auto ownership = co_await ReadWorker(worker, deadline.get_cancellation());
-  if (ownership.kind != WorkerMessageKind::CaptureRoot)
-    throw std::runtime_error("Missing capture ownership message.");
+  const auto ready = co_await ReadWorker(worker, deadline.get_cancellation());
+  if (ready.kind != WorkerMessageKind::Complete) throw std::runtime_error("Missing worker readiness message.");
 }
 
 cardio::promise<bool> HandleWorkerOwnership(Worker worker, WorkerMessage message, cardio::cancellation cancellation) {
+  if (message.kind == WorkerMessageKind::ReserveCapture || message.kind == WorkerMessageKind::CaptureRoot) {
+    if (message.kind == WorkerMessageKind::ReserveCapture) {
+      if (worker->recovery_slot != kNoRecoverySlot) throw std::runtime_error("Duplicate capture reservation.");
+      worker->recovery_slot = ReserveRecoveryRoot(worker->process);
+    } else CommitRecoveryRoot(worker->recovery_slot, worker->capture_root);
+    WorkerMessage reply = {WorkerMessageKind::Complete, {}};
+    co_await WriteWorker(worker, std::move(reply), cancellation);
+    co_return true;
+  }
   if (message.kind == WorkerMessageKind::ReleaseLaunch) {
     if (message.payload.size() != sizeof(uint32_t)) throw std::runtime_error("Invalid launch release.");
     uint32_t id = 0; std::memcpy(&id, message.payload.data(), sizeof(id));
@@ -196,6 +219,9 @@ cardio::promise<bool> HandleWorkerOwnership(Worker worker, WorkerMessage message
     handles.ownership_id = id;
     std::memcpy(reply.payload.data(), &handles, sizeof(handles));
     PrintAgentLogEvent("phase=owned-launch process=" + std::to_string(handles.process_id) +
+        " worker=" + std::to_string(GetProcessId(worker->process)) +
+        " capturedStreams=" + std::to_string(static_cast<unsigned int>(!options.launch.stdout_path.empty()) +
+            static_cast<unsigned int>(!options.launch.stderr_path.empty())) +
         " killOnRelease=" + std::to_string(options.kill_tree_on_release));
   } else if (reply.kind != WorkerMessageKind::LaunchError) throw std::runtime_error("Invalid launch reply.");
   if (!co_await StopOperationWorker(launcher)) throw std::runtime_error("Launch helper termination unconfirmed.");
@@ -257,8 +283,14 @@ cardio::promise<bool> StopOperationWorker(Worker worker) {
     catch (const cardio::canceled_exception&) {}
   }
   if (!exited) {
-    if (!TerminateProcess(worker->process, ERROR_TIMEOUT) && WaitForSingleObject(worker->process, 0) != WAIT_OBJECT_0)
-      co_return false;
+    if (!TerminateProcess(worker->process, ERROR_TIMEOUT)) {
+      const auto code = GetLastError();
+      if (WaitForSingleObject(worker->process, 0) != WAIT_OBJECT_0) {
+        PrintAgentLogEvent("phase=worker-termination-failed worker=" + std::to_string(GetProcessId(worker->process)) +
+            " Win32=" + std::to_string(code));
+        co_return false;
+      }
+    }
     auto deadline = cardio::cancellations::timeout(2000);
     try { co_await cardio::from_win32_handle(worker->process, deadline.get_cancellation()); exited = true; }
     catch (const cardio::canceled_exception&) {}
@@ -266,18 +298,28 @@ cardio::promise<bool> StopOperationWorker(Worker worker) {
   if (!exited || worker->role != HelperRole::Operations) co_return exited;
   try {
     auto deadline = cardio::cancellations::timeout(5000);
+    size_t terminated = 0, preserved = 0;
     for (const auto& [id, launcher] : worker->applications) {
       if (launcher->role == HelperRole::PersistentLaunch) {
         if (!co_await StopOperationWorker(launcher)) co_return false;
+        ++preserved;
         continue;
       }
       if (!TerminateJobObject(launcher->job, ERROR_PROCESS_ABORTED)) throw NativeFailure("TerminateJobObject(owned launch)");
       co_await WaitForJobExit(launcher->job, deadline.get_cancellation());
+      ++terminated;
     }
     std::erase_if(worker->applications, [](const auto& entry) {
       return entry.second->role == HelperRole::PersistentLaunch && !entry.second->captures_output;
     });
-    PrintAgentLogEvent("phase=owned-processes-stopped count=" + std::to_string(worker->applications.size()));
+    PrintAgentLogEvent("phase=owned-processes-stopped worker=" + std::to_string(GetProcessId(worker->process)) +
+        " terminatedTrees=" + std::to_string(terminated) + " preservedTrees=" + std::to_string(preserved));
+    ReleaseRecoveryWorker(worker->process_slot);
+    worker->process_slot = kNoRecoverySlot;
+    if (worker->capture_root.empty()) {
+      ReleaseRecoveryRoot(worker->recovery_slot);
+      worker->recovery_slot = kNoRecoverySlot;
+    }
   } catch (const std::exception& error) {
     PrintAgentLogEvent(std::string("phase=owned-processes-stop-failed reason=") + error.what());
     co_return false;
@@ -296,12 +338,7 @@ cardio::promise<bool> RecoverOperationWorker(Worker worker) {
     PrintAgentLogEvent(std::string("phase=capture-wait reason=") + error.what());
     co_return false;
   }
-  // Never guess a deletion path after a failed startup. Execution and desktop
-  // ownership are independent of this diagnostic and file-recovery record.
-  if (worker->capture_root.empty()) {
-    PrintAgentLogEvent("phase=cleanup-unavailable reason=capture ownership was not delivered");
-    co_return false;
-  }
+  if (worker->capture_root.empty()) co_return true;
   bool recovered = false;
   if (worker->recovery) {
     if (!co_await StopOperationWorker(worker->recovery)) co_return false;
@@ -319,6 +356,10 @@ cardio::promise<bool> RecoverOperationWorker(Worker worker) {
   const auto cleanup_exited = co_await StopOperationWorker(worker->recovery);
   if (cleanup_exited) worker->recovery.reset();
   worker->resources_recovered = recovered && cleanup_exited;
+  if (worker->resources_recovered) {
+    ReleaseRecoveryRoot(worker->recovery_slot);
+    worker->recovery_slot = kNoRecoverySlot;
+  }
   co_return worker->resources_recovered;
 }
 
@@ -385,7 +426,7 @@ int RunCleanupWorker() {
     }
     SendWorkerReplyText(WorkerMessageKind::LogError,
         error.native_operation + " Win32=" + std::to_string(error.os_code) +
-        " stage=" + error.stage + " path=" + error.path);
+        " stage=" + (error.stage.empty() ? "fileCleanup" : error.stage) + " path=" + error.path);
   } catch (...) {}
   return 1;
 }
@@ -458,17 +499,9 @@ int RunOperationWorker(bool probe, uint64_t max_transfer_bytes) {
       WSACleanup();
       return 0;
     }
-    std::string directory;
-    OperationError directory_error;
-    CaptureIdentity identity = {};
-    if (!CreateCaptureDirectory(&directory, &directory_error) || !GetCaptureIdentity(directory, &identity))
-      throw std::runtime_error("Could not establish connection capture ownership.");
-    std::vector<unsigned char> ownership(sizeof(identity));
-    std::memcpy(ownership.data(), &identity, sizeof(identity));
-    ownership.insert(ownership.end(), directory.begin(), directory.end());
-    SendWorkerReply(WorkerMessageKind::CaptureRoot, ownership);
-    SetCaptureRoot(directory);
+    bool owns_capture = false;
     InstallManagedLaunchBroker();
+    SendWorkerReply(WorkerMessageKind::Complete, {});
     SetAgentLogSink([](const AgentLogRecord& record) { SendWorkerReplyText(WorkerMessageKind::Log, record.event); });
     for (;;) {
       uint32_t header[2] = {};
@@ -482,9 +515,32 @@ int RunOperationWorker(bool probe, uint64_t max_transfer_bytes) {
         if (!DecodeBinaryTransferChunkPayload(payload, &chunk, &error) ||
             !AcceptBinaryTransferChunk(&transfers, chunk, &error)) throw std::runtime_error(error);
       } else if (header[0] == static_cast<uint32_t>(WorkerMessageKind::Json)) {
+        const std::string request(payload.begin(), payload.end());
+        std::string id, method;
+        if (!ReadAgentRequest(request, &id, &method)) throw std::runtime_error("Invalid worker request.");
+        if (!owns_capture && (method == "process.createCaptureDirectory" ||
+            method == "agent.recordVideo" || method == "window.recordVideo")) {
+          SendWorkerReply(WorkerMessageKind::ReserveCapture, {});
+          WorkerMessage acknowledged;
+          if (!ReadWorkerCommand(&acknowledged) || acknowledged.kind != WorkerMessageKind::Complete)
+            throw std::runtime_error("Capture reservation was not acknowledged.");
+          std::string directory;
+          OperationError error;
+          CaptureIdentity identity = {};
+          if (!CreateCaptureDirectory(&directory, &error) || !GetCaptureIdentity(directory, &identity))
+            throw std::runtime_error("Could not establish connection capture ownership.");
+          std::vector<unsigned char> ownership(sizeof(identity));
+          std::memcpy(ownership.data(), &identity, sizeof(identity));
+          ownership.insert(ownership.end(), directory.begin(), directory.end());
+          SendWorkerReply(WorkerMessageKind::CaptureRoot, ownership);
+          if (!ReadWorkerCommand(&acknowledged) || acknowledged.kind != WorkerMessageKind::Complete)
+            throw std::runtime_error("Capture owner disconnected before acknowledgement.");
+          SetCaptureRoot(directory);
+          owns_capture = true;
+        }
         std::vector<BinaryTransferChunk> chunks;
         OutboundFileTransfer file = {};
-        const auto response = HandleJsonRequest({payload.begin(), payload.end()}, &transfers, &recordings, &chunks, &file);
+        const auto response = HandleJsonRequest(request, &transfers, &recordings, &chunks, &file);
         PrintAgentLogEvent(CreateAgentResultLog(response));
         try {
           for (const auto& chunk : chunks) SendWorkerChunk(chunk);

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 // Debugger-style fault injection, never used for product synchronization.
 static int LoggerThreads(DWORD parent, const std::wstring& mode) {
@@ -76,6 +77,31 @@ static LRESULT CALLBACK BlockedWindow(HWND window, UINT message, WPARAM wparam, 
 int wmain(int argc, wchar_t** argv) {
   if (argc != 3) return 2;
   const std::wstring mode = argv[1], name = argv[2];
+  if (mode == L"hold-files") {
+    const auto count = std::stoul(name);
+    if (count > 64) return 59;
+    const auto event_name = L"Local\\AgentRoverFileHold-" + std::to_wstring(GetCurrentProcessId());
+    const auto event = CreateEventW(nullptr, TRUE, FALSE, event_name.c_str());
+    if (!event) return 60;
+    std::printf("holder=%lu\n", GetCurrentProcessId()); std::fflush(stdout);
+    std::vector<HANDLE> files;
+    char line[32768];
+    while (files.size() < count && std::fgets(line, sizeof(line), stdin)) {
+      std::string path(line);
+      while (!path.empty() && (path.back() == '\n' || path.back() == '\r')) path.pop_back();
+      wchar_t wide[32768] = {};
+      if (!MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, wide, 32768)) return 61;
+      const auto file = CreateFileW(wide, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+          nullptr, OPEN_EXISTING, 0, nullptr);
+      if (file == INVALID_HANDLE_VALUE) return 62;
+      files.push_back(file);
+      std::printf("held=%zu\n", files.size()); std::fflush(stdout);
+    }
+    const auto waited = WaitForSingleObject(event, 300000);
+    for (const auto file : files) CloseHandle(file);
+    CloseHandle(event);
+    return waited == WAIT_OBJECT_0 ? 0 : 63;
+  }
   if (mode == L"wait-exit" || mode == L"running" || mode == L"kill-process") {
     const auto process = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, FALSE, std::stoul(name));
     if (!process) return mode == L"wait-exit" && GetLastError() == ERROR_INVALID_PARAMETER ? 0 : 50;
@@ -169,6 +195,31 @@ int wmain(int argc, wchar_t** argv) {
   }
   const auto window = FindWindowW(L"AgentRoverLogViewer", (L"agent-rover logs (" + name + L")").c_str());
   if (!window) return 7;
+  if (mode == L"parent") {
+    DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
+    const auto snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    PROCESSENTRY32W process = {}; process.dwSize = sizeof(process);
+    DWORD parent = 0;
+    if (Process32FirstW(snapshot, &process)) do {
+      if (process.th32ProcessID == pid) { parent = process.th32ParentProcessID; break; }
+    } while (Process32NextW(snapshot, &process));
+    CloseHandle(snapshot);
+    std::printf("%lu\n", parent);
+    return parent ? 0 : 64;
+  }
+  if (mode == L"suspend-server") {
+    DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
+    const auto snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    THREADENTRY32 entry = {}; entry.dwSize = sizeof(entry);
+    unsigned int count = 0;
+    if (Thread32First(snapshot, &entry)) do {
+      if (entry.th32OwnerProcessID != pid) continue;
+      const auto thread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, entry.th32ThreadID);
+      if (!thread || SuspendThread(thread) == static_cast<DWORD>(-1)) return 56;
+      CloseHandle(thread); ++count;
+    } while (Thread32Next(snapshot, &entry));
+    CloseHandle(snapshot); return count ? 0 : 57;
+  }
   if (mode == L"children") {
     DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
     const auto snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -206,11 +257,13 @@ int wmain(int argc, wchar_t** argv) {
   }
   if (mode == L"exit") {
     DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
-    const auto process = OpenProcess(SYNCHRONIZE, FALSE, pid);
+    const auto process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE, pid);
     PostMessageW(window, WM_COMMAND, 3, 0);
     const auto result = WaitForSingleObject(process, 15000);
+    DWORD code = 1;
+    const auto queried = GetExitCodeProcess(process, &code);
     CloseHandle(process);
-    return result == WAIT_OBJECT_0 ? 0 : 8;
+    return result == WAIT_OBJECT_0 && queried && code == 0 ? 0 : 8;
   }
   if (mode == L"inspect") {
     DWORD_PTR ignored = 0;
