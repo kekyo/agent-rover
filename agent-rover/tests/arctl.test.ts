@@ -61,6 +61,35 @@ const runArctl = async (args: readonly string[], env: NodeJS.ProcessEnv) =>
   );
 
 describe('arctl', () => {
+  it.each([false, true])(
+    'redacts a token echoed in a remote result (json=%s)',
+    async (json) => {
+      const token = 'private-result-token';
+      const fake = await startFakeTcpAgent({
+        authToken: token,
+        windows: [{ ...defaultFakeWindow, title: `token=${token}` }],
+      });
+      try {
+        const result = await runArctl(
+          ['windows', ...(json ? ['--json'] : [])],
+          {
+            AGENT_ROVER_HOST: fake.host,
+            AGENT_ROVER_PORT: String(fake.port),
+            AGENT_ROVER_AUTH_TOKEN: token,
+          }
+        );
+        expect(result.code).toBe(0);
+        expect(result.stdout).not.toContain(token);
+        expect(result.stdout).toContain('[redacted]');
+        if (json)
+          expect(JSON.parse(result.stdout).result[0].title).toBe(
+            'token=[redacted]'
+          );
+      } finally {
+        await fake.close();
+      }
+    }
+  );
   it.each([undefined, defaultFakeWindow.id])(
     'saves a PNG from the selected capture target (%s)',
     async (windowId) => {

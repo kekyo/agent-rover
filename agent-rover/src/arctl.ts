@@ -52,6 +52,13 @@ const main = async (): Promise<number> => {
       process.stdout.write(parsed.text);
       return 0;
     }
+    const writeResult = (result: unknown, text: string): void => {
+      process.stdout.write(
+        parsed.json
+          ? `${JSON.stringify({ command: parsed.command, result }, (_key, value: unknown) => (typeof value === 'string' ? redact(value) : value))}\n`
+          : redact(text)
+      );
+    };
     executing = true;
     agent = await connectRemoteAgent(parsed.connection);
     if (interrupted) return 130;
@@ -65,10 +72,9 @@ const main = async (): Promise<number> => {
         interruption.signal
       );
       if (interrupted) return 130;
-      process.stdout.write(
-        parsed.json
-          ? `${JSON.stringify({ command: parsed.command, result })}\n`
-          : `Saved MP4: ${result.path}\n${result.durationMs} ms, ${result.fps} fps, ${result.frameCount} frames\n`
+      writeResult(
+        result,
+        `Saved MP4: ${result.path}\n${result.durationMs} ms, ${result.fps} fps, ${result.frameCount} frames\n`
       );
       return 0;
     }
@@ -80,11 +86,7 @@ const main = async (): Promise<number> => {
         interruption.signal
       );
       if (interrupted) return 130;
-      process.stdout.write(
-        parsed.json
-          ? `${JSON.stringify({ command: parsed.command, result })}\n`
-          : `Saved PNG: ${result.path}\n`
-      );
+      writeResult(result, `Saved PNG: ${result.path}\n`);
       return 0;
     }
     if (parsed.command === 'put' || parsed.command === 'get') {
@@ -97,35 +99,29 @@ const main = async (): Promise<number> => {
         interruption.signal
       );
       if (interrupted) return 130;
-      process.stdout.write(
-        parsed.json
-          ? `${JSON.stringify({ command: parsed.command, result })}\n`
-          : `${result.source} -> ${result.destination}\n${result.files} files, ${result.directories} directories, ${result.bytes} bytes\n`
+      writeResult(
+        result,
+        `${result.source} -> ${result.destination}\n${result.files} files, ${result.directories} directories, ${result.bytes} bytes\n`
       );
       return 0;
     }
     if (parsed.command === 'launch') {
       const result = await launchArctlApplication(agent, parsed.options);
       if (interrupted) return 130;
-      process.stdout.write(
-        parsed.json
-          ? `${JSON.stringify({ command: parsed.command, result })}\n`
-          : `Started ${result.pid}\t${result.name}\n`
-      );
+      writeResult(result, `Started ${result.pid}\t${result.name}\n`);
       return 0;
     }
     const result = await listArctlWindows(agent);
     if (interrupted) return 130;
-    process.stdout.write(
-      parsed.json
-        ? `${JSON.stringify({ command: parsed.command, result })}\n`
-        : [
-            'ID\tPID\tPROCESS\tTITLE',
-            ...result.map(
-              (window) =>
-                `${window.id}\t${window.pid}\t${window.processName}\t${window.title.replace(/[\r\n\t]/gu, ' ')}`
-            ),
-          ].join('\n') + '\n'
+    writeResult(
+      result,
+      [
+        'ID\tPID\tPROCESS\tTITLE',
+        ...result.map(
+          (window) =>
+            `${window.id}\t${window.pid}\t${window.processName}\t${window.title.replace(/[\r\n\t]/gu, ' ')}`
+        ),
+      ].join('\n') + '\n'
     );
     return 0;
   } catch (error) {
