@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 
+#include "transfer_limits.h"
+
 namespace agent_rover {
 
 /** Raw binary chunk carried by a TCP kind=2 frame. */
@@ -67,6 +69,8 @@ struct BinaryTransfer {
 
 /** In-memory store for incoming binary transfer chunks. */
 struct BinaryTransferStore {
+  /** Maximum combined bytes retained in pending and completed transfers. */
+  uint64_t max_transfer_bytes = kDefaultMaxTransferBytes;
   /** Partially received transfer chunks by transfer id. */
   std::map<std::string, BinaryTransfer> pending;
   /** Next expected sequence by transfer id. */
@@ -143,7 +147,7 @@ bool ConsumeBinaryTransfer(
     BinaryTransferStore* store,
     const std::string& transfer_id,
     const std::string& expected_content_type,
-    uint32_t expected_total_bytes,
+    uint64_t expected_total_bytes,
     const std::string& expected_sha256,
     std::vector<unsigned char>* data,
     std::string* error);

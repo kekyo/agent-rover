@@ -80,6 +80,11 @@ int main() {
 
   std::vector<unsigned char> completed;
   std::string error;
+  if (agent_rover::ConsumeBinaryTransfer(&store, "transfer-1", "application/octet-stream",
+      (1ull << 32) + data.size(), chunks.back().sha256, &completed, &error)) {
+    std::fputs("Transfer size metadata was truncated to 32 bits.\n", stderr);
+    return 1;
+  }
   if (!agent_rover::ConsumeBinaryTransfer(
           &store,
           "transfer-1",
@@ -91,7 +96,64 @@ int main() {
     std::fprintf(stderr, "%s\n", error.c_str());
     return 1;
   }
-  return completed == data ? 0 : 1;
+  if (completed != data) return 1;
+  agent_rover::BinaryTransferStore bounded = {};
+  agent_rover::BinaryTransferChunk part = {};
+  part.content_type = "application/octet-stream";
+  part.data = {1};
+  for (unsigned int i = 0; i < 16; ++i) {
+    part.transfer_id = "pending-" + std::to_string(i);
+    if (!agent_rover::AcceptBinaryTransferChunk(&bounded, part, &error)) return 2;
+  }
+  part.transfer_id = "one-too-many";
+  if (agent_rover::AcceptBinaryTransferChunk(&bounded, part, &error) || bounded.pending.size() != 16) {
+    std::fputs("Pending transfers grew beyond the session limit.\n", stderr);
+    return 3;
+  }
+  bounded = {};
+  part.transfer_id = "byte-limit";
+  part.data.assign(4 * 1024 * 1024, 0);
+  for (unsigned int i = 0; i < 16; ++i) {
+    part.sequence = i;
+    if (!agent_rover::AcceptBinaryTransferChunk(&bounded, part, &error)) return 4;
+  }
+  part.sequence = 16;
+  if (agent_rover::AcceptBinaryTransferChunk(&bounded, part, &error) ||
+      bounded.pending.begin()->second.data.size() != 64 * 1024 * 1024) {
+    std::fputs("Binary bytes grew beyond the session limit.\n", stderr);
+    return 5;
+  }
+  bounded.max_transfer_bytes = 65ull * 1024 * 1024;
+  part.data.assign(1024 * 1024, 0);
+  if (!agent_rover::AcceptBinaryTransferChunk(&bounded, part, &error)) return 6;
+  part.sequence += 1;
+  part.data = {0};
+  if (agent_rover::AcceptBinaryTransferChunk(&bounded, part, &error)) return 7;
+
+  // Pending and completed payloads share the configured budget. Consuming a
+  // completed payload frees that budget for subsequent chunks.
+  bounded = {};
+  bounded.max_transfer_bytes = 4;
+  const std::vector<unsigned char> small = {1, 2, 3};
+  agent_rover::CreateBinaryTransferChunks("complete", "application/octet-stream", small, 3, &chunks);
+  if (!agent_rover::AcceptBinaryTransferChunk(&bounded, chunks.front(), &error)) return 8;
+  part = {};
+  part.transfer_id = "pending";
+  part.content_type = "application/octet-stream";
+  part.data = {4};
+  if (!agent_rover::AcceptBinaryTransferChunk(&bounded, part, &error)) return 9;
+  part.sequence = 1;
+  if (agent_rover::AcceptBinaryTransferChunk(&bounded, part, &error) ||
+      bounded.pending.at("pending").data.size() != 1) return 10;
+  if (!agent_rover::ConsumeBinaryTransfer(&bounded, "complete", "application/octet-stream",
+      small.size(), chunks.front().sha256, &completed, &error) || completed != small) return 11;
+  part.data = {5, 6, 7};
+  if (!agent_rover::AcceptBinaryTransferChunk(&bounded, part, &error)) return 12;
+  part.sequence = 2;
+  part.data = {8};
+  if (agent_rover::AcceptBinaryTransferChunk(&bounded, part, &error) ||
+      bounded.pending.at("pending").data.size() != 4) return 13;
+  return 0;
 }
 `,
       'utf8'

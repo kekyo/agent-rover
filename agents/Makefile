@@ -21,13 +21,13 @@ VERSION_TEMPLATE ?= version.h.in
 VERSION_HEADER ?= $(GENERATED_DIR)/version.h
 SCREW_UP ?= ../node_modules/.bin/screw-up
 
-CXXFLAGS ?= -std=c++20 -Os -s -fno-exceptions -fno-rtti
+CXXFLAGS ?= -std=c++20 -Os -s -fno-rtti
 CPPFLAGS ?= -DPSAPI_VERSION=1
-CPPFLAGS += -I$(GENERATED_DIR)
-CPPFLAGS_AMD64 ?= -D_WIN32_WINNT=0x0502
-CPPFLAGS_I686 ?= -D_WIN32_WINNT=0x0501
-LDFLAGS ?= -static -static-libgcc -static-libstdc++ -s -municode
-LDLIBS ?= -luser32 -lgdi32 -lpsapi -ladvapi32 -lws2_32 -lole32 -lmfuuid
+CPPFLAGS += -I$(GENERATED_DIR) -Ideps/cardio/include
+CPPFLAGS_AMD64 ?= -D_WIN32_WINNT=0x0502 -DWINVER=0x0502
+CPPFLAGS_I686 ?= -D_WIN32_WINNT=0x0501 -DWINVER=0x0501
+LDFLAGS ?= -static -static-libgcc -static-libstdc++ -s -municode -mwindows
+LDLIBS ?= -luser32 -lgdi32 -lpsapi -ladvapi32 -lws2_32 -lole32 -lmfuuid -lshell32 -lcomctl32
 
 .PHONY: all amd64 i686 clean print-output remove-legacy-output version-header
 

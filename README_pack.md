@@ -105,37 +105,37 @@ Download the agent for the target platform from the [releases page](https://gith
 The agent is very small and avoids runtime dependencies on other libraries as much as possible.
 After extracting the archive, you can run it as-is. No installation is required.
 
-For example, you can start the Windows agent as follows.
-When it starts, it prints the listening address and access token.
-As clients connect and drive applications, it also prints low-frequency
-lifecycle events:
+Start the Windows agent from your interactive desktop. It runs in the system tray.
 
 ```cmd
-C:\> agent-rover-agent.exe
-
-agent-rover native windows agent
-Copyright (c) Kouji Matsui (@kekyo@mi.kekyo.net)
-https://github.com/kekyo/agent-rover
-Licence: Under MIT.
-
-agent-rover native agent listening on 0.0.0.0:39397
-agent-rover agent token: <access-token>
-agent-rover agent event: 2026-07-07T12:34:56Z connection #1 accepted from 192.0.2.10:50123
-agent-rover agent event: 2026-07-07T12:34:57Z connection #1 authenticated
-agent-rover agent event: 2026-07-07T12:34:57Z connection #1 ready
-agent-rover agent event: 2026-07-07T12:35:10Z application launched pid=4321 name=notepad.exe path=notepad.exe
-agent-rover agent event: 2026-07-07T12:35:20Z managed process released managedId=1
-agent-rover agent event: 2026-07-07T12:35:21Z connection #1 disconnected: peer requested close
+C:\> agent-amd64.exe
 ```
 
-- When the agent starts, it prints an access token. Make a note of it.
-- The lifecycle log reports connection, authentication, application launch,
-  managed process kill/release, process kill, and disconnect events. It does not
-  print request payloads, access tokens, environment variables, or clipboard
-  contents.
-- The default TCP port is 39397. You need to open it in the OS firewall.
-- The Windows agent must be started from the user's interactive desktop so it can operate the desktop environment.
-  This is a subtle issue, but launching a process from a Windows service restricts the desktop environment, so running the Windows agent as a service is not recommended.
+Double-click the tray icon or choose “Show logs” to open the viewer.
+The version banner and copyable token field appear above the log list.
+Copy the token into the driver's `authToken` option.
+Closing the viewer keeps the agent running; choose “Exit” from the tray to stop it.
+The Windows agent has no console output, so Quick Edit needs no configuration.
+
+The resizable list shows the latest 1,000 records. Older records are saved as
+UTF-8 files in `%APPDATA%\agent-rover\logs`. Choose “Open log folder” from the
+tray to browse them. Normally, five files of up to 10 MiB each are retained.
+Active files belonging to other instances are preserved, so concurrent instances
+can exceed five files in total. The status area reports save failures and records
+that were dropped or whose persistence could not be confirmed.
+
+Logs include connection, authentication and process events, request IDs and
+methods, execution results, response transmission and elapsed time. Sequence
+numbers match between the viewer and files. Authentication tokens, request
+bodies, environment variables and clipboard contents are not copied to logs.
+
+- The default TCP port is 39397. Open it in the OS firewall.
+- Start the Windows agent from the user's interactive desktop. Running it as a Windows service is not supported.
+- Driver requests have a default deadline of 30 seconds. An expired request closes the entire connection and cancels its queued operations. Reconnect to continue. Side effects already submitted to the target application cannot be undone.
+- Windows operation budgets are 30 seconds for windows, input and clipboard, and normally 120 seconds for other operations. Recording is limited to ten minutes; result retrieval allows the recording duration plus 120 seconds.
+- Windows accepts up to 16 connections and reserves operation workers for up to eight connections. Unrecoverable operations retain their slots and are recorded in the log.
+- Whole-file reads and the combined incoming transfer data retained per connection are limited to 64 MiB by default. Set `--max-transfer-size 128` at agent startup to change the limit to a positive integer number of MiB. The same limit applies when retrieving captured stdout or stderr.
+- Each Windows connection can own up to 64 managed processes. Split larger workloads.
 - H.264 MP4 recording is available when the Windows agent advertises
   `agent.recordVideo` and `window.recordVideo`. It requires the Windows
   [Media Foundation Sink Writer](https://learn.microsoft.com/en-us/windows/win32/api/mfreadwrite/nf-mfreadwrite-mfcreatesinkwriterfromurl)

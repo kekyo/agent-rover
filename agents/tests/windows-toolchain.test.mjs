@@ -82,8 +82,11 @@ it('builds standalone agents without known post-XP runtime imports', async () =>
       ['x86_64-w64-mingw32-objdump', '-p', `dist/agent-${architecture}.exe`],
       {
         cwd: agentsRoot,
+        maxBuffer: 16 * 1024 * 1024,
       }
     );
+    expect(stdout).toMatch(/Subsystem\s+00000002\s+\(Windows GUI\)/u);
+    expect(stdout).toMatch(/MajorSubsystemVersion\s+[45]/u);
     const libraries = [...stdout.matchAll(/DLL Name: (\S+)/gu)].map((match) =>
       match[1].toLowerCase()
     );
@@ -100,6 +103,8 @@ it('builds standalone agents without known post-XP runtime imports', async () =>
             'psapi.dll',
             'user32.dll',
             'ws2_32.dll',
+            'shell32.dll',
+            'comctl32.dll',
           ].includes(name)
       )
     ).toEqual([]);
@@ -110,7 +115,7 @@ it('builds standalone agents without known post-XP runtime imports', async () =>
     expect(imports).toContain('GetCurrentThreadId');
     expect(
       imports.filter((name) =>
-        /^(GetThreadId|GetTickCount64|InitializeCriticalSectionEx|InitializeConditionVariable|SleepConditionVariableCS|SleepConditionVariableSRW|WakeConditionVariable|WakeAllConditionVariable|InitializeSRWLock|AcquireSRWLockExclusive|ReleaseSRWLockExclusive|InitOnceExecuteOnce|GetDpiForWindow|GetDpiForMonitor|SetThreadDpiAwarenessContext)$/.test(
+        /^(CancelIoEx|CancelSynchronousIo|GetQueuedCompletionStatusEx|GetOverlappedResultEx|GetThreadId|GetTickCount64|InitializeCriticalSectionEx|InitializeConditionVariable|SleepConditionVariableCS|SleepConditionVariableSRW|WakeConditionVariable|WakeAllConditionVariable|InitializeSRWLock|AcquireSRWLockExclusive|ReleaseSRWLockExclusive|InitOnceExecuteOnce|GetDpiForWindow|GetDpiForMonitor|SetThreadDpiAwarenessContext)$/.test(
           name
         )
       )

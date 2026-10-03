@@ -57,6 +57,34 @@ static bool ExpectEqual(const std::wstring& actual, const std::wstring& expected
 }
 
 int main() {
+  for (const auto value : {L"1", L"64", L"128", L"4096", L"17592186044415"}) {
+    const wchar_t* arguments[] = {L"agent.exe", L"--max-transfer-size", value};
+    const auto result = agent_rover::ParseAgentCommandLine(3, arguments);
+    if (!result.ok) {
+      std::wcerr << L"valid transfer limit rejected: " << value << L": " << result.error << L"\n";
+      return 1;
+    }
+    if (result.options.max_transfer_bytes != std::stoull(value) * 1024 * 1024) {
+      std::wcerr << L"transfer limit was not converted from MiB: " << value << L"\n";
+      return 1;
+    }
+  }
+  for (const auto value : {L"", L"0", L"-1", L"+1", L"1.5", L"64MiB", L" 64", L"64 ",
+                           L"17592186044416", L"18446744073709551616", L"999999999999999999999999"}) {
+    const wchar_t* arguments[] = {L"agent.exe", L"--max-transfer-size", value};
+    const auto result = agent_rover::ParseAgentCommandLine(3, arguments);
+    if (result.ok || result.error.find(L"--max-transfer-size") == std::wstring::npos) {
+      std::wcerr << L"invalid transfer limit accepted or not diagnosed: " << value << L"\n";
+      return 1;
+    }
+  }
+  const wchar_t* missing_limit[] = {L"agent.exe", L"--max-transfer-size"};
+  const wchar_t* missing_before_flag[] = {L"agent.exe", L"--max-transfer-size", L"--no-auth"};
+  if (agent_rover::ParseAgentCommandLine(2, missing_limit).ok ||
+      agent_rover::ParseAgentCommandLine(3, missing_before_flag).ok) return 1;
+  const wchar_t* defaults[] = {L"agent.exe"};
+  if (agent_rover::ParseAgentCommandLine(1, defaults).options.max_transfer_bytes != 64ull * 1024 * 1024) return 1;
+
   const wchar_t* start_with_token[] = {
       L"agent-rover-agent.exe",
       L"--host",

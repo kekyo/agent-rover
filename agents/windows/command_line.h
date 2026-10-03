@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+#include "transfer_limits.h"
+
 namespace agent_rover {
 
 /** Parsed native Windows agent startup options. */
@@ -22,6 +24,8 @@ struct AgentCommandLineOptions {
   bool auth_required;
   /** Explicit auth token, or empty when the agent should generate one. */
   std::string auth_token;
+  /** Maximum whole-file read and retained incoming transfer size in bytes. */
+  uint64_t max_transfer_bytes = kDefaultMaxTransferBytes;
 };
 
 /** Result returned when parsing native Windows agent startup arguments. */

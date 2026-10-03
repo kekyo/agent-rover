@@ -3,412 +3,503 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+#include "async_io.h"
 #include "tcp_server.h"
-
-#include <winsock2.h>
-#include <windows.h>
-
-#include <algorithm>
-#include <cstring>
-#include <string>
-#include <vector>
-
+#include "agent_gui.h"
 #include "agent_log.h"
 #include "auth.h"
-#include "binary_transfer.h"
 #include "frame.h"
+#include "file_logger.h"
 #include "json_protocol.h"
-#include "video_recording.h"
+#include "operation_worker.h"
+#include "operation_limits.h"
+#include "version_banner.h"
 #include "win32_util.h"
+#include <algorithm>
+#include <chrono>
+#include <cstring>
+#include <deque>
+#include <list>
+#include <stdexcept>
 
 namespace agent_rover {
 
-static std::vector<unsigned char> StringToPayload(const std::string& value) {
-  return std::vector<unsigned char>(value.begin(), value.end());
+static constexpr size_t kMaxConnections = 16, kMaxWorkers = 8, kMaxRequests = 64;
+static constexpr size_t kConnectionQueueBytes = 32 * 1024 * 1024;
+static constexpr size_t kServerQueueBytes = 64 * 1024 * 1024;
+static constexpr uint32_t kAuthenticationMs = 10000, kFrameMs = 30000;
+using MonotonicClock = std::chrono::steady_clock;
+
+struct QueuedRequest {
+  Frame frame;
+  std::string id, method;
+  MonotonicClock::time_point received;
+  uint32_t budget_ms = 120000;
+};
+
+struct QueuedResponse {
+  Frame frame;
+  std::string context;
+  MonotonicClock::time_point received;
+};
+
+static std::string RequestContext(uint32_t connection, const QueuedRequest& request) {
+  return "connection #" + std::to_string(connection) + " request=" +
+      SanitizeAgentLogField(request.id) + " method=" + SanitizeAgentLogField(request.method);
 }
 
-static bool ResolveHost(const std::string& host, in_addr* address) {
-  if (host.empty() || host == "0.0.0.0") {
-    address->s_addr = htonl(INADDR_ANY);
-    return true;
-  }
-
-  const unsigned long parsed = inet_addr(host.c_str());
-  if (parsed != INADDR_NONE || host == "255.255.255.255") {
-    address->s_addr = parsed;
-    return true;
-  }
-
-  hostent* entry = gethostbyname(host.c_str());
-  if (entry == nullptr || entry->h_addr_list == nullptr ||
-      entry->h_addr_list[0] == nullptr) {
-    return false;
-  }
-  std::memcpy(address, entry->h_addr_list[0], sizeof(in_addr));
-  return true;
+static std::string Elapsed(MonotonicClock::time_point received) {
+  return " elapsedMs=" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+      MonotonicClock::now() - received).count());
 }
 
-static bool SendJson(SOCKET client, const std::string& json) {
-  std::string error;
-  const Frame frame = {FrameKind::Json, StringToPayload(json)};
-  return WriteFrame(client, frame, &error);
+struct ServerState;
+struct ClientSession {
+  std::shared_ptr<ServerState> server;
+  SocketConnection socket;
+  uint32_t id;
+  uint32_t video_duration_ms = 0;
+  bool closed = false;
+  cardio::cancellation_source stop;
+  std::deque<QueuedRequest> requests;
+  std::deque<QueuedResponse> output;
+  size_t request_bytes = 0, output_bytes = 0;
+  AsyncSignal request_ready, request_space, output_ready, output_space;
+  Worker worker;
+  cardio::promise<void> lifetime;
+};
+
+struct ServerState {
+  ServerOptions options;
+  SocketConnection listener;
+  AgentGuiHandle gui;
+  FileLoggerHandle logger;
+  std::string listen_status = "Starting...", log_status;
+  cardio::cancellation_source stop;
+  std::list<std::shared_ptr<ClientSession>> sessions;
+  // Failed reaping occupies a slot permanently instead of spawning unbounded replacements.
+  std::vector<Worker> quarantine;
+  AsyncSignal sessions_changed;
+  AsyncSignal sessions_drained;
+  size_t workers = 0, request_bytes = 0, output_bytes = 0, reading_bytes = 0;
+  bool desktop_busy = false;
+  std::deque<std::shared_ptr<cardio::promise_source<void>>> desktop_waiters;
+};
+
+static Frame JsonFrame(const std::string& text) { return {FrameKind::Json, {text.begin(), text.end()}}; }
+
+static bool HasRequestSpace(const std::shared_ptr<ClientSession>& session, size_t size) {
+  return session->requests.size() < kMaxRequests &&
+      session->request_bytes + size <= kConnectionQueueBytes &&
+      session->server->request_bytes + size <= kServerQueueBytes;
 }
 
-static bool SendBinaryChunk(SOCKET client, const BinaryTransferChunk& chunk) {
-  std::vector<unsigned char> payload;
-  std::string error;
-  EncodeBinaryTransferChunkPayload(chunk, &payload);
-  const Frame frame = {FrameKind::Binary, payload};
-  return WriteFrame(client, frame, &error);
+static void ReleaseRequestBytes(const std::shared_ptr<ClientSession>& session, size_t size) {
+  session->request_bytes -= size;
+  session->server->request_bytes -= size;
+  // Releasing the shared budget can unblock any connection. Keep the snapshot
+  // alive because resolving a signal may run a continuation immediately.
+  const auto sessions = session->server->sessions;
+  for (const auto& waiting : sessions) waiting->request_space.Notify();
 }
 
-static void RemoveOutboundFile(const OutboundFileTransfer& transfer) {
-  const std::wstring path = Utf8ToWide(transfer.path);
-  if (!path.empty()) {
-    DeleteFileW(path.c_str());
-  }
-  const std::wstring directory = Utf8ToWide(transfer.directory);
-  if (!directory.empty()) {
-    RemoveDirectoryW(directory.c_str());
-  }
+static void SetListenStatus(const std::shared_ptr<ServerState>& server, const std::string& status) {
+  server->listen_status = status;
+  SetAgentGuiStatus(server->gui, status + " | " + server->log_status);
 }
 
-static bool SendBinaryFile(
-    SOCKET client,
-    const OutboundFileTransfer& transfer,
-    std::string* error) {
-  const std::wstring path = Utf8ToWide(transfer.path);
-  if (path.empty()) {
-    *error = "Recorded video path is empty or invalid UTF-8.";
-    return false;
-  }
-  HANDLE file = CreateFileW(
-      path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
-  if (file == INVALID_HANDLE_VALUE) {
-    *error = "Unable to open recorded video for transfer.";
-    return false;
-  }
+static void CloseSession(const std::shared_ptr<ClientSession>& session, const std::string& reason) {
+  if (session->closed) return;
+  session->closed = true;
+  session->stop.cancel();
+  CloseSocket(session->socket);
+  session->request_ready.Notify();
+  session->request_space.Notify();
+  session->output_ready.Notify();
+  session->output_space.Notify();
+  PrintAgentLogEvent(CreateAgentConnectionDisconnectedLogEvent(session->id, reason));
+}
 
-  uint64_t offset = 0;
-  uint32_t sequence = 0;
-  bool succeeded = true;
-  do {
-    const uint64_t remaining = transfer.total_bytes - offset;
-    const DWORD requested = static_cast<DWORD>(
-        std::min<uint64_t>(remaining, 64 * 1024));
-    BinaryTransferChunk chunk = {};
-    chunk.transfer_id = transfer.transfer_id;
-    chunk.sequence = sequence;
-    chunk.content_type = transfer.content_type;
-    chunk.data.assign(requested, 0);
-    DWORD read = 0;
-    if (requested != 0 &&
-        !ReadFile(file, chunk.data.data(), requested, &read, nullptr)) {
-      *error = "Reading recorded video for transfer failed.";
-      succeeded = false;
-      break;
+static void StopServer(const std::shared_ptr<ServerState>& server) {
+  if (server->stop.get_cancellation().is_cancellation_requested()) return;
+  server->stop.cancel();
+  CloseSocket(server->listener);
+  for (const auto& session : server->sessions) CloseSession(session, "agent shutdown");
+  server->sessions_changed.Notify();
+  SetListenStatus(server, "Stopping...");
+}
+
+static void EnqueueOutput(const std::shared_ptr<ClientSession>& session, Frame frame,
+    const std::string& context = "", MonotonicClock::time_point received = MonotonicClock::now()) {
+  if (session->closed) throw std::runtime_error("Connection closed.");
+  const auto size = frame.payload.size() + kFrameHeaderBytes;
+  if (session->output.size() >= kMaxRequests || session->output_bytes + size > kConnectionQueueBytes ||
+      session->server->output_bytes + size > kServerQueueBytes)
+    throw std::runtime_error("Outbound queue limit exceeded.");
+  session->output_bytes += size;
+  session->server->output_bytes += size;
+  session->output.push_back({std::move(frame), context, received});
+  session->output_ready.Notify();
+}
+
+static cardio::promise<void> SendResponses(std::shared_ptr<ClientSession> session) {
+  std::string context;
+  try {
+    while (!session->closed) {
+      if (session->output.empty()) {
+        co_await session->output_ready.Wait(session->stop.get_cancellation());
+        continue;
+      }
+      const auto& response = session->output.front();
+      context = response.context;
+      const auto encoded = EncodeFrame(response.frame);
+      if (!context.empty()) PrintAgentLogEvent(context + " phase=sending bytes=" + std::to_string(encoded.size()));
+      auto timeout = cardio::cancellations::timeout(kFrameMs);
+      auto cancelled = cardio::cancellations::any(timeout.get_cancellation(), session->stop.get_cancellation());
+      co_await WriteSocket(session->socket, encoded, cancelled.get_cancellation());
+      if (!context.empty()) PrintAgentLogEvent(context + " phase=sent" + Elapsed(response.received));
+      session->output_bytes -= encoded.size();
+      session->server->output_bytes -= encoded.size();
+      session->output.pop_front();
+      session->output_space.Notify();
+      context.clear();
     }
-    chunk.data.resize(read);
-    offset += read;
-    if (requested != 0 && read == 0) {
-      *error = "Recorded video ended before its announced size.";
-      succeeded = false;
-      break;
-    }
-    chunk.final = offset == transfer.total_bytes;
-    if (chunk.final) {
-      chunk.total_bytes = transfer.total_bytes;
-      chunk.has_total_bytes = true;
-      chunk.sha256 = transfer.sha256;
-      chunk.has_sha256 = true;
-    }
-    if (!SendBinaryChunk(client, chunk)) {
-      *error = "Failed to send recorded video chunk.";
-      succeeded = false;
-      break;
-    }
-    if (sequence == 0xffffffffu && !chunk.final) {
-      *error = "Recorded video requires too many transfer chunks.";
-      succeeded = false;
-      break;
-    }
-    sequence += 1;
-  } while (offset < transfer.total_bytes);
-
-  CloseHandle(file);
-  return succeeded;
-}
-
-static bool SendReadyEvent(SOCKET client) {
-  return SendJson(client, CreateReadyEventJson());
-}
-
-static bool SendPong(SOCKET client) {
-  std::string error;
-  const Frame frame = {FrameKind::Pong, std::vector<unsigned char>()};
-  return WriteFrame(client, frame, &error);
-}
-
-static bool SendAuthChallenge(
-    SOCKET client,
-    const std::vector<unsigned char>& challenge) {
-  std::string error;
-  const Frame frame = {FrameKind::AuthChallenge, challenge};
-  return WriteFrame(client, frame, &error);
-}
-
-static bool AuthenticateClient(
-    SOCKET client,
-    const ServerOptions& options,
-    std::string* failure_reason) {
-  if (!options.auth_required) {
-    return true;
+  } catch (const std::exception& error) {
+    if (!context.empty()) PrintAgentLogEvent(context + " phase=send-failed reason=" + SanitizeAgentLogField(error.what()));
+    CloseSession(session, std::string("send: ") + error.what());
   }
+}
 
-  std::vector<unsigned char> challenge;
-  std::string error;
-  if (!GenerateAuthChallenge(&challenge, &error)) {
-    *failure_reason = error;
-    return false;
-  }
-  if (!SendAuthChallenge(client, challenge)) {
-    *failure_reason = "failed to send authentication challenge";
-    return false;
-  }
-
+static cardio::promise<Frame> ReceiveFrame(std::shared_ptr<ClientSession> session,
+    cardio::cancellation cancellation, bool idle_allowed) {
+  unsigned char bytes[kFrameHeaderBytes] = {};
+  if (idle_allowed) co_await ReadSocket(session->socket, {bytes, 1}, cancellation);
+  auto timeout = cardio::cancellations::timeout(kFrameMs);
+  auto cancelled = cardio::cancellations::any(cancellation, timeout.get_cancellation());
+  co_await ReadSocket(session->socket, {bytes + (idle_allowed ? 1 : 0),
+      static_cast<size_t>(kFrameHeaderBytes - (idle_allowed ? 1 : 0))}, cancelled.get_cancellation());
   FrameHeader header = {};
-  if (!ReadFrameHeader(client, &header, &error)) {
-    *failure_reason = "failed to read authentication response: " + error;
-    return false;
-  }
-  if (header.kind != FrameKind::AuthResponse ||
-      header.payload_length != kAuthResponseBytes) {
-    *failure_reason = "invalid authentication response frame";
-    return false;
-  }
-
-  std::vector<unsigned char> payload;
-  if (!ReadFramePayload(client, header.payload_length, &payload, &error)) {
-    *failure_reason = "failed to read authentication response payload: " +
-                      error;
-    return false;
-  }
-
-  const std::vector<unsigned char> expected =
-      CreateAuthChallengeResponse(options.auth_token, challenge);
-  if (!AuthResponseEquals(payload, expected)) {
-    *failure_reason = "challenge response mismatch";
-    return false;
-  }
-  return true;
-}
-
-static void HandleFrame(
-    SOCKET client,
-    const Frame& frame,
-    BinaryTransferStore* transfers,
-    VideoRecordingStore* recordings,
-    bool* should_close,
-    std::string* close_reason) {
   std::string error;
-
-  switch (frame.kind) {
-    case FrameKind::Json: {
-      const std::string request(frame.payload.begin(), frame.payload.end());
-      std::vector<BinaryTransferChunk> outbound_chunks;
-      OutboundFileTransfer outbound_file = {};
-      const std::string response = HandleJsonRequest(
-          request, transfers, recordings, &outbound_chunks, &outbound_file);
-      for (const BinaryTransferChunk& chunk : outbound_chunks) {
-        if (!SendBinaryChunk(client, chunk)) {
-          *should_close = true;
-          *close_reason = "failed to send binary transfer chunk";
-          return;
-        }
-      }
-      if (!SendJson(client, response)) {
-        if (outbound_file.present) {
-          RemoveOutboundFile(outbound_file);
-        }
-        *should_close = true;
-        *close_reason = "failed to send JSON response";
-        return;
-      }
-      if (outbound_file.present) {
-        const bool sent = SendBinaryFile(client, outbound_file, &error);
-        RemoveOutboundFile(outbound_file);
-        if (!sent) {
-          *should_close = true;
-          *close_reason = error;
-          return;
-        }
-      }
-      break;
-    }
-    case FrameKind::Ping:
-      if (!SendPong(client)) {
-        *should_close = true;
-        *close_reason = "failed to send pong";
-        return;
-      }
-      break;
-    case FrameKind::Pong:
-      break;
-    case FrameKind::Close:
-      *should_close = true;
-      *close_reason = "peer requested close";
-      return;
-    case FrameKind::Binary: {
-      BinaryTransferChunk chunk = {};
-      if (!DecodeBinaryTransferChunkPayload(frame.payload, &chunk, &error)) {
-        *should_close = true;
-        *close_reason = "invalid binary transfer chunk";
-        return;
-      }
-      if (!AcceptBinaryTransferChunk(transfers, chunk, &error)) {
-        *should_close = true;
-        *close_reason = "binary transfer rejected: " + error;
-        return;
-      }
-      break;
-    }
-    case FrameKind::AuthChallenge:
-    case FrameKind::AuthResponse:
-      *should_close = true;
-      *close_reason = "unexpected authentication frame";
-      break;
+  if (!DecodeFrameHeader(bytes, &header, &error)) throw std::runtime_error(error);
+  if (header.payload_length > kMaxJsonPayloadBytes)
+    throw std::runtime_error("Incoming frame limit exceeded.");
+  const bool reserve_request = idle_allowed &&
+      (header.kind == FrameKind::Binary || header.kind == FrameKind::Json);
+  const size_t request_size = header.payload_length + kFrameHeaderBytes;
+  if (reserve_request) {
+    // Reserve queue space before allocating an operation payload, including the
+    // file.write request after its upload chunks. TCP backpressure lets large
+    // transfers make progress without exceeding either queue budget.
+    while (!HasRequestSpace(session, request_size))
+      co_await session->request_space.Wait(cancelled.get_cancellation());
+    session->request_bytes += request_size;
+    session->server->request_bytes += request_size;
   }
+  if (session->server->reading_bytes + header.payload_length > kServerQueueBytes) {
+    if (reserve_request) ReleaseRequestBytes(session, request_size);
+    throw std::runtime_error("Incoming frame limit exceeded.");
+  }
+  session->server->reading_bytes += header.payload_length;
+  Frame frame = {header.kind, {}};
+  try {
+    frame.payload.resize(header.payload_length);
+    co_await ReadSocket(session->socket, frame.payload, cancelled.get_cancellation());
+  } catch (...) {
+    session->server->reading_bytes -= header.payload_length;
+    if (reserve_request) ReleaseRequestBytes(session, request_size);
+    throw;
+  }
+  session->server->reading_bytes -= header.payload_length;
+  co_return frame;
 }
 
-static void HandleClient(
-    SOCKET client,
-    const ServerOptions& options,
-    uint32_t connection_id) {
-  std::string auth_failure;
-  if (!AuthenticateClient(client, options, &auth_failure)) {
-    PrintAgentLogEvent(CreateAgentConnectionDisconnectedLogEvent(
-        connection_id, "authentication failed: " + auth_failure));
-    return;
-  }
-  PrintAgentLogEvent(CreateAgentConnectionStateLogEvent(
-      connection_id,
-      options.auth_required ? "authenticated" : "authentication skipped"));
+static bool UsesDesktop(const std::string& method) {
+  return method.starts_with("window.") || method.starts_with("clipboard.") ||
+      method.starts_with("input.") || method == "applications.launch" || method == "process.launchManaged";
+}
 
-  if (!SendReadyEvent(client)) {
-    PrintAgentLogEvent(CreateAgentConnectionDisconnectedLogEvent(
-        connection_id, "failed to send ready event"));
-    return;
+static void ReleaseDesktop(const std::shared_ptr<ServerState>& server) {
+  while (!server->desktop_waiters.empty()) {
+    auto next = server->desktop_waiters.front();
+    server->desktop_waiters.pop_front();
+    if (next->try_resolve()) return;
   }
-  PrintAgentLogEvent(
-      CreateAgentConnectionStateLogEvent(connection_id, "ready"));
-  BinaryTransferStore transfers = {};
-  VideoRecordingStore recordings = {};
+  server->desktop_busy = false;
+}
 
+static cardio::promise<void> AcquireDesktop(std::shared_ptr<ServerState> server,
+    cardio::cancellation cancellation) {
+  cancellation.throw_if_cancellation_requested();
+  if (!server->desktop_busy) { server->desktop_busy = true; co_return; }
+  auto source = std::make_shared<cardio::promise_source<void>>();
+  server->desktop_waiters.push_back(source);
+  auto registration = cancellation.on_cancellation_requested([source] { source->try_cancel(); });
+  try { co_await source->get_promise(); }
+  catch (...) { std::erase(server->desktop_waiters, source); throw; }
+  // A grant racing a cancellation still owns the permit; the caller releases it.
+}
+
+static cardio::promise<void> ExecuteRequests(std::shared_ptr<ClientSession> session) {
+  try {
+    while (!session->closed) {
+      if (session->requests.empty()) {
+        co_await session->request_ready.Wait(session->stop.get_cancellation());
+        continue;
+      }
+      auto request = std::move(session->requests.front());
+      const auto context = RequestContext(session->id, request);
+      session->requests.pop_front();
+      const auto size = request.frame.payload.size() + kFrameHeaderBytes;
+      const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(MonotonicClock::now() - request.received).count();
+      const auto remaining = RemainingOperationMs(request.budget_ms, elapsed);
+      if (!remaining) {
+        PrintAgentLogEvent(context + " phase=expired-before-execution" + Elapsed(request.received));
+        if (!request.id.empty()) EnqueueOutput(session, JsonFrame(CreateAgentFailure(request.id, "TIMEOUT", "Operation expired before execution.")));
+        ReleaseRequestBytes(session, size);
+        if (request.frame.kind == FrameKind::Binary) { CloseSession(session, "Binary operation expired."); break; }
+        continue;
+      }
+      auto timeout = cardio::cancellations::timeout(remaining);
+      auto cancel = cardio::cancellations::any(timeout.get_cancellation(), session->stop.get_cancellation());
+      bool desktop = false;
+      std::string failure;
+      try {
+        if (!session->worker) {
+          if (session->server->workers >= kMaxWorkers) throw std::runtime_error("Operation worker limit reached.");
+          session->worker = StartOperationWorker(HelperRole::Operations, session->server->options.max_transfer_bytes);
+          ++session->server->workers;
+        }
+        if (UsesDesktop(request.method)) {
+          co_await AcquireDesktop(session->server, cancel.get_cancellation());
+          desktop = true;
+        }
+        cancel.get_cancellation().throw_if_cancellation_requested();
+        if (!request.id.empty()) PrintAgentLogEvent(context + " phase=execute" + Elapsed(request.received));
+        WorkerMessage command = {request.frame.kind == FrameKind::Json ? WorkerMessageKind::Json : WorkerMessageKind::Binary,
+            std::move(request.frame.payload)};
+        co_await WriteWorker(session->worker, std::move(command), cancel.get_cancellation());
+        for (;;) {
+          auto response = co_await ReadWorker(session->worker, cancel.get_cancellation());
+          if (response.kind == WorkerMessageKind::CaptureRoot) continue;
+          if (response.kind == WorkerMessageKind::Complete) break;
+          if (response.kind == WorkerMessageKind::Log) {
+            PrintAgentLogEvent(context + " " + std::string(response.payload.begin(), response.payload.end()) + Elapsed(request.received));
+            continue;
+          }
+          if (response.kind != WorkerMessageKind::Json && response.kind != WorkerMessageKind::Binary)
+            throw std::runtime_error("Unexpected operation worker response.");
+          while (session->output_bytes + response.payload.size() + kFrameHeaderBytes > kConnectionQueueBytes ||
+              session->output.size() >= kMaxRequests)
+            co_await session->output_space.Wait(cancel.get_cancellation());
+          const auto response_context = response.kind == WorkerMessageKind::Json ? context : "";
+          EnqueueOutput(session, {response.kind == WorkerMessageKind::Json ? FrameKind::Json : FrameKind::Binary,
+              std::move(response.payload)}, response_context, request.received);
+        }
+        if (!request.id.empty()) PrintAgentLogEvent(context + " phase=execution-end" + Elapsed(request.received));
+      } catch (const std::exception& error) { failure = error.what(); }
+      ReleaseRequestBytes(session, size);
+      if (!failure.empty()) {
+        PrintAgentLogEvent(context + " phase=interrupted reason=" + SanitizeAgentLogField(failure) + Elapsed(request.received));
+        if (desktop) {
+          // Cancellation of IPC is not cancellation of the remote Win32 call.
+          // Keep desktop ownership until the old worker really has stopped.
+          const auto reaped = co_await StopOperationWorker(session->worker);
+          if (reaped) { --session->server->workers; ReleaseDesktop(session->server); }
+          else {
+            session->server->quarantine.push_back(session->worker);
+            PrintAgentLogEvent("desktop worker cleanup failed; desktop execution remains unavailable");
+          }
+          session->worker.reset();
+        }
+        // Partial transfers and worker-owned state cannot safely continue in this session.
+        CloseSession(session, "operation failed or cancelled: " + failure);
+        break;
+      }
+      if (desktop) ReleaseDesktop(session->server);
+    }
+  } catch (const std::exception& error) { CloseSession(session, std::string("operation: ") + error.what()); }
+}
+
+static cardio::promise<void> ServeClient(std::shared_ptr<ClientSession> session) {
+  auto sender = SendResponses(session);
+  auto executor = ExecuteRequests(session);
+  try {
+    const auto& options = session->server->options;
+    if (options.auth_required) {
+      std::vector<unsigned char> challenge;
+      std::string error;
+      if (!GenerateAuthChallenge(&challenge, &error)) throw std::runtime_error(error);
+      EnqueueOutput(session, {FrameKind::AuthChallenge, challenge});
+      auto timeout = cardio::cancellations::timeout(kAuthenticationMs);
+      auto cancel = cardio::cancellations::any(timeout.get_cancellation(), session->stop.get_cancellation());
+      auto frame = co_await ReceiveFrame(session, cancel.get_cancellation(), false);
+      if (frame.kind == FrameKind::Close) throw std::runtime_error("Peer closed during authentication.");
+      if (frame.kind != FrameKind::AuthResponse || frame.payload.size() != kAuthResponseBytes)
+        throw std::runtime_error("Invalid authentication response frame.");
+      if (!AuthResponseEquals(frame.payload, CreateAuthChallengeResponse(options.auth_token, challenge)))
+        throw std::runtime_error("Authentication challenge response mismatch.");
+    }
+    PrintAgentLogEvent(CreateAgentConnectionStateLogEvent(session->id, options.auth_required ? "authenticated" : "authentication skipped"));
+    EnqueueOutput(session, JsonFrame(CreateReadyEventJson()));
+    PrintAgentLogEvent(CreateAgentConnectionStateLogEvent(session->id, "ready"));
+    while (!session->closed) {
+      auto frame = co_await ReceiveFrame(session, session->stop.get_cancellation(), true);
+      if (frame.kind == FrameKind::Close) { CloseSession(session, "peer requested close"); break; }
+      if (frame.kind == FrameKind::Ping) { EnqueueOutput(session, {FrameKind::Pong, {}}); continue; }
+      if (frame.kind == FrameKind::Pong) continue;
+      QueuedRequest request = {std::move(frame), {}, {}, MonotonicClock::now()};
+      if (request.frame.kind == FrameKind::Json) {
+        const std::string text(request.frame.payload.begin(), request.frame.payload.end());
+        if (!ReadAgentRequest(text, &request.id, &request.method)) throw std::runtime_error("Invalid JSON request envelope.");
+        if (request.method == "agent.recordVideo" || request.method == "window.recordVideo")
+          session->video_duration_ms = ReadAgentVideoDuration(text);
+        request.budget_ms = OperationBudgetMs(request.method, session->video_duration_ms);
+        const auto context = RequestContext(session->id, request);
+        PrintAgentLogEvent(context + " phase=received");
+        if (request.method == "agent.capabilities") {
+          ReleaseRequestBytes(session, request.frame.payload.size() + kFrameHeaderBytes);
+          PrintAgentLogEvent(context + " phase=execute");
+          EnqueueOutput(session, JsonFrame(CreateCapabilitiesResponse(request.id)), context, request.received);
+          PrintAgentLogEvent(context + " phase=succeeded" + Elapsed(request.received));
+          continue;
+        }
+      } else if (request.frame.kind != FrameKind::Binary) throw std::runtime_error("Unexpected frame kind.");
+      session->requests.push_back(std::move(request));
+      session->request_ready.Notify();
+    }
+  } catch (const std::exception& error) { CloseSession(session, error.what()); }
+  CloseSession(session, "session completed");
+  co_await sender;
+  co_await executor;
+  co_await DrainSocket(session->socket);
+  ReleaseRequestBytes(session, session->request_bytes);
+  session->server->output_bytes -= session->output_bytes;
+  session->requests.clear();
+  session->output.clear();
+  if (session->worker) {
+    const auto reaped = co_await StopOperationWorker(session->worker);
+    if (reaped) --session->server->workers;
+    else {
+      session->server->quarantine.push_back(session->worker);
+      PrintAgentLogEvent("worker cleanup deadline exceeded; slot quarantined");
+    }
+    session->worker.reset();
+  }
+  session->server->sessions_changed.Notify();
+}
+
+static cardio::promise<void> ReapSessions(std::shared_ptr<ServerState> server) {
   for (;;) {
-    Frame frame = {};
-    std::string error;
-    if (!ReadFrame(client, kMaxJsonPayloadBytes, &frame, &error)) {
-      PrintAgentLogEvent(CreateAgentConnectionDisconnectedLogEvent(
-          connection_id, error));
+    for (auto it = server->sessions.begin(); it != server->sessions.end();) {
+      if ((*it)->lifetime.is_ready()) {
+        // Destroy a completed coroutine outside that coroutine's own stack.
+        (*it)->lifetime = cardio::promise<void>();
+        it = server->sessions.erase(it);
+      } else ++it;
+    }
+    if (server->stop.get_cancellation().is_cancellation_requested() && server->sessions.empty()) {
+      server->sessions_drained.Notify();
       break;
     }
+    co_await server->sessions_changed.Wait({});
+  }
+}
 
-    bool should_close = false;
-    std::string close_reason;
-    HandleFrame(
-        client, frame, &transfers, &recordings, &should_close, &close_reason);
-    if (should_close) {
-      PrintAgentLogEvent(CreateAgentConnectionDisconnectedLogEvent(
-          connection_id,
-          close_reason.empty() ? "connection closed" : close_reason));
-      break;
+static cardio::promise<void> Serve(std::shared_ptr<ServerState> server, int* result, std::string* error) {
+  Worker probe;
+  try {
+    probe = StartOperationWorker(HelperRole::Probe);
+    auto timeout = cardio::cancellations::timeout(kAuthenticationMs);
+    auto cancel = cardio::cancellations::any(timeout.get_cancellation(), server->stop.get_cancellation());
+    WorkerMessage probe_request;
+    // GCC 12 can double-destroy a nontrivial aggregate passed directly in a
+    // co_await expression. Give the owning message an explicit local lifetime.
+    probe_request.kind = WorkerMessageKind::Json;
+    probe_request.payload.assign(server->options.host.begin(), server->options.host.end());
+    co_await WriteWorker(probe, std::move(probe_request), cancel.get_cancellation());
+    const auto detected = co_await ReadWorker(probe, cancel.get_cancellation());
+    if (detected.kind != WorkerMessageKind::Capability || detected.payload.size() != 5)
+      throw std::runtime_error("Capability/host detection failed.");
+    SetAgentVideoCapability(detected.payload[0] != 0);
+    const auto reaped = co_await StopOperationWorker(probe);
+    if (!reaped) throw std::runtime_error("Capability probe did not exit.");
+    probe.reset();
+    server->stop.get_cancellation().throw_if_cancellation_requested();
+    sockaddr_in address = {};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(server->options.port);
+    std::memcpy(&address.sin_addr, detected.payload.data() + 1, sizeof(address.sin_addr));
+    const auto listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listener == INVALID_SOCKET) throw std::runtime_error("socket failed WSA=" + std::to_string(WSAGetLastError()));
+    server->listener = AdoptSocket(listener, true);
+    if (bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 || listen(listener, SOMAXCONN) != 0)
+      throw std::runtime_error("bind/listen failed WSA=" + std::to_string(WSAGetLastError()));
+    const auto status = "Listening on " + server->options.host + ":" + std::to_string(server->options.port);
+    PrintAgentLogEvent("version=" + BuildAgentVersionText() + " " + status);
+    SetListenStatus(server, status);
+    uint32_t next_id = 0;
+    for (;;) {
+      std::string endpoint;
+      auto socket = co_await AcceptSocket(server->listener, &endpoint);
+      if (server->sessions.size() >= kMaxConnections) {
+        co_await DrainSocket(socket);
+        PrintAgentLogEvent("connection limit reached");
+        continue;
+      }
+      auto session = std::make_shared<ClientSession>();
+      session->server = server;
+      session->socket = std::move(socket);
+      session->id = ++next_id;
+      PrintAgentLogEvent(CreateAgentConnectionAcceptedLogEvent(session->id, endpoint));
+      server->sessions.push_back(session);
+      session->lifetime = ServeClient(session);
+    }
+  } catch (const std::exception& failure) {
+    if (!server->stop.get_cancellation().is_cancellation_requested()) {
+      *result = 1;
+      *error = failure.what();
+      PrintAgentLogEvent(*error);
+      SetListenStatus(server, "Startup failed: " + *error);
     }
   }
-  CancelVideoRecording(&recordings);
-}
-
-static std::string ClientEndpoint(const sockaddr_in& address) {
-  const char* host = inet_ntoa(address.sin_addr);
-  std::string output = host == nullptr ? "unknown" : host;
-  output += ":";
-  output += std::to_string(static_cast<unsigned int>(ntohs(address.sin_port)));
-  return output;
-}
-
-static bool BindListener(
-    SOCKET listener,
-    const ServerOptions& options,
-    std::string* error) {
-  sockaddr_in address = {};
-  address.sin_family = AF_INET;
-  address.sin_port = htons(options.port);
-  if (!ResolveHost(options.host, &address.sin_addr)) {
-    *error = "Failed to resolve listen host.";
-    return false;
+  StopServer(server);
+  co_await DrainSocket(server->listener);
+  if (probe) {
+    const auto reaped = co_await StopOperationWorker(probe);
+    if (!reaped) server->quarantine.push_back(probe);
   }
-
-  const int reuse = 1;
-  setsockopt(listener, SOL_SOCKET, SO_REUSEADDR,
-             reinterpret_cast<const char*>(&reuse), sizeof(reuse));
-
-  if (bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) ==
-      SOCKET_ERROR) {
-    *error = "bind failed.";
-    return false;
-  }
-  if (listen(listener, SOMAXCONN) == SOCKET_ERROR) {
-    *error = "listen failed.";
-    return false;
-  }
-  return true;
+  while (!server->sessions.empty()) co_await server->sessions_drained.Wait({});
+  PrintAgentLogEvent("phase=shutdown connections drained");
+  co_await StopFileLogger(server->logger);
 }
 
 int RunTcpServer(const ServerOptions& options, std::string* error) {
   WSADATA data = {};
-  if (WSAStartup(MAKEWORD(2, 2), &data) != 0) {
-    *error = "WSAStartup failed.";
-    return 1;
-  }
-
-  SOCKET listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (listener == INVALID_SOCKET) {
-    WSACleanup();
-    *error = "socket failed.";
-    return 1;
-  }
-
-  if (!BindListener(listener, options, error)) {
-    closesocket(listener);
-    WSACleanup();
-    return 1;
-  }
-
-  uint32_t next_connection_id = 1;
-  for (;;) {
-    sockaddr_in client_address = {};
-    int client_address_length = sizeof(client_address);
-    SOCKET client = accept(
-        listener,
-        reinterpret_cast<sockaddr*>(&client_address),
-        &client_address_length);
-    if (client == INVALID_SOCKET) {
-      closesocket(listener);
-      WSACleanup();
-      *error = "accept failed.";
-      return 1;
-    }
-
-    const uint32_t connection_id = next_connection_id;
-    next_connection_id += 1;
-    if (next_connection_id == 0) {
-      next_connection_id = 1;
-    }
-    PrintAgentLogEvent(CreateAgentConnectionAcceptedLogEvent(
-        connection_id, ClientEndpoint(client_address)));
-    HandleClient(client, options, connection_id);
-    closesocket(client);
-  }
+  if (WSAStartup(MAKEWORD(2, 2), &data) != 0) { *error = "WSAStartup failed."; return 1; }
+  int result = 0;
+  try {
+    cardio::dispatcher_host_win32_auto dispatcher;
+    auto server = std::make_shared<ServerState>();
+    server->options = options;
+    const auto weak = std::weak_ptr<ServerState>(server);
+    server->gui = CreateAgentGui(options, [weak] { if (auto state = weak.lock()) StopServer(state); });
+    server->logger = CreateFileLogger([weak](const std::string& status) {
+      if (auto state = weak.lock()) {
+        state->log_status = status;
+        SetListenStatus(state, state->listen_status);
+      }
+    });
+    SetAgentGuiOpenLogs(server->gui, [weak] { if (auto state = weak.lock()) OpenFileLogFolder(state->logger); });
+    SetAgentLogSink([weak](const AgentLogRecord& record) {
+      if (auto state = weak.lock()) { NotifyAgentGuiLog(state->gui); EnqueueFileLog(state->logger, record); }
+    });
+    auto reaping = ReapSessions(server);
+    auto serving = Serve(server, &result, error);
+    dispatcher.park();
+    SetAgentLogSink({});
+  } catch (const std::exception& failure) { *error = failure.what(); result = 1; }
+  WSACleanup();
+  return result;
 }
 
 }  // namespace agent_rover

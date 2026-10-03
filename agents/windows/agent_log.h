@@ -7,9 +7,27 @@
 #define AGENT_ROVER_WINDOWS_AGENT_AGENT_LOG_H
 
 #include <cstdint>
+#include <deque>
+#include <functional>
 #include <string>
 
 namespace agent_rover {
+
+/** One bounded event, owned by the dispatcher that produces it. */
+struct AgentLogRecord {
+  /** Monotonically increasing sequence within this process. */
+  uint64_t sequence;
+  /** UTC timestamp. */
+  std::string timestamp;
+  /** Single-line text, at most 4096 UTF-8 bytes. */
+  std::string event;
+};
+/** Receives newly collected records without waiting for I/O or drawing.
+ * @param sink Nonblocking dispatcher-owned consumer, or empty to detach it. */
+void SetAgentLogSink(std::function<void(const AgentLogRecord&)> sink);
+/** Returns the most recent 1000 records. Access only on the producing dispatcher.
+ * @return Bounded chronological collection. */
+const std::deque<AgentLogRecord>& AgentLogRecords();
 
 /**
  * Replaces control characters so one logged field cannot inject extra lines.
@@ -157,7 +175,7 @@ std::string CreateAgentProcessKillFailedLogEvent(
     const std::string& reason);
 
 /**
- * Writes one lifecycle event to stdout.
+ * Collects one bounded lifecycle event without writing to standard handles.
  *
  * @param event Human-readable lifecycle event text.
  */

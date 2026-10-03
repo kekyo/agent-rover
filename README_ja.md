@@ -100,37 +100,40 @@ agent-roverは、GUIアプリケーション自体の監視や操作以外にも
 
 ## 準備
 
+ソースからビルドする場合は、`git submodule update --init --recursive`で依存コードを取得してください。
+`agents/deps/cardio`はcardio 1.3.0のgit submoduleです。ビルド手順は[BUILDING.md](BUILDING.md)を参照してください。
+
 [リリースページ](https://github.com/kekyo/agent-rover/releases/) から、ターゲットプラットフォームに対応するエージェントをダウンロードして下さい。
 エージェントは非常に小さく、そして他のライブラリへの実行時依存を可能な限り取り除いてあります。アーカイブを展開後、そのまま実行できます。インストールも不要です。
 
-例えば、Windowsエージェントの場合、以下のように起動できます。
-起動すると、以下のように待ち受けアドレスとアクセストークンが表示されます。
-クライアントが接続してアプリケーションを操作すると、低頻度のライフサイクルイベントも表示されます:
+Windowsエージェントは、ユーザーのデスクトップから実行します。起動するとシステムトレイに常駐します。
 
 ```cmd
-C:\> agent-rover-agent.exe
-
-agent-rover native windows agent
-Copyright (c) Kouji Matsui (@kekyo@mi.kekyo.net)
-https://github.com/kekyo/agent-rover
-Licence: Under MIT.
-
-agent-rover native agent listening on 0.0.0.0:39397
-agent-rover agent token: <access-token>
-agent-rover agent event: 2026-07-07T12:34:56Z connection #1 accepted from 192.0.2.10:50123
-agent-rover agent event: 2026-07-07T12:34:57Z connection #1 authenticated
-agent-rover agent event: 2026-07-07T12:34:57Z connection #1 ready
-agent-rover agent event: 2026-07-07T12:35:10Z application launched pid=4321 name=notepad.exe path=notepad.exe
-agent-rover agent event: 2026-07-07T12:35:20Z managed process released managedId=1
-agent-rover agent event: 2026-07-07T12:35:21Z connection #1 disconnected: peer requested close
+C:\> agent-amd64.exe
 ```
 
-- エージェントを実行するとアクセストークンが表示されるので、これをメモして下さい。
-- ライフサイクルログには、接続、認証、アプリケーション起動、マネージドプロセスのkill/release、
-  プロセスkill、切断が表示されます。リクエストpayload、アクセストークン、環境変数、クリップボード内容は表示されません。
+トレイのアイコンをダブルクリックするか、「Show logs」を選ぶとビューアーが開きます。
+上部にバージョンバナー、その下にコピー可能なトークン欄、ログ一覧が表示されます。
+トークンをコピーして、ドライバーの`authToken`へ指定してください。
+ウィンドウを閉じてもエージェントは常駐します。終了する場合はトレイの「Exit」を選びます。
+Windows版はコンソールへ出力しないため、Quick Editの設定変更は不要です。
+
+ログ一覧には最新1,000件を表示し、ウィンドウのサイズ変更に合わせて一覧も広がります。
+過去の記録は`%APPDATA%\agent-rover\logs`のUTF-8ファイルで参照できます。
+トレイの「Open log folder」で保存先を開けます。通常は1ファイル10MiB、5ファイルまで保持します。
+別インスタンスが使用中のファイルは削除しないため、同時起動時は総数が5を超える場合があります。
+保存失敗やキュー上限による欠落・保存未確認は、ビューアー下部に表示します。
+
+ログには接続・認証・プロセス操作のほか、要求IDとメソッド、実行結果、応答の送信、経過時間を記録します。
+画面とファイルは同じ連番で照合できます。認証トークン、要求本文、環境変数、クリップボードの内容はログへ転記しません。
+
 - デフォルトのTCPポート番号は39397です。OSファイアーウォールは開ける必要があります。
-- Windowsエージェントは、デスクトップ環境を操作するために、ユーザーのインタラクティブデスクトップから起動する必要があります。
-  わかりにくい問題ですが、Windowsサービスからプロセスを起動するとデスクトップ環境が制限されるため、Windowsエージェントをサービス化することはお勧めしません。
+- Windowsエージェントはユーザーのインタラクティブデスクトップから起動してください。Windowsサービスとしての起動は対象外です。
+- ドライバーの要求期限は既定で30秒です。期限を過ぎると接続全体を閉じ、その接続の未実行操作を取り消します。継続する場合は再接続してください。対象アプリへ既に渡った操作の副作用までは取り消せません。
+- Windows側の操作上限は、ウィンドウ・入力・クリップボードが30秒、それ以外は通常120秒です。録画は最長10分で、結果の取得には録画時間に加えて120秒を割り当てます。
+- Windows側は最大16接続、操作実行用に最大8接続分の枠を使います。回収できない処理は枠を保持し、ログへ記録します。
+- 1回のファイル読取りと、1接続で受信中・未使用の転送データの合計は、既定で64MiBまでです。起動時に`--max-transfer-size 128`のように指定すると、上限をMiB単位の正の整数で変更できます。標準出力・標準エラーの取得にも同じ上限を適用します。
+- managed processは1接続64件までです。大量の処理は分割してください。
 
 その後、あなたのNPMプロジェクトで、agent-roverをインストールします:
 

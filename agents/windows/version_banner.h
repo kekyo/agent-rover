@@ -24,11 +24,6 @@ std::string BuildAgentVersionText();
  */
 std::string BuildAgentVersionBanner();
 
-/**
- * Writes the startup banner to stdout.
- */
-void PrintAgentVersionBanner();
-
 }  // namespace agent_rover
 
 #endif

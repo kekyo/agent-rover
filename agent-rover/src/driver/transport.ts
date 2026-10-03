@@ -63,7 +63,7 @@ export interface TcpFrameTransportOptions {
   readonly host: string;
   /** Agent TCP port. */
   readonly port: number;
-  /** TCP connect timeout in milliseconds. */
+  /** TCP connect and individual write deadline in milliseconds. */
   readonly timeoutMs: number;
   /** Protocol transport callbacks. */
   readonly callbacks: ProtocolTransportCallbacks;
@@ -72,38 +72,67 @@ export interface TcpFrameTransportOptions {
 const parseTcpJsonFrame = (frame: TcpFrame): ProtocolMessage =>
   parseProtocolMessage(JSON.parse(frame.payload.toString('utf8')));
 
-const writeSocket = async (socket: Socket, data: Buffer): Promise<void> =>
+const writeSocket = async (
+  socket: Socket,
+  data: Buffer,
+  timeoutMs: number
+): Promise<void> => {
+  if (socket.writableLength + data.length > 32 * 1024 * 1024) {
+    socket.destroy();
+    throw new Error('TCP outbound queue exceeds 32 MiB.');
+  }
   await new Promise<void>((resolve, reject) => {
-    socket.write(data, (error: Error | null | undefined) => {
-      if (error === undefined || error === null) {
-        resolve();
-      } else {
-        reject(error);
-      }
-    });
+    let finished = false;
+    const complete = (error: Error | undefined): void => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      socket.off('close', onClose);
+      socket.off('error', onError);
+      if (error) reject(error);
+      else resolve();
+    };
+    const onClose = (): void =>
+      complete(new Error('TCP connection closed during write.'));
+    const onError = (error: Error): void => complete(error);
+    const timer = setTimeout(() => {
+      complete(new Error('TCP frame write timed out.'));
+      socket.destroy();
+    }, timeoutMs);
+    socket.once('close', onClose);
+    socket.once('error', onError);
+    try {
+      socket.write(data, (error) => complete(error ?? undefined));
+    } catch (error) {
+      complete(error instanceof Error ? error : new Error('TCP write failed.'));
+    }
   });
+};
 
 const writeTcpFrame = async (
   socket: Socket,
   kind: TcpFrame['kind'],
-  payload: Buffer
+  payload: Buffer,
+  timeoutMs: number
 ): Promise<void> => {
   await writeSocket(
     socket,
     encodeTcpFrame({
       kind,
       payload,
-    })
+    }),
+    timeoutMs
   );
 };
 
 const writeTcpPong = (
   socket: Socket,
-  callbacks: ProtocolTransportCallbacks
+  callbacks: ProtocolTransportCallbacks,
+  timeoutMs: number
 ): void => {
   void (async (): Promise<void> => {
     try {
-      await writeTcpFrame(socket, tcpFrameKindPong, Buffer.alloc(0));
+      await writeTcpFrame(socket, tcpFrameKindPong, Buffer.alloc(0), timeoutMs);
     } catch (error) {
       callbacks.onError(
         error instanceof Error ? error : new Error('Failed to write TCP pong.')
@@ -126,14 +155,16 @@ const writeTcpAuthResponse = (
   socket: Socket,
   callbacks: ProtocolTransportCallbacks,
   authToken: string,
-  challenge: Buffer
+  challenge: Buffer,
+  timeoutMs: number
 ): void => {
   void (async (): Promise<void> => {
     try {
       await writeTcpFrame(
         socket,
         tcpFrameKindAuthResponse,
-        createAuthChallengeResponse(authToken, challenge)
+        createAuthChallengeResponse(authToken, challenge),
+        timeoutMs
       );
     } catch (error) {
       callbacks.onError(
@@ -159,21 +190,27 @@ export const createTcpFrameTransport = (
   });
   let open = false;
   let authChallengeAnswered = false;
+  let ready = false;
+  let closing: Promise<void> | undefined;
 
   const acceptSocketData = async (data: Buffer): Promise<void> => {
     try {
       for (const frame of decoder.accept(Buffer.from(data))) {
         switch (frame.kind) {
-          case tcpFrameKindJson:
-            options.callbacks.onMessage(parseTcpJsonFrame(frame));
+          case tcpFrameKindJson: {
+            const message = parseTcpJsonFrame(frame);
+            if (message.kind === 'event' && message.name === 'agent.ready')
+              ready = true;
+            options.callbacks.onMessage(message);
             break;
+          }
           case tcpFrameKindPing:
-            writeTcpPong(socket, options.callbacks);
+            writeTcpPong(socket, options.callbacks, options.timeoutMs);
             break;
           case tcpFrameKindPong:
             break;
           case tcpFrameKindClose:
-            socket.end();
+            socket.destroy();
             break;
           case tcpFrameKindBinary:
             await options.callbacks.onBinaryChunk(
@@ -207,7 +244,8 @@ export const createTcpFrameTransport = (
               socket,
               options.callbacks,
               options.authToken,
-              frame.payload
+              frame.payload,
+              options.timeoutMs
             );
             break;
           case tcpFrameKindAuthResponse:
@@ -241,6 +279,10 @@ export const createTcpFrameTransport = (
     );
   });
   socket.on('connect', () => {
+    if (closing !== undefined) {
+      socket.destroy();
+      return;
+    }
     open = true;
     socket.setTimeout(0);
     options.callbacks.onOpen();
@@ -259,14 +301,22 @@ export const createTcpFrameTransport = (
 
   return {
     close: async (): Promise<void> => {
+      if (closing !== undefined) return await closing;
       if (socket.destroyed) {
         return;
       }
-      await new Promise<void>((resolve) => {
+      const canSendClose = open && ready;
+      open = false;
+      closing = new Promise<void>((resolve) => {
+        const timer = setTimeout(
+          () => socket.destroy(),
+          Math.min(options.timeoutMs, 1000)
+        );
         socket.once('close', () => {
+          clearTimeout(timer);
           resolve();
         });
-        if (open) {
+        if (canSendClose) {
           socket.end(
             encodeTcpFrame({
               kind: tcpFrameKindClose,
@@ -277,6 +327,7 @@ export const createTcpFrameTransport = (
           socket.destroy();
         }
       });
+      await closing;
     },
     isOpen: (): boolean => open && !socket.destroyed,
     send: async (message): Promise<void> => {
@@ -286,7 +337,8 @@ export const createTcpFrameTransport = (
       await writeTcpFrame(
         socket,
         tcpFrameKindJson,
-        Buffer.from(JSON.stringify(message), 'utf8')
+        Buffer.from(JSON.stringify(message), 'utf8'),
+        options.timeoutMs
       );
     },
     sendBinaryChunk: async (chunk): Promise<void> => {
@@ -296,7 +348,8 @@ export const createTcpFrameTransport = (
       await writeTcpFrame(
         socket,
         tcpFrameKindBinary,
-        encodeBinaryTransferChunkPayload(chunk)
+        encodeBinaryTransferChunkPayload(chunk),
+        options.timeoutMs
       );
     },
   };

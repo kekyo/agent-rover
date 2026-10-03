@@ -5,7 +5,8 @@
 
 #include "win32_files.h"
 
-#include <windows.h>
+#include <winsock2.h>
+#include <cardio.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -17,6 +18,45 @@
 #include "win32_util.h"
 
 namespace agent_rover {
+
+// Public file operations keep their synchronous boundary inside the isolated
+// process. Native data I/O is overlapped, and buffers outlive cancellation.
+static cardio::promise<void> ReadData(HANDLE file, std::vector<unsigned char>* data,
+    const std::string& path, OperationError* error, bool* succeeded) {
+  try {
+    auto deadline = cardio::cancellations::timeout(120000);
+    size_t offset = 0;
+    while (offset < data->size()) {
+      auto bytes = std::as_writable_bytes(std::span(*data).subspan(offset));
+      const auto read = co_await cardio::win32::read(file, bytes.first(std::min<size_t>(bytes.size(), 65536)),
+          offset, deadline.get_cancellation());
+      if (!read) break;
+      offset += read;
+    }
+    data->resize(offset);
+    *succeeded = true;
+  } catch (const std::system_error& failure) {
+    *error = MakeOperationError("ReadFile", path, failure.code().value());
+  } catch (const std::exception& failure) { *error = failure.what(); }
+}
+
+static cardio::promise<void> WriteData(HANDLE file, const std::vector<unsigned char>* data,
+    const std::string& path, OperationError* error, bool* succeeded) {
+  try {
+    auto deadline = cardio::cancellations::timeout(120000);
+    size_t offset = 0;
+    while (offset < data->size()) {
+      auto bytes = std::as_bytes(std::span(*data).subspan(offset));
+      const auto written = co_await cardio::win32::write(file, bytes.first(std::min<size_t>(bytes.size(), 65536)),
+          offset, deadline.get_cancellation());
+      if (!written) throw std::runtime_error("WriteFile returned zero bytes.");
+      offset += written;
+    }
+    *succeeded = true;
+  } catch (const std::system_error& failure) {
+    *error = MakeOperationError("WriteFile", path, failure.code().value());
+  } catch (const std::exception& failure) { *error = failure.what(); }
+}
 
 static bool IsSeparator(wchar_t ch) {
   return ch == L'\\' || ch == L'/';
@@ -115,12 +155,14 @@ static bool EnsureParentDirectories(
 
 bool ReadFileBytes(
     const std::string& path,
+    uint64_t max_transfer_bytes,
     std::vector<unsigned char>* data,
     OperationError* error) {
-  return ReadCaptureFileBytes(path, false, data, error);
+  return ReadCaptureFileBytes(path, false, max_transfer_bytes, data, error);
 }
 
 bool ReadCaptureFileBytes(const std::string& path, bool allow_writer,
+                          uint64_t max_transfer_bytes,
                           std::vector<unsigned char>* data, OperationError* error) {
   const std::wstring wide_path = Utf8ToWide(path);
   if (wide_path.empty()) {
@@ -129,7 +171,7 @@ bool ReadCaptureFileBytes(const std::string& path, bool allow_writer,
   }
 
   HANDLE file = CreateFileW(wide_path.c_str(), GENERIC_READ, FILE_SHARE_READ | (allow_writer ? FILE_SHARE_WRITE : 0),
-                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
                             nullptr);
   if (file == INVALID_HANDLE_VALUE) {
     *error = MakeOperationError("CreateFileW", WideToUtf8(wide_path), GetLastError());
@@ -138,33 +180,22 @@ bool ReadCaptureFileBytes(const std::string& path, bool allow_writer,
 
   LARGE_INTEGER size = {};
   if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 ||
-      static_cast<unsigned long long>(size.QuadPart) >
-          static_cast<unsigned long long>(0xffffffffu)) {
+      static_cast<uint64_t>(size.QuadPart) > max_transfer_bytes ||
+      static_cast<uint64_t>(size.QuadPart) > data->max_size()) {
     CloseHandle(file);
     *error = "File size is unsupported.";
     return false;
   }
 
   data->assign(static_cast<size_t>(size.QuadPart), 0);
-  size_t offset = 0;
-  while (offset < data->size()) {
-    const DWORD chunk =
-        static_cast<DWORD>(std::min<size_t>(data->size() - offset, 64 * 1024));
-    DWORD read = 0;
-    if (!ReadFile(file, data->data() + offset, chunk, &read, nullptr)) {
-      const DWORD error_code = GetLastError();
-      CloseHandle(file);
-      *error = MakeOperationError("ReadFile", WideToUtf8(wide_path), error_code);
-      return false;
-    }
-    if (read == 0) {
-      break;
-    }
-    offset += read;
+  bool succeeded = false;
+  {
+    cardio::dispatcher_host_win32_auto dispatcher;
+    auto reading = ReadData(file, data, path, error, &succeeded);
+    dispatcher.park();
   }
-  data->resize(offset);
   CloseHandle(file);
-  return true;
+  return succeeded;
 }
 
 bool HashFileSha256(
@@ -244,32 +275,20 @@ bool WriteFileBytes(
   }
 
   HANDLE file = CreateFileW(wide_path.c_str(), GENERIC_WRITE, 0, nullptr,
-                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, nullptr);
   if (file == INVALID_HANDLE_VALUE) {
     *error = MakeOperationError("CreateFileW", WideToUtf8(wide_path), GetLastError());
     return false;
   }
 
-  size_t offset = 0;
-  while (offset < data.size()) {
-    const DWORD chunk =
-        static_cast<DWORD>(std::min<size_t>(data.size() - offset, 64 * 1024));
-    DWORD written = 0;
-    if (!WriteFile(file, data.data() + offset, chunk, &written, nullptr)) {
-      const DWORD error_code = GetLastError();
-      CloseHandle(file);
-      *error = MakeOperationError("WriteFile", WideToUtf8(wide_path), error_code);
-      return false;
-    }
-    if (written == 0) {
-      CloseHandle(file);
-      *error = "WriteFile wrote zero bytes.";
-      return false;
-    }
-    offset += written;
+  bool succeeded = false;
+  {
+    cardio::dispatcher_host_win32_auto dispatcher;
+    auto writing = WriteData(file, &data, path, error, &succeeded);
+    dispatcher.park();
   }
   CloseHandle(file);
-  return true;
+  return succeeded;
 }
 
 bool PathExists(const std::string& path) {
@@ -341,6 +360,7 @@ bool ReadDirectoryEntries(
       continue;
     }
     const std::string child_path = WideToUtf8(JoinPath(wide_path, name));
+    if (entries->size() >= 8192) { FindClose(find); *error = "Directory entry limit exceeded (8192)."; return false; }
     DirectoryEntry entry = {};
     entry.name = WideToUtf8(name);
     if (!StatPath(child_path, &entry.stat, error)) {
@@ -375,6 +395,7 @@ static bool ReadDirectoryManifestRecursive(
     std::vector<DirectoryManifestEntry>* entries,
     OperationError* error) {
   const std::wstring directory = relative.empty() ? root : JoinPath(root, relative);
+  if (std::count(relative.begin(), relative.end(), L'\\') >= 32) { *error = "Manifest depth limit exceeded (32)."; return false; }
   const std::wstring pattern = JoinPath(directory, L"*");
   WIN32_FIND_DATAW data = {};
   HANDLE find = FindFirstFileW(pattern.c_str(), &data);
@@ -395,6 +416,7 @@ static bool ReadDirectoryManifestRecursive(
       continue;
     }
     const std::wstring child_relative = JoinRelativePath(relative, name);
+    if (entries->size() >= 8192) { FindClose(find); *error = "Manifest entry limit exceeded (8192)."; return false; }
     const std::wstring child_path = JoinPath(root, child_relative);
     const bool directory_entry =
         (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
@@ -409,12 +431,10 @@ static bool ReadDirectoryManifestRecursive(
     entry.modified_at = FileTimeIso(data.ftLastWriteTime);
     entry.has_sha256 = false;
     if (!directory_entry) {
-      std::vector<unsigned char> bytes;
-      if (!ReadFileBytes(WideToUtf8(child_path), &bytes, error)) {
+      if (!HashFileSha256(WideToUtf8(child_path), &entry.size, &entry.sha256, error)) {
         FindClose(find);
         return false;
       }
-      entry.sha256 = Sha256Hex(bytes);
       entry.has_sha256 = true;
     }
     entries->push_back(entry);

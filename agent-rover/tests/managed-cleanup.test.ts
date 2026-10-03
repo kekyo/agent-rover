@@ -233,7 +233,7 @@ describe('managed cleanup completion', () => {
     }
   });
 
-  it('recovers when native release completed but its response was lost', async () => {
+  it('ends the session when a completed native release loses its response', async () => {
     const fake = await startFakeTcpAgent({
       dropResponses: { 'process.releaseManaged': 1 },
     });
@@ -251,13 +251,14 @@ describe('managed cleanup completion', () => {
         code: 'TIMEOUT',
       });
       expect(fake.managedProcessCount()).toBe(0);
-      expect(
-        await agent.files.exists('C:/agent-rover-managed-process-fake')
-      ).toBe(true);
-      await child.releaseAsync();
-      expect(
-        await agent.files.exists('C:/agent-rover-managed-process-fake')
-      ).toBe(false);
+      // A request deadline now cancels the whole native session. Its owner
+      // reclaims captures; the old connection cannot issue recovery requests.
+      await expect(
+        agent.files.exists('C:/agent-rover-managed-process-fake')
+      ).rejects.toMatchObject({ code: 'DISCONNECTED' });
+      await expect(child.releaseAsync()).rejects.toMatchObject({
+        code: 'DISCONNECTED',
+      });
     } finally {
       agent.release();
       await fake.close();

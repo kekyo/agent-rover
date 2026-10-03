@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <string>
 
+#include "transfer_limits.h"
+
 namespace agent_rover {
 
 /** Native TCP agent listen options. */
@@ -21,14 +23,16 @@ struct ServerOptions {
   bool auth_required;
   /** Token required when auth_required is true. */
   std::string auth_token;
+  /** Maximum whole-file read and retained incoming transfer size in bytes. */
+  uint64_t max_transfer_bytes = kDefaultMaxTransferBytes;
 };
 
 /**
- * Runs the native TCP frame server until the process is terminated.
+ * Runs the tray GUI and independent TCP sessions until shutdown is requested.
  *
  * @param options Listen options.
  * @param error Receives a human-readable startup error.
- * @return 0 on normal startup, otherwise a non-zero process exit code.
+ * @return 0 after bounded normal shutdown, otherwise a non-zero process exit code.
  */
 int RunTcpServer(const ServerOptions& options, std::string* error);
 

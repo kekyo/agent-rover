@@ -5,7 +5,6 @@
 
 #include "version_banner.h"
 
-#include <cstdio>
 #include <string>
 
 #include "version.h"
@@ -27,11 +26,6 @@ std::string BuildAgentVersionBanner() {
          "Copyright (c) Kouji Matsui (@kekyo@mi.kekyo.net)\n"
          "https://github.com/kekyo/agent-rover\n"
          "Licence: Under MIT.";
-}
-
-void PrintAgentVersionBanner() {
-  const std::string banner = BuildAgentVersionBanner();
-  std::printf("%s\n\n", banner.c_str());
 }
 
 }  // namespace agent_rover

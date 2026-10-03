@@ -23,6 +23,38 @@ static const DWORD kFlags = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_
 static const DWORD kShare = FILE_SHARE_READ | FILE_SHARE_WRITE;
 static std::map<std::wstring, BY_HANDLE_FILE_INFORMATION> capture_directories;
 static uint64_t next_capture_directory = 1;
+static std::string capture_root;
+
+void SetCaptureRoot(const std::string& path) { capture_root = path.empty() ? "" : path + "\\"; }
+
+std::string CaptureRoot() {
+  if (!capture_root.empty()) return capture_root;
+  wchar_t temporary[MAX_PATH + 1] = {};
+  const auto length = GetTempPathW(MAX_PATH, temporary);
+  return length && length <= MAX_PATH ? WideToUtf8(temporary) : "";
+}
+
+bool GetCaptureIdentity(const std::string& path, CaptureIdentity* identity) {
+  const auto found = capture_directories.find(Utf8ToWide(path));
+  if (found == capture_directories.end()) return false;
+  const auto& info = found->second;
+  *identity = {info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow};
+  return true;
+}
+
+bool RestoreCaptureIdentity(const std::string& path, const CaptureIdentity& identity, OperationError* error) {
+  const auto wide = Utf8ToWide(path);
+  const auto handle = CreateFileW(wide.c_str(), 0, kShare, nullptr, OPEN_EXISTING, kFlags, nullptr);
+  if (handle == INVALID_HANDLE_VALUE) { *error = MakeOperationError("CreateFileW(cleanup ownership)", path, GetLastError()); return false; }
+  BY_HANDLE_FILE_INFORMATION info = {};
+  const auto valid = GetFileInformationByHandle(handle, &info) &&
+      (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+      info.dwVolumeSerialNumber == identity.volume && info.nFileIndexHigh == identity.index_high && info.nFileIndexLow == identity.index_low;
+  CloseHandle(handle);
+  if (!valid) { *error = MakeOperationError("RestoreCaptureIdentity", path, ERROR_INVALID_DATA); return false; }
+  capture_directories[wide] = info;
+  return true;
+}
 
 static bool Failure(const char* operation, const std::string& path, DWORD code, OperationError* error) {
   *error = MakeOperationError(operation, path, code);
@@ -319,6 +351,7 @@ bool RemoveWithPolicy(const std::string& path, const CleanupPolicy& requested, O
 }
 
 bool CreateCaptureDirectory(std::string* path, OperationError* error) {
+  if (capture_directories.size() >= 128) return Failure("CaptureDirectoryLimit", "", ERROR_TOO_MANY_OPEN_FILES, error);
   std::vector<unsigned char> user;
   if (!UserToken(&user, error)) return false;
   EXPLICIT_ACCESS_W entry = {};
@@ -336,10 +369,9 @@ bool CreateCaptureDirectory(std::string* path, OperationError* error) {
   SetSecurityDescriptorDacl(&descriptor, TRUE, acl, FALSE);
   SetSecurityDescriptorControl(&descriptor, SE_DACL_PROTECTED, SE_DACL_PROTECTED);
   SECURITY_ATTRIBUTES security = {sizeof(SECURITY_ATTRIBUTES), &descriptor, FALSE};
-  wchar_t temporary[MAX_PATH + 1] = {};
-  const auto length = GetTempPathW(MAX_PATH, temporary);
+  const auto temporary = Utf8ToWide(CaptureRoot());
   bool created = false;
-  if (length == 0 || length > MAX_PATH) Failure("GetTempPathW", "", GetLastError(), error);
+  if (temporary.empty()) Failure("GetTempPathW", "", GetLastError(), error);
   else for (unsigned int index = 0; index < 1000; ++index) {
     // Never recycle a name during this agent's lifetime: a late cleanup request
     // for an earlier process must not name a newer process's capture directory.

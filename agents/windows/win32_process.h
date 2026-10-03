@@ -25,9 +25,9 @@ struct ApplicationLaunchOptions {
   std::string working_directory;
   /** Environment variables to add or override. */
   std::map<std::string, std::string> environment;
-  /** File path receiving stdout, or empty to inherit stdout. */
+  /** File path receiving stdout; an uncaptured stream uses NUL when its peer is redirected. */
   std::string stdout_path;
-  /** File path receiving stderr, or empty to inherit stderr. */
+  /** File path receiving stderr; an uncaptured stream uses NUL when its peer is redirected. */
   std::string stderr_path;
   /** Whether to suppress console window creation. */
   bool create_no_window;
@@ -194,11 +194,13 @@ bool ManagedProcessRunning(uint32_t managed_id, bool* running, OperationError* e
  * Reads a live output snapshot or completed output after the root exits.
  * @param managed_id Managed resource identifier.
  * @param stderr_stream Selects stderr instead of stdout.
+ * @param max_transfer_bytes Maximum capture snapshot size in bytes.
  * @param data Receives UTF-8 capture bytes.
  * @param error Receives busy while descendants still write, or another native failure.
  * @return Whether the selected output is available.
  */
 bool ReadManagedCapture(uint32_t managed_id, bool stderr_stream,
+                         uint64_t max_transfer_bytes,
                          std::vector<unsigned char>* data, OperationError* error);
 
 }  // namespace agent_rover

@@ -106,6 +106,7 @@ bool ReadEventLogs(
     std::vector<EventLogEntry>* entries,
     std::string* error) {
   entries->clear();
+  if (query.max_entries > 1000) { *error = "Event log entry limit exceeded (1000)."; return false; }
   const uint32_t max_entries = query.max_entries == 0 ? 50 : query.max_entries;
   HANDLE log = OpenEventLogW(nullptr, L"Application");
   if (log == nullptr) {
@@ -127,7 +128,7 @@ bool ReadEventLogs(
         CloseEventLog(log);
         return true;
       }
-      if (last_error == ERROR_INSUFFICIENT_BUFFER && minimum_bytes > 0) {
+      if (last_error == ERROR_INSUFFICIENT_BUFFER && minimum_bytes > 0 && minimum_bytes <= 1024 * 1024) {
         buffer.assign(minimum_bytes, 0);
         continue;
       }

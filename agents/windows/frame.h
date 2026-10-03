@@ -6,8 +6,6 @@
 #ifndef AGENT_ROVER_WINDOWS_AGENT_FRAME_H
 #define AGENT_ROVER_WINDOWS_AGENT_FRAME_H
 
-#include <winsock2.h>
-
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -54,55 +52,13 @@ struct Frame {
   std::vector<unsigned char> payload;
 };
 
-/**
- * Reads one complete frame from a blocking socket.
- *
- * @param socket Connected Winsock socket.
- * @param max_payload_bytes Maximum payload bytes accepted for this frame.
- * @param frame Receives the decoded frame on success.
- * @param error Receives a human-readable error on failure.
- * @return true when a frame was read, otherwise false.
- */
-bool ReadFrame(
-    SOCKET socket,
-    uint32_t max_payload_bytes,
-    Frame* frame,
-    std::string* error);
-
-/**
- * Reads and validates one fixed-size frame header.
- *
- * @param socket Connected Winsock socket.
- * @param header Receives the decoded frame header on success.
- * @param error Receives a human-readable error on failure.
- * @return true when a frame header was read, otherwise false.
- */
-bool ReadFrameHeader(SOCKET socket, FrameHeader* header, std::string* error);
-
-/**
- * Reads one frame payload after its header has already been accepted.
- *
- * @param socket Connected Winsock socket.
- * @param payload_length Exact payload byte count to read.
- * @param payload Receives the decoded frame payload on success.
- * @param error Receives a human-readable error on failure.
- * @return true when the payload was read, otherwise false.
- */
-bool ReadFramePayload(
-    SOCKET socket,
-    uint32_t payload_length,
-    std::vector<unsigned char>* payload,
-    std::string* error);
-
-/**
- * Writes one complete frame to a blocking socket.
- *
- * @param socket Connected Winsock socket.
- * @param frame Frame to send.
- * @param error Receives a human-readable error on failure.
- * @return true when the frame was written, otherwise false.
- */
-bool WriteFrame(SOCKET socket, const Frame& frame, std::string* error);
+/** Decodes a fixed header without performing I/O.
+ * @param bytes Exactly kFrameHeaderBytes bytes. @param header Decoded values.
+ * @param error Failure description. @return Whether the header is valid. */
+bool DecodeFrameHeader(const unsigned char* bytes, FrameHeader* header, std::string* error);
+/** Encodes a frame for asynchronous transmission.
+ * @param frame Frame to encode. @return Header followed by payload. */
+std::vector<unsigned char> EncodeFrame(const Frame& frame);
 
 }  // namespace agent_rover
 
