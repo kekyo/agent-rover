@@ -19,8 +19,9 @@ static void ShowUsage() {
   MessageBoxW(nullptr,
       L"agent-rover native windows agent\n\n"
       L"Usage:\n"
-      L"  agent-rover-agent.exe [--host <host>] [--port <port>] [--unsafe-token <token>] [-n|--no-auth]\n"
-      L"  agent-rover-agent.exe --help\n", L"agent-rover", MB_OK);
+      L"  agent-rover-agent.exe [--host <host>] [--port <port>] [--unsafe-token <token>] [-n|--no-auth] [--max-transfer-size <MiB>]\n"
+      L"  agent-rover-agent.exe --help\n\n"
+      L"--max-transfer-size: positive integer in MiB (default: 64).\n", L"agent-rover", MB_OK);
 }
 
 }  // namespace agent_rover
@@ -37,10 +38,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, wchar_t*, int) {
     LocalFree(argv);
     return agent_rover::RunFileLogWorker();
   }
-  if (argc == 2 && (std::wstring(argv[1]) == L"--agent-worker" || std::wstring(argv[1]) == L"--agent-probe")) {
+  if (argc >= 2 && (std::wstring(argv[1]) == L"--agent-worker" || std::wstring(argv[1]) == L"--agent-probe")) {
     const bool probe = std::wstring(argv[1]) == L"--agent-probe";
+    const auto parsed = agent_rover::ParseAgentCommandLine(argc - 1, argv + 1);
     LocalFree(argv);
-    return agent_rover::RunOperationWorker(probe);
+    if (!parsed.ok || parsed.help_requested) return 1;
+    return agent_rover::RunOperationWorker(probe, parsed.options.max_transfer_bytes);
   }
 
   const agent_rover::AgentCommandLineParseResult parsed =
@@ -59,7 +62,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, wchar_t*, int) {
       parsed.options.host,
       parsed.options.port,
       parsed.options.auth_required,
-      parsed.options.auth_token};
+      parsed.options.auth_token,
+      parsed.options.max_transfer_bytes};
 
   if (options.auth_required && options.auth_token.empty()) {
     std::string error;

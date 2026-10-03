@@ -54,12 +54,14 @@ struct DirectoryManifestEntry {
  * Reads a complete file.
  *
  * @param path UTF-8 path on the agent machine.
+ * @param max_transfer_bytes Maximum file size accepted before allocating memory.
  * @param data Receives file bytes.
  * @param error Receives a structured diagnostic on failure.
  * @return true on success.
  */
 bool ReadFileBytes(
     const std::string& path,
+    uint64_t max_transfer_bytes,
     std::vector<unsigned char>* data,
     OperationError* error);
 
@@ -67,11 +69,13 @@ bool ReadFileBytes(
  * Reads a capture snapshot, permitting a live writer only when requested.
  * @param path Captured file path.
  * @param allow_writer Whether an existing write handle may coexist with this read.
+ * @param max_transfer_bytes Maximum snapshot size accepted before allocating memory.
  * @param data Receives bytes present at the start of the read.
  * @param error Receives the structured read or sharing failure.
  * @return Whether all snapshot bytes were read.
  */
 bool ReadCaptureFileBytes(const std::string& path, bool allow_writer,
+                          uint64_t max_transfer_bytes,
                           std::vector<unsigned char>* data, OperationError* error);
 
 /**

@@ -53,7 +53,7 @@ static HANDLE CreateWorkerPipe(HANDLE* child, bool parent_reads) {
   return parent;
 }
 
-Worker StartOperationWorker(HelperRole role) {
+Worker StartOperationWorker(HelperRole role, uint64_t max_transfer_bytes) {
   auto worker = std::make_shared<OperationWorker>();
   worker->role = role;
   HANDLE input = INVALID_HANDLE_VALUE, output = INVALID_HANDLE_VALUE;
@@ -65,7 +65,12 @@ Worker StartOperationWorker(HelperRole role) {
     const auto mode = role == HelperRole::Probe ? L"--agent-probe" :
         role == HelperRole::FileLogger ? L"--agent-log-worker" :
         role == HelperRole::Cleanup ? L"--agent-cleanup-worker" : L"--agent-worker";
-    auto command = BuildCommandLine(path, {mode});
+    std::vector<std::wstring> arguments = {mode};
+    if (role == HelperRole::Operations) {
+      arguments.insert(arguments.end(), {L"--max-transfer-size",
+          std::to_wstring(max_transfer_bytes / kBytesPerMiB)});
+    }
+    auto command = BuildCommandLine(path, arguments);
     STARTUPINFOW startup = {};
     startup.cb = sizeof(startup);
     startup.dwFlags = STARTF_USESTDHANDLES;
@@ -268,13 +273,14 @@ static void SendWorkerFile(const OutboundFileTransfer& transfer) {
   CloseHandle(file);
 }
 
-int RunOperationWorker(bool probe) {
+int RunOperationWorker(bool probe, uint64_t max_transfer_bytes) {
   const auto input = GetStdHandle(STD_INPUT_HANDLE);
   const auto output = GetStdHandle(STD_OUTPUT_HANDLE);
   // Child applications must never inherit our protocol pipe handles.
   SetHandleInformation(input, HANDLE_FLAG_INHERIT, 0);
   SetHandleInformation(output, HANDLE_FLAG_INHERIT, 0);
   BinaryTransferStore transfers = {};
+  transfers.max_transfer_bytes = max_transfer_bytes;
   VideoRecordingStore recordings = {};
   try {
     if (probe) {

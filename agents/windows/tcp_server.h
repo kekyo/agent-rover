@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <string>
 
+#include "transfer_limits.h"
+
 namespace agent_rover {
 
 /** Native TCP agent listen options. */
@@ -21,6 +23,8 @@ struct ServerOptions {
   bool auth_required;
   /** Token required when auth_required is true. */
   std::string auth_token;
+  /** Maximum whole-file read and retained incoming transfer size in bytes. */
+  uint64_t max_transfer_bytes = kDefaultMaxTransferBytes;
 };
 
 /**

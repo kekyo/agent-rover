@@ -304,10 +304,10 @@ static bool FindJsonNumberField(
   return true;
 }
 
-static bool FindJsonUInt32Field(
+static bool FindJsonUInt64Field(
     const std::string& json,
     const std::string& key,
-    uint32_t* value) {
+    uint64_t* value) {
   const std::string marker = "\"" + key + "\"";
   const size_t key_position = json.find(marker);
   if (key_position == std::string::npos) {
@@ -331,8 +331,7 @@ static bool FindJsonUInt32Field(
   errno = 0;
   const unsigned long long parsed =
       std::strtoull(json.c_str() + value_position, &end, 10);
-  if (end == json.c_str() + value_position || errno == ERANGE ||
-      parsed > 0xffffffffull) {
+  if (end == json.c_str() + value_position || errno == ERANGE) {
     return false;
   }
   while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
@@ -341,6 +340,16 @@ static bool FindJsonUInt32Field(
   if (*end != ',' && *end != '}') {
     return false;
   }
+  *value = static_cast<uint64_t>(parsed);
+  return true;
+}
+
+static bool FindJsonUInt32Field(
+    const std::string& json,
+    const std::string& key,
+    uint32_t* value) {
+  uint64_t parsed = 0;
+  if (!FindJsonUInt64Field(json, key, &parsed) || parsed > 0xffffffffull) return false;
   *value = static_cast<uint32_t>(parsed);
   return true;
 }
@@ -1357,7 +1366,7 @@ std::string HandleJsonRequest(
     std::string stream;
     if (!FindJsonStringField(payload, "stream", &stream) || (stream != "stdout" && stream != "stderr")) return FailureResponseJson(id, "Capture stream must be stdout or stderr.");
     std::vector<unsigned char> data;
-    if (!ReadManagedCapture(static_cast<uint32_t>(managed_id), stream == "stderr", &data, &error)) return OperationFailureJson(id, method, error);
+    if (!ReadManagedCapture(static_cast<uint32_t>(managed_id), stream == "stderr", transfers->max_transfer_bytes, &data, &error)) return OperationFailureJson(id, method, error);
     const std::string transfer_id = id + "-capture";
     AddBinaryTransferChunks(transfer_id, "application/octet-stream", data, outbound_chunks);
     return SuccessResponseJson(id, BinaryTransferMetadataJson(transfer_id, "application/octet-stream", data));
@@ -1723,7 +1732,7 @@ std::string HandleJsonRequest(
     }
     std::vector<unsigned char> data;
     OperationError error;
-    if (!ReadFileBytes(path, &data, &error)) {
+    if (!ReadFileBytes(path, transfers->max_transfer_bytes, &data, &error)) {
       return OperationFailureJson(id, method, error);
     }
     const std::string transfer_id = id + "-file-read";
@@ -1739,13 +1748,12 @@ std::string HandleJsonRequest(
     std::string transfer_id;
     std::string content_type;
     std::string expected_sha256;
-    int expected_total_bytes = 0;
+    uint64_t expected_total_bytes = 0;
     if (FindJsonStringField(payload, "path", &path) &&
         FindJsonStringField(payload, "transferId", &transfer_id) &&
         FindJsonStringField(payload, "contentType", &content_type) &&
         FindJsonStringField(payload, "sha256", &expected_sha256) &&
-        FindJsonNumberField(payload, "totalBytes", &expected_total_bytes) &&
-        expected_total_bytes >= 0) {
+        FindJsonUInt64Field(payload, "totalBytes", &expected_total_bytes)) {
       if (content_type != "application/octet-stream") {
         return FailureResponseJson(id, "file.write contentType is invalid.");
       }
@@ -1753,7 +1761,7 @@ std::string HandleJsonRequest(
       OperationError error;
       if (!ConsumeBinaryTransfer(
               transfers, transfer_id, content_type,
-              static_cast<uint32_t>(expected_total_bytes), expected_sha256,
+              expected_total_bytes, expected_sha256,
               &data, &error.message)) {
         return OperationFailureJson(id, method, error);
       }
@@ -1774,6 +1782,9 @@ std::string HandleJsonRequest(
     OperationError error;
     if (!Base64Decode(data_base64, &data, &error.message)) {
       return OperationFailureJson(id, method, error);
+    }
+    if (data.size() > transfers->max_transfer_bytes) {
+      return FailureResponseJson(id, "File data exceeds the configured transfer size limit.");
     }
     if (Sha256Hex(data) != expected_sha256) {
       return FailureResponseJson(id, "file.write checksum mismatch.");

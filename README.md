@@ -139,7 +139,8 @@ bodies, environment variables and clipboard contents are not copied to logs.
 - Driver requests have a default deadline of 30 seconds. An expired request closes the entire connection and cancels its queued operations. Reconnect to continue. Side effects already submitted to the target application cannot be undone.
 - Windows operation budgets are 30 seconds for windows, input and clipboard, and normally 120 seconds for other operations. Recording is limited to ten minutes; result retrieval allows the recording duration plus 120 seconds.
 - Windows accepts up to 16 connections and reserves operation workers for up to eight connections. Unrecoverable operations retain their slots and are recorded in the log.
-- Whole-file reads and retained transfer data are limited to 64 MiB, and each Windows connection can own up to 64 managed processes. Split larger workloads.
+- Whole-file reads and the combined incoming transfer data retained per connection are limited to 64 MiB by default. Set `--max-transfer-size 128` at agent startup to change the limit to a positive integer number of MiB. The same limit applies when retrieving captured stdout or stderr.
+- Each Windows connection can own up to 64 managed processes. Split larger workloads.
 
 Then install agent-rover in your npm project:
 

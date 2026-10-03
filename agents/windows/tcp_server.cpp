@@ -64,7 +64,7 @@ struct ClientSession {
   std::deque<QueuedRequest> requests;
   std::deque<QueuedResponse> output;
   size_t request_bytes = 0, output_bytes = 0;
-  AsyncSignal request_ready, output_ready, output_space;
+  AsyncSignal request_ready, request_space, output_ready, output_space;
   Worker worker;
   cardio::promise<void> lifetime;
 };
@@ -88,6 +88,21 @@ struct ServerState {
 
 static Frame JsonFrame(const std::string& text) { return {FrameKind::Json, {text.begin(), text.end()}}; }
 
+static bool HasRequestSpace(const std::shared_ptr<ClientSession>& session, size_t size) {
+  return session->requests.size() < kMaxRequests &&
+      session->request_bytes + size <= kConnectionQueueBytes &&
+      session->server->request_bytes + size <= kServerQueueBytes;
+}
+
+static void ReleaseRequestBytes(const std::shared_ptr<ClientSession>& session, size_t size) {
+  session->request_bytes -= size;
+  session->server->request_bytes -= size;
+  // Releasing the shared budget can unblock any connection. Keep the snapshot
+  // alive because resolving a signal may run a continuation immediately.
+  const auto sessions = session->server->sessions;
+  for (const auto& waiting : sessions) waiting->request_space.Notify();
+}
+
 static void SetListenStatus(const std::shared_ptr<ServerState>& server, const std::string& status) {
   server->listen_status = status;
   SetAgentGuiStatus(server->gui, status + " | " + server->log_status);
@@ -99,6 +114,7 @@ static void CloseSession(const std::shared_ptr<ClientSession>& session, const st
   session->stop.cancel();
   CloseSocket(session->socket);
   session->request_ready.Notify();
+  session->request_space.Notify();
   session->output_ready.Notify();
   session->output_space.Notify();
   PrintAgentLogEvent(CreateAgentConnectionDisconnectedLogEvent(session->id, reason));
@@ -165,15 +181,34 @@ static cardio::promise<Frame> ReceiveFrame(std::shared_ptr<ClientSession> sessio
   FrameHeader header = {};
   std::string error;
   if (!DecodeFrameHeader(bytes, &header, &error)) throw std::runtime_error(error);
-  if (header.payload_length > kMaxJsonPayloadBytes ||
-      session->server->reading_bytes + header.payload_length > kServerQueueBytes)
+  if (header.payload_length > kMaxJsonPayloadBytes)
     throw std::runtime_error("Incoming frame limit exceeded.");
+  const bool reserve_request = idle_allowed &&
+      (header.kind == FrameKind::Binary || header.kind == FrameKind::Json);
+  const size_t request_size = header.payload_length + kFrameHeaderBytes;
+  if (reserve_request) {
+    // Reserve queue space before allocating an operation payload, including the
+    // file.write request after its upload chunks. TCP backpressure lets large
+    // transfers make progress without exceeding either queue budget.
+    while (!HasRequestSpace(session, request_size))
+      co_await session->request_space.Wait(cancelled.get_cancellation());
+    session->request_bytes += request_size;
+    session->server->request_bytes += request_size;
+  }
+  if (session->server->reading_bytes + header.payload_length > kServerQueueBytes) {
+    if (reserve_request) ReleaseRequestBytes(session, request_size);
+    throw std::runtime_error("Incoming frame limit exceeded.");
+  }
   session->server->reading_bytes += header.payload_length;
   Frame frame = {header.kind, {}};
   try {
     frame.payload.resize(header.payload_length);
     co_await ReadSocket(session->socket, frame.payload, cancelled.get_cancellation());
-  } catch (...) { session->server->reading_bytes -= header.payload_length; throw; }
+  } catch (...) {
+    session->server->reading_bytes -= header.payload_length;
+    if (reserve_request) ReleaseRequestBytes(session, request_size);
+    throw;
+  }
   session->server->reading_bytes -= header.payload_length;
   co_return frame;
 }
@@ -220,8 +255,7 @@ static cardio::promise<void> ExecuteRequests(std::shared_ptr<ClientSession> sess
       if (!remaining) {
         PrintAgentLogEvent(context + " phase=expired-before-execution" + Elapsed(request.received));
         if (!request.id.empty()) EnqueueOutput(session, JsonFrame(CreateAgentFailure(request.id, "TIMEOUT", "Operation expired before execution.")));
-        session->request_bytes -= size;
-        session->server->request_bytes -= size;
+        ReleaseRequestBytes(session, size);
         if (request.frame.kind == FrameKind::Binary) { CloseSession(session, "Binary operation expired."); break; }
         continue;
       }
@@ -232,7 +266,7 @@ static cardio::promise<void> ExecuteRequests(std::shared_ptr<ClientSession> sess
       try {
         if (!session->worker) {
           if (session->server->workers >= kMaxWorkers) throw std::runtime_error("Operation worker limit reached.");
-          session->worker = StartOperationWorker(HelperRole::Operations);
+          session->worker = StartOperationWorker(HelperRole::Operations, session->server->options.max_transfer_bytes);
           ++session->server->workers;
         }
         if (UsesDesktop(request.method)) {
@@ -263,8 +297,7 @@ static cardio::promise<void> ExecuteRequests(std::shared_ptr<ClientSession> sess
         }
         if (!request.id.empty()) PrintAgentLogEvent(context + " phase=execution-end" + Elapsed(request.received));
       } catch (const std::exception& error) { failure = error.what(); }
-      session->request_bytes -= size;
-      session->server->request_bytes -= size;
+      ReleaseRequestBytes(session, size);
       if (!failure.empty()) {
         PrintAgentLogEvent(context + " phase=interrupted reason=" + SanitizeAgentLogField(failure) + Elapsed(request.received));
         if (desktop) {
@@ -324,17 +357,13 @@ static cardio::promise<void> ServeClient(std::shared_ptr<ClientSession> session)
         const auto context = RequestContext(session->id, request);
         PrintAgentLogEvent(context + " phase=received");
         if (request.method == "agent.capabilities") {
+          ReleaseRequestBytes(session, request.frame.payload.size() + kFrameHeaderBytes);
           PrintAgentLogEvent(context + " phase=execute");
           EnqueueOutput(session, JsonFrame(CreateCapabilitiesResponse(request.id)), context, request.received);
           PrintAgentLogEvent(context + " phase=succeeded" + Elapsed(request.received));
           continue;
         }
       } else if (request.frame.kind != FrameKind::Binary) throw std::runtime_error("Unexpected frame kind.");
-      const auto size = request.frame.payload.size() + kFrameHeaderBytes;
-      if (session->requests.size() >= kMaxRequests || session->request_bytes + size > kConnectionQueueBytes ||
-          session->server->request_bytes + size > kServerQueueBytes) throw std::runtime_error("Incoming operation queue limit exceeded.");
-      session->request_bytes += size;
-      session->server->request_bytes += size;
       session->requests.push_back(std::move(request));
       session->request_ready.Notify();
     }
@@ -343,7 +372,7 @@ static cardio::promise<void> ServeClient(std::shared_ptr<ClientSession> session)
   co_await sender;
   co_await executor;
   co_await DrainSocket(session->socket);
-  session->server->request_bytes -= session->request_bytes;
+  ReleaseRequestBytes(session, session->request_bytes);
   session->server->output_bytes -= session->output_bytes;
   session->requests.clear();
   session->output.clear();

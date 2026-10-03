@@ -565,6 +565,7 @@ bool ManagedProcessRunning(uint32_t managed_id, bool* running, OperationError* e
 }
 
 bool ReadManagedCapture(uint32_t managed_id, bool stderr_stream,
+                         uint64_t max_transfer_bytes,
                          std::vector<unsigned char>* data, OperationError* error) {
   const auto iterator = g_managed_processes.find(managed_id);
   if (iterator == g_managed_processes.end()) { *error = "Unknown managed process id."; return false; }
@@ -578,7 +579,7 @@ bool ReadManagedCapture(uint32_t managed_id, bool stderr_stream,
     if (!ManagedProcessRunning(managed_id, &running, error)) return false;
     if (running) { *error = MakeOperationError("QueryInformationJobObject", path, ERROR_BUSY); error->stage = "capture"; return false; }
   }
-  return ReadCaptureFileBytes(path, state != WAIT_OBJECT_0, data, error);
+  return ReadCaptureFileBytes(path, state != WAIT_OBJECT_0, max_transfer_bytes, data, error);
 }
 
 bool ReleaseManagedProcess(uint32_t managed_id, OperationError* error) {

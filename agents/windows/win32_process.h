@@ -194,11 +194,13 @@ bool ManagedProcessRunning(uint32_t managed_id, bool* running, OperationError* e
  * Reads a live output snapshot or completed output after the root exits.
  * @param managed_id Managed resource identifier.
  * @param stderr_stream Selects stderr instead of stdout.
+ * @param max_transfer_bytes Maximum capture snapshot size in bytes.
  * @param data Receives UTF-8 capture bytes.
  * @param error Receives busy while descendants still write, or another native failure.
  * @return Whether the selected output is available.
  */
 bool ReadManagedCapture(uint32_t managed_id, bool stderr_stream,
+                         uint64_t max_transfer_bytes,
                          std::vector<unsigned char>* data, OperationError* error);
 
 }  // namespace agent_rover

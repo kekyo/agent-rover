@@ -310,9 +310,8 @@ void CreateBinaryTransferChunks(
               (total_bytes + safe_chunk_size - 1) / safe_chunk_size));
 
   for (uint32_t sequence = 0; sequence < chunk_count; sequence += 1) {
-    const uint32_t start = sequence * safe_chunk_size;
-    const uint32_t end = std::min<uint32_t>(
-        start + safe_chunk_size, static_cast<uint32_t>(total_bytes));
+    const size_t start = static_cast<size_t>(sequence) * safe_chunk_size;
+    const size_t end = start + std::min<size_t>(safe_chunk_size, data.size() - start);
     const bool final = sequence == chunk_count - 1;
     BinaryTransferChunk chunk = {};
     chunk.transfer_id = transfer_id;
@@ -346,8 +345,9 @@ bool AcceptBinaryTransferChunk(
   uint64_t bytes = chunk.data.size();
   for (const auto& entry : store->pending) bytes += entry.second.data.size();
   for (const auto& entry : store->completed) bytes += entry.second.data.size();
-  if (bytes > 64 * 1024 * 1024) {
-    *error = "Binary transfer data exceeds the session limit (64 MiB).";
+  if (bytes > store->max_transfer_bytes) {
+    *error = "Binary transfer data exceeds the session limit (" +
+        std::to_string(store->max_transfer_bytes) + " bytes).";
     return false;
   }
   BinaryTransfer& transfer = store->pending[chunk.transfer_id];
@@ -397,7 +397,7 @@ bool ConsumeBinaryTransfer(
     BinaryTransferStore* store,
     const std::string& transfer_id,
     const std::string& expected_content_type,
-    uint32_t expected_total_bytes,
+    uint64_t expected_total_bytes,
     const std::string& expected_sha256,
     std::vector<unsigned char>* data,
     std::string* error) {

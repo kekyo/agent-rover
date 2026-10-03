@@ -41,13 +41,20 @@ int wmain(int argc, wchar_t** argv) {
     WideCharToMultiByte(CP_UTF8, 0, path, -1, utf8, sizeof(utf8), nullptr, nullptr);
     std::vector<unsigned char> bytes;
     OperationError error;
-    const auto accepted = ReadFileBytes(utf8, &bytes, &error);
-    DeleteFileW(path);
+    const auto accepted = ReadFileBytes(utf8, 64ull * 1024 * 1024, &bytes, &error);
     if (accepted || !bytes.empty()) return 8;
-    const std::vector<unsigned char> expected = {'a', 0, 'b', 0xff};
-    if (!WriteFileBytes(utf8, expected, &error) || !ReadFileBytes(utf8, &bytes, &error)) return 9;
+    if (!ReadFileBytes(utf8, 65ull * 1024 * 1024, &bytes, &error) ||
+        bytes.size() != 64ull * 1024 * 1024 + 1) return 11;
     DeleteFileW(path);
+    const std::vector<unsigned char> expected = {'a', 0, 'b', 0xff};
+    if (!WriteFileBytes(utf8, expected, &error) || !ReadFileBytes(utf8, 4, &bytes, &error)) return 9;
     if (bytes != expected) return 10;
+    bytes.clear();
+    if (ReadFileBytes(utf8, 3, &bytes, &error) || !bytes.empty()) return 12;
+    if (!ReadCaptureFileBytes(utf8, true, 4, &bytes, &error) || bytes != expected) return 13;
+    bytes.clear();
+    if (ReadCaptureFileBytes(utf8, true, 3, &bytes, &error) || !bytes.empty()) return 14;
+    DeleteFileW(path);
   }
   std::puts("bounded native operation passed");
   return 0;

@@ -88,6 +88,20 @@ static bool ReadNext(
   return true;
 }
 
+static bool ParseTransferSize(const std::wstring& value, uint64_t* bytes) {
+  constexpr auto maximum_mib = std::numeric_limits<uint64_t>::max() / kBytesPerMiB;
+  uint64_t mib = 0;
+  for (const auto ch : value) {
+    if (ch < L'0' || ch > L'9') return false;
+    const auto digit = static_cast<uint64_t>(ch - L'0');
+    if (mib > (maximum_mib - digit) / 10) return false;
+    mib = mib * 10 + digit;
+  }
+  if (!mib) return false;
+  *bytes = mib * kBytesPerMiB;
+  return true;
+}
+
 std::wstring QuoteCommandLineArgument(const std::wstring& argument) {
   if (!NeedsQuotes(argument)) {
     return argument;
@@ -192,6 +206,19 @@ AgentCommandLineParseResult ParseAgentCommandLine(
         return ParseFailure(options, error);
       }
       options.host = NarrowAsciiLossy(value);
+      index += 2;
+      continue;
+    }
+    if (argument == L"--max-transfer-size") {
+      std::wstring value;
+      std::wstring error;
+      if (!ReadNext(argc, argv, index, L"--max-transfer-size", &value, &error)) {
+        return ParseFailure(options, error);
+      }
+      if (!ParseTransferSize(value, &options.max_transfer_bytes)) {
+        return ParseFailure(options,
+            L"--max-transfer-size requires a positive integer in MiB that fits in a 64-bit byte count.");
+      }
       index += 2;
       continue;
     }

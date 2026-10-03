@@ -7,6 +7,7 @@
 #define AGENT_ROVER_WINDOWS_OPERATION_WORKER_H
 #include "async_io.h"
 #include "frame.h"
+#include "transfer_limits.h"
 
 namespace agent_rover {
 /** Private IPC message types; never accepted from network clients. */
@@ -41,8 +42,10 @@ struct OperationWorker;
 /** Shared child ownership; all access is dispatcher-confined. */
 using Worker = std::shared_ptr<OperationWorker>;
 /** Starts a private instance of this executable with two unidirectional pipes.
- * @param role Private helper role. @return Owned helper. */
-Worker StartOperationWorker(HelperRole role);
+ * @param role Private helper role.
+ * @param max_transfer_bytes Transfer budget in bytes, a positive multiple of one MiB.
+ * @return Owned helper. */
+Worker StartOperationWorker(HelperRole role, uint64_t max_transfer_bytes = kDefaultMaxTransferBytes);
 /** Sends one message to an isolated worker.
  * @param worker Child. @param message Message retained in the coroutine.
  * @param cancellation Deadline or shutdown signal. @return Completion promise. */
@@ -55,8 +58,10 @@ cardio::promise<WorkerMessage> ReadWorker(Worker worker, cardio::cancellation ca
  * @param worker Child. @return True if native process termination was confirmed. */
 cardio::promise<bool> StopOperationWorker(Worker worker);
 /** Runs the private child protocol. Standard handles carry IPC, never console text.
- * @param probe Whether only capability detection is required. @return Process exit code. */
-int RunOperationWorker(bool probe);
+ * @param probe Whether only capability detection is required.
+ * @param max_transfer_bytes Maximum whole-file read and retained incoming bytes.
+ * @return Process exit code. */
+int RunOperationWorker(bool probe, uint64_t max_transfer_bytes);
 /** Runs private recovery with no access to network commands.
  * @return Exit code after returning an explicit cleanup result. */
 int RunCleanupWorker();

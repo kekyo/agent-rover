@@ -155,12 +155,14 @@ static bool EnsureParentDirectories(
 
 bool ReadFileBytes(
     const std::string& path,
+    uint64_t max_transfer_bytes,
     std::vector<unsigned char>* data,
     OperationError* error) {
-  return ReadCaptureFileBytes(path, false, data, error);
+  return ReadCaptureFileBytes(path, false, max_transfer_bytes, data, error);
 }
 
 bool ReadCaptureFileBytes(const std::string& path, bool allow_writer,
+                          uint64_t max_transfer_bytes,
                           std::vector<unsigned char>* data, OperationError* error) {
   const std::wstring wide_path = Utf8ToWide(path);
   if (wide_path.empty()) {
@@ -178,8 +180,8 @@ bool ReadCaptureFileBytes(const std::string& path, bool allow_writer,
 
   LARGE_INTEGER size = {};
   if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 ||
-      static_cast<unsigned long long>(size.QuadPart) >
-          64ull * 1024 * 1024) {
+      static_cast<uint64_t>(size.QuadPart) > max_transfer_bytes ||
+      static_cast<uint64_t>(size.QuadPart) > data->max_size()) {
     CloseHandle(file);
     *error = "File size is unsupported.";
     return false;

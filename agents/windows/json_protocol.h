@@ -46,7 +46,7 @@ std::string CreateAgentResultLog(const std::string& payload);
  * Handles one JSON request payload.
  *
  * @param payload UTF-8 JSON request payload.
- * @param transfers Binary transfer store used by file.write requests.
+ * @param transfers Incoming transfer store and configured file transfer limit.
  * @param recordings Connection-owned asynchronous video recording state.
  * @param outbound_chunks Receives binary chunks to send before the JSON response.
  * @param outbound_file Receives a file to send after the JSON response.
