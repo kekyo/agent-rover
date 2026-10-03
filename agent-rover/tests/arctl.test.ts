@@ -5,7 +5,10 @@
 
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
@@ -49,6 +52,107 @@ const runArctl = async (args: readonly string[], env: NodeJS.ProcessEnv) =>
   );
 
 describe('arctl', () => {
+  it.each([Buffer.alloc(0), Buffer.from([0, 255, 10, 128, 0, 1])])(
+    'round-trips and overwrites a single file (%j)',
+    async (data) => {
+      const directory = await mkdtemp(join(tmpdir(), 'arctl-file-'));
+      const fake = await startFakeTcpAgent({});
+      const env = {
+        AGENT_ROVER_HOST: fake.host,
+        AGENT_ROVER_PORT: String(fake.port),
+      };
+      const source = join(directory, '日本語 source.bin');
+      const target = join(directory, 'download', 'nested', 'result.bin');
+      const remote = 'C:\\arctl\\deep\\data.bin';
+      try {
+        await writeFile(source, Buffer.from('old'));
+        expect((await runArctl(['put', source, remote], env)).code).toBe(0);
+        await writeFile(source, data);
+        const uploaded = await runArctl(['put', source, remote, '--json'], env);
+        expect(uploaded.code, uploaded.stderr).toBe(0);
+        expect(JSON.parse(uploaded.stdout)).toEqual({
+          command: 'put',
+          result: {
+            source,
+            destination: remote,
+            files: 1,
+            directories: 0,
+            bytes: data.length,
+          },
+        });
+        const downloaded = await runArctl(
+          ['get', remote, target, '--json'],
+          env
+        );
+        expect(downloaded.code, downloaded.stderr).toBe(0);
+        expect(JSON.parse(downloaded.stdout).result).toEqual({
+          source: remote,
+          destination: target,
+          files: 1,
+          directories: 0,
+          bytes: data.length,
+        });
+        expect(await readFile(target)).toEqual(data);
+        await writeFile(target, 'old local contents');
+        expect((await runArctl(['get', remote, target], env)).code).toBe(0);
+        expect(await readFile(target)).toEqual(data);
+      } finally {
+        await fake.close();
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it('rejects file/directory collisions and preserves the destination in both directions', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'arctl-file-collision-'));
+    const fake = await startFakeTcpAgent({});
+    const env = {
+      AGENT_ROVER_HOST: fake.host,
+      AGENT_ROVER_PORT: String(fake.port),
+    };
+    const observer = await connectRemoteAgent({
+      host: fake.host,
+      port: fake.port,
+    });
+    try {
+      const source = join(directory, 'source');
+      const destination = join(directory, 'directory');
+      await writeFile(source, 'source bytes');
+      await mkdir(destination);
+      await writeFile(join(destination, 'keep'), 'local keeper');
+      await observer.files.writeFile('C:/file', Buffer.from('remote file'));
+      await observer.files.writeFile(
+        'C:/directory/keep',
+        Buffer.from('remote keeper')
+      );
+      for (const args of [
+        ['put', source, 'C:/directory'],
+        ['get', 'C:/file', destination],
+        ['put', destination, 'C:/file'],
+        ['get', 'C:/directory', source],
+      ]) {
+        const result = await runArctl(args, env);
+        expect(result.code, JSON.stringify(args)).toBe(1);
+        expect(result.stdout).toBe('');
+        expect(result.stderr).not.toBe('');
+      }
+      expect(await readFile(join(destination, 'keep'), 'utf8')).toBe(
+        'local keeper'
+      );
+      expect(await readFile(source, 'utf8')).toBe('source bytes');
+      expect(
+        (await observer.files.readFile('C:/directory/keep')).toString()
+      ).toBe('remote keeper');
+      expect((await observer.files.readFile('C:/file')).toString()).toBe(
+        'remote file'
+      );
+    } finally {
+      observer.release();
+      await fake.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it.each([['--help'], ['windows', '--help'], ['--version']])(
     'runs %j without a connection',
     async (...args) => {

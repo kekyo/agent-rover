@@ -16,6 +16,11 @@ export type ArctlOperation =
   | {
       /** Launch an independently owned application. */ readonly command: 'launch';
       /** Remote executable and its launch settings. */ readonly options: RemoteApplicationLaunchOptions;
+    }
+  | {
+      /** Transfer direction. */ readonly command: 'put' | 'get';
+      /** Exact source path. */ readonly source: string;
+      /** Exact destination path. */ readonly destination: string;
     };
 
 /** Parsed invocation of the standalone CLI. */
@@ -152,6 +157,23 @@ export const parseArctlArguments = (
         },
       };
     });
+  for (const command of ['put', 'get'] as const) {
+    program
+      .command(command)
+      .description(
+        `${command === 'put' ? 'Upload local to remote' : 'Download remote to local'}. Specify the exact destination file; existing files are overwritten.`
+      )
+      .argument('<source>', command === 'put' ? 'Local file' : 'Remote file')
+      .argument(
+        '<destination>',
+        command === 'put' ? 'Remote file' : 'Local file'
+      )
+      .action((source: string, destination: string) => {
+        if (source.trim() === '' || destination.trim() === '')
+          throw new Error('Source and destination must not be empty.');
+        operation = { command, source, destination };
+      });
+  }
   try {
     program.parse(args, { from: 'user' });
   } catch (error) {

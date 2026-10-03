@@ -5,7 +5,7 @@
 
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -42,6 +42,19 @@ const arctl = async (args: readonly string[]) =>
       timeout: 30000,
     }
   );
+
+it('round-trips binary and empty files through the Windows file API', async () => {
+  const source = join(directory, '日本語 data.bin');
+  const destination = join(directory, 'get', 'deep', '日本語 data.bin');
+  const remote = `${remoteDirectory}\\put\\nested\\data.bin`;
+  for (const data of [Buffer.from([0, 255, 128, 10, 0]), Buffer.alloc(0)]) {
+    await writeFile(source, data);
+    const uploaded = await arctl(['put', source, remote, '--json']);
+    expect(JSON.parse(uploaded.stdout).result.bytes).toBe(data.length);
+    await arctl(['get', remote, destination]);
+    expect(await readFile(destination)).toEqual(data);
+  }
+});
 
 beforeAll(async () => {
   await exec('make', ['-j4', 'amd64'], { cwd: agentsDirectory });

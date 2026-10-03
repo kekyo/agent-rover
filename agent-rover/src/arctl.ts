@@ -9,12 +9,14 @@ import { connectRemoteAgent } from './driver/connection';
 import { version } from './generated/packageMetadata';
 import { parseArctlArguments } from './cli/arguments';
 import { launchArctlApplication, listArctlWindows } from './cli/commands';
+import { transferArctlFiles } from './cli/files';
 
 const main = async (): Promise<number> => {
   const args = process.argv.slice(2);
   let agent: RemoteAgent | undefined;
   let executing = false;
   let interrupted = false;
+  const interruption = new AbortController();
   const secrets = [process.env.AGENT_ROVER_AUTH_TOKEN];
   for (let index = 0; index < args.length; ++index) {
     const arg = args[index];
@@ -31,6 +33,7 @@ const main = async (): Promise<number> => {
   };
   const onInterrupt = (): void => {
     interrupted = true;
+    interruption.abort();
     if (agent === undefined) {
       // No operation or temporary transfer exists during the handshake. Ending
       // the CLI closes its pending socket even before the SDK returns a handle.
@@ -51,6 +54,22 @@ const main = async (): Promise<number> => {
     executing = true;
     agent = await connectRemoteAgent(parsed.connection);
     if (interrupted) return 130;
+    if (parsed.command === 'put' || parsed.command === 'get') {
+      const result = await transferArctlFiles(
+        agent,
+        parsed.command,
+        parsed.source,
+        parsed.destination,
+        interruption.signal
+      );
+      if (interrupted) return 130;
+      process.stdout.write(
+        parsed.json
+          ? `${JSON.stringify({ command: parsed.command, result })}\n`
+          : `${result.source} -> ${result.destination}\n${result.files} files, ${result.directories} directories, ${result.bytes} bytes\n`
+      );
+      return 0;
+    }
     if (parsed.command === 'launch') {
       const result = await launchArctlApplication(agent, parsed.options);
       if (interrupted) return 130;
