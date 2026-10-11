@@ -90,6 +90,10 @@ it.each([
     message: '--host or AGENT_ROVER_HOST is required.',
   },
   { args: ['--host', ''], message: '--host or AGENT_ROVER_HOST is required.' },
+  {
+    args: ['--host', '  '],
+    message: '--host or AGENT_ROVER_HOST is required.',
+  },
   ...['0', '65536', '1.5'].map((port) => ({
     args: ['--host', 'machine', '--port', port],
     message: '--port must be an integer from 1 through 65535.',

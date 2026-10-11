@@ -332,7 +332,7 @@ export const parseArctlArguments = (
     (values.section === undefined && environment.AGENT_ROVER_HOST !== undefined)
   ) {
     const host = values.host ?? environment.AGENT_ROVER_HOST;
-    if (host === undefined || host.length === 0) {
+    if (host === undefined || host.trim() === '') {
       throw new Error('--host or AGENT_ROVER_HOST is required.');
     }
     const portText = values.port ?? environment.AGENT_ROVER_PORT ?? '39397';
