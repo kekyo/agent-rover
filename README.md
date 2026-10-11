@@ -116,6 +116,20 @@ Start the Windows agent from your interactive desktop. It runs in the system tra
 C:\> agent-amd64.exe
 ```
 
+By default, the agent accepts one driver connection at a time.
+While a driver is connected, later connections receive `AGENT_BUSY` and are closed.
+The agent remains busy during authentication and while stopping the previous
+connection's operations and owned applications after disconnection.
+Drivers retry by default, up to 360 times at ten-second intervals.
+
+To retain the previous behavior of accepting multiple connections, start the
+agent with `--connection-mode multiple`. Use `--connection-mode single` to
+explicitly select the default.
+
+```cmd
+C:\> agent-amd64.exe --connection-mode multiple
+```
+
 Double-click the tray icon or choose “Show logs” to open the viewer.
 The version banner and copyable token field appear above the log list.
 Copy the token into the driver's `authToken` option.
@@ -196,7 +210,8 @@ normally 120 seconds for other operations.
 Recording is limited to ten minutes; result retrieval allows the recording
 duration plus 120 seconds.
 
-Windows accepts up to 16 connections and reserves operation workers for up to
+Windows accepts one connection by default. With `--connection-mode multiple`,
+it accepts up to 16 connections and reserves operation workers for up to
 eight connections. Capture directories are limited to 64 connections, including
 active and pending recovery.
 At capacity, new captures and recordings cannot start; operations that do not
@@ -301,13 +316,22 @@ and `$env:AGENT_ROVER_AUTH_TOKEN = '...'`.
 | `--host <HOST>` | `AGENT_ROVER_HOST` | Required through either setting. |
 | `--port <PORT>` | `AGENT_ROVER_PORT` | `39397`; an integer from 1 to 65535. |
 | `--token <TOKEN>` | `AGENT_ROVER_AUTH_TOKEN` | Authentication token; optional for agents without authentication. |
-| `--timeout <SECONDS>` | None | Connection and individual request deadline; defaults to 30 seconds. |
+| `--timeout <SECONDS>` | None | Deadline per connection attempt and individual request; defaults to 30 seconds. |
+| `--no-retry` | None | Exit with an error without retrying a busy connection. |
+| `--retry-count <COUNT>` | None | Maximum retries after the initial attempt; defaults to `360`. `0` disables retries. |
+| `--retry-interval <SECONDS>` | None | Delay between retries; defaults to `10` seconds. Accepts 0 to 2147483.647 seconds in millisecond increments. |
 | `--json` | None | Prints success as `{"command":"...","result":...}`. |
 
 Common options can precede or follow the subcommand and override environment variables.
 The recording duration itself is separate from the request deadline.
 `--timeout` accepts 0.001 to 2147483.647 seconds, matching the
 [Node.js timer range](https://nodejs.org/docs/latest-v24.x/api/timers.html#settimeoutcallback-delay-args).
+
+Connections to busy agents are attempted up to 361 times, including the initial attempt.
+For example, `--retry-count 12 --retry-interval 5` retries up to 12 times at
+five-second intervals after the first rejection.
+`--no-retry` overrides the count and interval settings. Authentication and
+transport failures are not retried.
 
 ### Command Behavior
 
@@ -383,6 +407,21 @@ In code examples, an already connected `RemoteAgent` is referred to as `agent` w
 
 - Pass the agent `host`, `port`, and, as needed, `authToken` and `timeoutMs` to `connectRemoteAgent()`.
 - If `authToken` is omitted, the `AGENT_ROVER_AUTH_TOKEN` environment variable can also be used.
+
+`retry` defaults to `true`. Only connections rejected because the agent is busy
+are retried, up to 360 times at ten-second intervals.
+The initial attempt is excluded from the retry count, allowing up to 361 attempts.
+Authentication and transport failures are not retried, and established sessions
+are not automatically reconnected after disconnection.
+
+Set the count and interval with, for example,
+`retry: { maxRetries: 12, intervalMs: 5000 }`. Omitted fields use their defaults.
+`maxRetries` must be a nonnegative safe integer; `intervalMs` must be an integer
+from 0 through 2147483647.
+Use `retry: false` or `maxRetries: 0` to disable retries.
+When retries are disabled or exhausted, the error's `RemoteAgentError.code` is
+`AGENT_BUSY`. `timeoutMs` applies to each connection attempt, not the total
+retry wait.
 
 Code example:
 

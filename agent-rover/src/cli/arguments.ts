@@ -58,6 +58,9 @@ interface ConnectionArguments {
   readonly port: string | undefined;
   readonly token: string | undefined;
   readonly timeout: string | undefined;
+  readonly retry: boolean;
+  readonly retryCount: string;
+  readonly retryInterval: string;
   readonly json: boolean | undefined;
 }
 
@@ -94,7 +97,18 @@ export const parseArctlArguments = (
     .option('--token <TOKEN>', 'Authentication token (AGENT_ROVER_AUTH_TOKEN)')
     .option(
       '--timeout <SECONDS>',
-      'Connection and request timeout, 0.001 to 2147483.647 seconds (default 30)'
+      'Timeout per connection attempt and request, 0.001 to 2147483.647 seconds (default 30)'
+    )
+    .option('--no-retry', 'Fail immediately when the agent is busy')
+    .option(
+      '--retry-count <COUNT>',
+      'Maximum retries after the initial busy connection attempt; 0 disables retries',
+      '360'
+    )
+    .option(
+      '--retry-interval <SECONDS>',
+      'Delay between busy connection attempts, 0 to 2147483.647 seconds in millisecond increments',
+      '10'
     )
     .option('--json', 'Print one JSON result on stdout')
     .helpOption('-h, --help', 'Show help without connecting')
@@ -308,6 +322,24 @@ export const parseArctlArguments = (
   }
   if (values.token !== undefined && values.token.length === 0)
     throw new Error('--token must not be empty.');
+  const maxRetries = Number(values.retryCount);
+  if (!/^\d+$/u.test(values.retryCount) || !Number.isSafeInteger(maxRetries)) {
+    throw new Error('--retry-count must be a nonnegative safe integer.');
+  }
+  const scaledInterval = Number(values.retryInterval) * 1000;
+  const intervalMs = Math.round(scaledInterval);
+  if (
+    values.retryInterval.trim() === '' ||
+    !Number.isFinite(scaledInterval) ||
+    scaledInterval < 0 ||
+    scaledInterval > 2147483647 ||
+    Math.abs(scaledInterval - intervalMs) >
+      Number.EPSILON * Math.max(1, Math.abs(scaledInterval)) * 4
+  ) {
+    throw new Error(
+      '--retry-interval must be seconds from 0 through 2147483.647, in millisecond increments.'
+    );
+  }
   const token = values.token ?? environment.AGENT_ROVER_AUTH_TOKEN;
   return {
     action: 'execute',
@@ -317,6 +349,7 @@ export const parseArctlArguments = (
       host,
       port,
       timeoutMs,
+      retry: values.retry ? { maxRetries, intervalMs } : false,
       ...(token === undefined || token === '' ? {} : { authToken: token }),
     },
   };

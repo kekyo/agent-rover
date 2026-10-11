@@ -29,20 +29,46 @@ The agent is a TCP server. The TypeScript driver opens one TCP connection and
 then speaks the agent-rover TCP frame protocol on that stream.
 
 1. The driver connects to the configured host and port.
-2. If the agent requires authentication, the agent immediately sends an
+2. In the default `--connection-mode single`, an existing session prevents
+   admission. The agent sends the `agent.rejected` JSON event below, then closes
+   the socket without an authentication challenge or `agent.ready`.
+3. If the agent requires authentication, the agent immediately sends an
    `AuthChallenge` frame and waits for an `AuthResponse` frame. If
    authentication fails, close the socket without sending `agent.ready`.
-3. If the agent does not require authentication, skip the challenge.
-4. After authentication succeeds, the agent sends the `agent.ready` JSON event.
-5. The driver waits for `agent.ready`, validates `capabilities`, and then starts
+4. If the agent does not require authentication, skip the challenge.
+5. After authentication succeeds, the agent sends the `agent.ready` JSON event.
+6. The driver waits for `agent.ready`, validates `capabilities`, and then starts
    sending request messages.
-6. The connection remains open until either side sends a `Close` frame or the
+7. The connection remains open until either side sends a `Close` frame or the
    socket is closed.
 
-The reference Windows server handles one accepted client at a time, but the wire
-protocol does not require that limitation. A custom agent may support multiple
-simultaneous connections if every connection has its own pending requests and
-binary transfer state.
+The single connection slot is reserved during authentication and until the
+previous connection's operations and owned applications have stopped.
+Independent cleanup of captured files does not retain the slot after that stop.
+`--connection-mode multiple` preserves the previous behavior: up to 16 independent
+connections, with operation workers for up to eight connections. Pending requests
+and binary transfer state are maintained separately for each connection.
+
+The rejection is a regular `Json` frame with this envelope:
+
+```json
+{
+  "kind": "event",
+  "name": "agent.rejected",
+  "data": {
+    "code": "AGENT_BUSY",
+    "message": "Another connection is using this agent."
+  }
+}
+```
+
+Before readiness, the driver recognizes `data.code` as `AGENT_BUSY` and uses the
+string `data.message` as the error message. It closes the rejected attempt and,
+by default, retries up to 360 times at 10000 ms intervals, excluding the initial
+attempt. `connectRemoteAgent({ retry: false, ... })` disables retries;
+`retry: { maxRetries, intervalMs }` customizes them. Exhaustion reports
+`RemoteAgentError.code === 'AGENT_BUSY'`. Other handshake, authentication, and
+transport failures are not retried. Each attempt has its own `timeoutMs` budget.
 
 ## TCP Frame Layer
 
