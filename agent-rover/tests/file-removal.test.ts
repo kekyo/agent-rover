@@ -3,8 +3,9 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+import { connectTestAgent } from './helpers/test-connection';
 import { describe, expect, it } from 'vitest';
-import { connectRemoteAgent } from '../src/index';
+
 import { startFakeTcpAgent } from './helpers/fake-tcp-agent';
 
 describe('bounded file removal', () => {
@@ -35,7 +36,7 @@ describe('bounded file removal', () => {
             }
           : undefined,
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fake.host,
       port: fake.port,
     });
@@ -72,7 +73,7 @@ describe('bounded file removal', () => {
             }
           : undefined,
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fake.host,
       port: fake.port,
     });
@@ -104,7 +105,7 @@ describe('bounded file removal', () => {
             }
           : undefined,
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fake.host,
       port: fake.port,
     });
@@ -147,7 +148,7 @@ describe('bounded file removal', () => {
             }
           : undefined,
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fake.host,
       port: fake.port,
     });

@@ -3,6 +3,7 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+import { connectTestAgent } from './helpers/test-connection';
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { connect as connectTcpSocket, type Socket } from 'node:net';
@@ -10,7 +11,7 @@ import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { expect, it } from 'vitest';
-import { connectRemoteAgent, type RemoteAgent } from '../src/index';
+import { type RemoteAgent } from '../src/index';
 import { waitForResult } from '../src/wait';
 import { nativeTestPaths } from './helpers/native-paths';
 import { connectWindowsBootstrap } from './helpers/windows-bootstrap';
@@ -124,7 +125,7 @@ it.skipIf(!enabled)(
       first = await waitForResult(
         async () => {
           try {
-            return await connectRemoteAgent({
+            return await connectTestAgent({
               host: host!,
               port,
               authToken: token,
@@ -140,7 +141,7 @@ it.skipIf(!enabled)(
       );
       await control('hold-logger', String(port));
       expect((await first.capabilities()).platform).toBe('windows');
-      second = await connectRemoteAgent({
+      second = await connectTestAgent({
         host: host!,
         port,
         authToken: token,
@@ -249,7 +250,7 @@ it.skipIf(!enabled)(
       })();
       await control('entered', unique);
       expect((await first.capabilities()).platform).toBe('windows');
-      second = await connectRemoteAgent({
+      second = await connectTestAgent({
         host: host!,
         port,
         authToken: token,
@@ -316,7 +317,7 @@ it.skipIf(!enabled)(
       first = await waitForResult(
         async () => {
           try {
-            return await connectRemoteAgent({
+            return await connectTestAgent({
               host: host!,
               port,
               authToken: token,
@@ -333,7 +334,7 @@ it.skipIf(!enabled)(
       await control('inspect', String(port));
       // The default single mode also applies when logging is unavailable.
       await expect(
-        connectRemoteAgent({
+        connectTestAgent({
           host: host!,
           port,
           authToken: token,
@@ -343,7 +344,7 @@ it.skipIf(!enabled)(
       expect((await first.capabilities()).platform).toBe('windows');
       first.release();
       first = undefined;
-      second = await connectRemoteAgent({
+      second = await connectTestAgent({
         host: host!,
         port,
         authToken: token,

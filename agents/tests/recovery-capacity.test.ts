@@ -4,7 +4,8 @@ import { resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { promisify } from 'node:util';
 import { expect, it } from 'vitest';
-import { connectRemoteAgent } from '../../agent-rover/src/driver/connection';
+
+import { connectTestAgent } from '../../agent-rover/tests/helpers/test-connection';
 import { waitForResult } from '../../agent-rover/src/wait';
 
 const root = resolve(import.meta.dirname, '..');
@@ -53,8 +54,8 @@ it('keeps control operations available at capture recovery capacity and recovers
     Symbol.asyncIterator
   ]();
   const connect = async () =>
-    await connectRemoteAgent({ host: '127.0.0.1', port, timeoutMs: 10000 });
-  let agent: Awaited<ReturnType<typeof connectRemoteAgent>> | undefined;
+    await connectTestAgent({ host: '127.0.0.1', port, timeoutMs: 10000 });
+  let agent: Awaited<ReturnType<typeof connectTestAgent>> | undefined;
   let holderPid: string | undefined;
   try {
     holderPid = (await lines.next()).value!.match(/holder=(\d+)/u)![1];

@@ -63,12 +63,15 @@ The rejection is a regular `Json` frame with this envelope:
 ```
 
 Before readiness, the driver recognizes `data.code` as `AGENT_BUSY` and uses the
-string `data.message` as the error message. It closes the rejected attempt and,
-by default, retries up to 360 times at 10000 ms intervals, excluding the initial
-attempt. `connectRemoteAgent({ retry: false, ... })` disables retries;
-`retry: { maxRetries, intervalMs }` customizes them. Exhaustion reports
-`RemoteAgentError.code === 'AGENT_BUSY'`. Other handshake, authentication, and
-transport failures are not retried. Each attempt has its own `timeoutMs` budget.
+string `data.message` as the error message. It closes the rejected connection
+and tries the next candidate in the selected `.agent-rover` section immediately.
+Authentication, handshake, and transport failures also advance to the next
+candidate. After every candidate fails, the driver waits 10000 ms and shuffles
+again, for up to 360 additional rounds by default.
+`connectRemoteAgent({ retry: false })` allows one complete round;
+`retry: { maxRetries, intervalMs }` controls additional rounds and their delay.
+Exhaustion preserves a shared error code, or reports `CONNECTION_FAILED` when
+codes differ. Each attempt has its own `timeoutMs` budget.
 
 ## TCP Frame Layer
 
@@ -121,9 +124,11 @@ other use should close the connection.
 ## Authentication
 
 Authentication is optional. The native Windows agent enables it by default and
-shows the token in the tray log viewer, above the log list. The driver sends a token through
-`connectRemoteAgent({ authToken })` or through the `AGENT_ROVER_AUTH_TOKEN`
-environment variable.
+shows the token in the tray log viewer, above the log list. On the driver machine,
+register each endpoint and its token as `host[:port]=token` in a section of
+`$HOME/.agent-rover`. The driver selects a section with
+`connectRemoteAgent({ section: 'windows' })`; omission selects `default`.
+An empty value explicitly selects unauthenticated access.
 
 The native Windows agent defaults to `--host 0.0.0.0`, `--port 39397`, and
 authentication enabled. `--no-auth` or `-n` disables authentication.

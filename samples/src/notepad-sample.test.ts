@@ -13,17 +13,7 @@ import { describe, expect, it } from 'vitest';
 
 type WaitForResult = typeof waitForResult;
 
-interface SampleConnection {
-  readonly authToken: string;
-  readonly host: string;
-  readonly port: number;
-}
-
-const requiredConnectionEnvironment = [
-  'AGENT_ROVER_SAMPLE_AUTH_TOKEN',
-  'AGENT_ROVER_SAMPLE_HOST',
-  'AGENT_ROVER_SAMPLE_PORT',
-] as const;
+const section = process.env.AGENT_ROVER_SAMPLE_SECTION ?? '';
 
 const remoteDirectory = String.raw`C:\agent-rover\sample`;
 const remoteFilePath = String.raw`C:\agent-rover\sample\notepad-sample.txt`;
@@ -46,42 +36,6 @@ const formatTimestamp = (date: Date): string =>
 const sampleRootDirectory = (): string =>
   resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-const hasConnectionEnvironment = (): boolean =>
-  requiredConnectionEnvironment.every((name) => {
-    const value = process.env[name];
-    return value !== undefined && value.length >= 1;
-  });
-
-const parseConnection = (): SampleConnection => {
-  const authToken = process.env.AGENT_ROVER_SAMPLE_AUTH_TOKEN;
-  const host = process.env.AGENT_ROVER_SAMPLE_HOST;
-  const portText = process.env.AGENT_ROVER_SAMPLE_PORT;
-
-  if (
-    authToken === undefined ||
-    authToken.length < 1 ||
-    host === undefined ||
-    host.length < 1 ||
-    portText === undefined ||
-    portText.length < 1
-  ) {
-    throw new Error(
-      `Set ${requiredConnectionEnvironment.join(', ')} to run this sample.`
-    );
-  }
-
-  const port = Number.parseInt(portText, 10);
-  if (!Number.isSafeInteger(port) || port < 1) {
-    throw new Error('AGENT_ROVER_SAMPLE_PORT must be a positive integer.');
-  }
-
-  return {
-    authToken,
-    host,
-    port,
-  };
-};
-
 const waitForRemoteFile = async (
   agent: RemoteAgent,
   path: string,
@@ -102,11 +56,10 @@ const waitForRemoteFile = async (
   );
 };
 
-const remoteAgentIt = hasConnectionEnvironment() ? it : it.skip;
+const remoteAgentIt = section.trim() !== '' ? it : it.skip;
 
 describe('notepad sample', () => {
   remoteAgentIt('edits a remote Notepad file through agent-rover', async () => {
-    const connection = parseConnection();
     const [{ connectRemoteAgent }, { expectCapture, waitForResult }] =
       await Promise.all([import('agent-rover'), import('agent-rover/testing')]);
 
@@ -120,9 +73,7 @@ describe('notepad sample', () => {
     });
 
     const agent = await connectRemoteAgent({
-      host: connection.host,
-      port: connection.port,
-      authToken: connection.authToken,
+      section,
       timeoutMs: 30000,
     });
 

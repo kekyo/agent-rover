@@ -5,7 +5,8 @@ import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { expect, it } from 'vitest';
-import { connectRemoteAgent } from '../../agent-rover/src/driver/connection';
+
+import { connectTestAgent } from '../../agent-rover/tests/helpers/test-connection';
 import { waitForResult } from '../../agent-rover/src/wait';
 
 const root = resolve(import.meta.dirname, '..');
@@ -63,9 +64,9 @@ it.each(['amd64', 'i686'])(
     const connect = async () =>
       await waitForResult(
         async () => {
-          let agent: Awaited<ReturnType<typeof connectRemoteAgent>> | undefined;
+          let agent: Awaited<ReturnType<typeof connectTestAgent>> | undefined;
           try {
-            agent = await connectRemoteAgent({
+            agent = await connectTestAgent({
               host: '127.0.0.1',
               port,
               authToken,
@@ -82,7 +83,7 @@ it.each(['amd64', 'i686'])(
         },
         { timeoutMs: 60000 }
       );
-    let agent: Awaited<ReturnType<typeof connectRemoteAgent>> | undefined;
+    let agent: Awaited<ReturnType<typeof connectTestAgent>> | undefined;
     let holder: ReturnType<typeof spawn> | undefined;
     let holderPid: string | undefined;
     try {
@@ -141,7 +142,7 @@ it.each(['amd64', 'i686'])(
       expect(typeof (await agent.clipboard.readText())).toBe('string');
       agent.release();
       agent = undefined;
-      agent = await connectRemoteAgent({
+      agent = await connectTestAgent({
         host: '127.0.0.1',
         port,
         authToken,

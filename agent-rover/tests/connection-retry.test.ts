@@ -3,10 +3,12 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+import { connectTestAgent } from './helpers/test-connection';
 import { EventEmitter } from 'node:events';
 import type { Socket } from 'node:net';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { connectRemoteAgent } from '../src/index';
+
 import { encodeTcpFrame, tcpFrameKindJson } from '../src/driver/tcp-frame';
 import { defaultFakeCapabilities } from './helpers/fake-tcp-agent';
 
@@ -76,7 +78,7 @@ it.each([false, { maxRetries: 0 }])(
   'reports a busy agent without retrying when retry is %j',
   async (retry) => {
     const rejected = expect(
-      connectRemoteAgent({
+      connectTestAgent({
         host: 'test.invalid',
         port: 1,
         timeoutMs: 100,
@@ -84,7 +86,9 @@ it.each([false, { maxRetries: 0 }])(
       })
     ).rejects.toMatchObject({
       code: 'AGENT_BUSY',
-      message: 'Another connection is using this agent.',
+      message: expect.stringContaining(
+        'Another connection is using this agent.'
+      ),
     });
     await Promise.all([rejected, vi.advanceTimersByTimeAsync(100)]);
     expect(state.sockets).toHaveLength(1);
@@ -101,7 +105,7 @@ it('retries at the configured interval and connects when the agent is free', asy
     else
       event(socket, 'agent.ready', { capabilities: defaultFakeCapabilities });
   };
-  const connecting = connectRemoteAgent({
+  const connecting = connectTestAgent({
     host: 'test.invalid',
     port: 1,
     retry: { maxRetries: 2, intervalMs: 250 },
@@ -115,7 +119,7 @@ it('retries at the configured interval and connects when the agent is free', asy
   })();
   await vi.advanceTimersByTimeAsync(0);
   expect(process.stderr.write).toHaveBeenCalledExactlyOnceWith(
-    '[agent-rover] Agent at test.invalid:1 is busy (AGENT_BUSY). Retrying in 0.25s (1/2).\n'
+    'No available agent in section "test". test.invalid:1 (AGENT_BUSY): Another connection is using this agent. Retrying in 0.25s (1/2).\n'
   );
   expect(state.sockets[0]!.destroyed).toBe(true);
   await vi.advanceTimersByTimeAsync(249);
@@ -124,7 +128,7 @@ it('retries at the configured interval and connects when the agent is free', asy
   expect(state.sockets).toHaveLength(2);
   expect(process.stderr.write).toHaveBeenNthCalledWith(
     2,
-    '[agent-rover] Agent at test.invalid:1 is busy (AGENT_BUSY). Retrying in 0.25s (2/2).\n'
+    'No available agent in section "test". test.invalid:1 (AGENT_BUSY): Another connection is using this agent. Retrying in 0.25s (2/2).\n'
   );
   expect(state.sockets[1]!.destroyed).toBe(true);
   await vi.advanceTimersByTimeAsync(250);
@@ -138,7 +142,11 @@ it('retries at the configured interval and connects when the agent is free', asy
 });
 
 it('defaults to 360 retries at ten-second intervals, then reports AGENT_BUSY', async () => {
-  const connecting = connectRemoteAgent({ host: 'test.invalid', port: 1 });
+  const connecting = connectTestAgent({
+    host: 'test.invalid',
+    port: 1,
+    retry: true,
+  });
   const observed = (async () => {
     try {
       return await connecting;
@@ -157,14 +165,14 @@ it('defaults to 360 retries at ten-second intervals, then reports AGENT_BUSY', a
   expect(state.sockets).toHaveLength(361);
   expect(process.stderr.write).toHaveBeenCalledTimes(360);
   expect(process.stderr.write).toHaveBeenLastCalledWith(
-    '[agent-rover] Agent at test.invalid:1 is busy (AGENT_BUSY). Retrying in 10s (360/360).\n'
+    'No available agent in section "test". test.invalid:1 (AGENT_BUSY): Another connection is using this agent. Retrying in 10s (360/360).\n'
   );
   expect(state.sockets.every((socket) => socket.destroyed)).toBe(true);
   expect(vi.getTimerCount()).toBe(0);
 });
 
 it.each(['network', 'authentication', 'invalid rejection'])(
-  'does not retry a %s failure',
+  'does not retry a %s failure when retries are disabled',
   async (failure) => {
     state.open = failure !== 'network';
     state.respond = (socket) => {
@@ -178,7 +186,7 @@ it.each(['network', 'authentication', 'invalid rejection'])(
         });
     };
     const rejected = expect(
-      connectRemoteAgent({ host: 'test.invalid', port: 1, timeoutMs: 100 })
+      connectTestAgent({ host: 'test.invalid', port: 1, timeoutMs: 100 })
     ).rejects.toMatchObject({
       code:
         failure === 'network'
@@ -206,7 +214,7 @@ it.each([
   'rejects invalid retry settings before opening a socket: %j',
   async (retry) => {
     const rejected = expect(
-      connectRemoteAgent({
+      connectTestAgent({
         host: 'test.invalid',
         port: 1,
         timeoutMs: 100,
@@ -222,7 +230,7 @@ it.each([
 it('sends retry notices to a custom reporter instead of stderr', async () => {
   const onRetry = vi.fn();
   const rejected = expect(
-    connectRemoteAgent({
+    connectTestAgent({
       host: 'test.invalid',
       port: 1,
       retry: { maxRetries: 2, intervalMs: 250 },
@@ -232,10 +240,10 @@ it('sends retry notices to a custom reporter instead of stderr', async () => {
   await Promise.all([rejected, vi.advanceTimersByTimeAsync(500)]);
   expect(onRetry.mock.calls).toEqual([
     [
-      '[agent-rover] Agent at test.invalid:1 is busy (AGENT_BUSY). Retrying in 0.25s (1/2).',
+      'No available agent in section "test". test.invalid:1 (AGENT_BUSY): Another connection is using this agent. Retrying in 0.25s (1/2).',
     ],
     [
-      '[agent-rover] Agent at test.invalid:1 is busy (AGENT_BUSY). Retrying in 0.25s (2/2).',
+      'No available agent in section "test". test.invalid:1 (AGENT_BUSY): Another connection is using this agent. Retrying in 0.25s (2/2).',
     ],
   ]);
   expect(process.stderr.write).not.toHaveBeenCalled();
@@ -244,10 +252,87 @@ it('sends retry notices to a custom reporter instead of stderr', async () => {
 it('does not report waiting when the first connection succeeds', async () => {
   state.respond = (socket) =>
     event(socket, 'agent.ready', { capabilities: defaultFakeCapabilities });
-  const connecting = connectRemoteAgent({ host: 'test.invalid', port: 1 });
+  const connecting = connectTestAgent({ host: 'test.invalid', port: 1 });
   await vi.advanceTimersByTimeAsync(0);
   const agent = await connecting;
   agent.release();
   await vi.advanceTimersByTimeAsync(0);
   expect(process.stderr.write).not.toHaveBeenCalled();
 });
+
+it('preserves explicit busy retry intervals and the legacy notice', async () => {
+  const rejectBusy = state.respond!;
+  state.respond = (socket) => {
+    if (state.sockets.length < 2) rejectBusy(socket);
+    else
+      event(socket, 'agent.ready', { capabilities: defaultFakeCapabilities });
+  };
+  const onRetry = vi.fn();
+  const connecting = connectRemoteAgent({
+    host: 'test.invalid',
+    port: 1,
+    retry: { maxRetries: 1, intervalMs: 250 },
+    onRetry,
+  });
+  const observed = (async () => {
+    try {
+      return await connecting;
+    } catch (error) {
+      return error;
+    }
+  })();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(onRetry).toHaveBeenCalledExactlyOnceWith(
+    '[agent-rover] Agent at test.invalid:1 is busy (AGENT_BUSY). Retrying in 0.25s (1/1).'
+  );
+  expect(state.sockets[0]!.destroyed).toBe(true);
+  await vi.advanceTimersByTimeAsync(249);
+  expect(state.sockets).toHaveLength(1);
+  await vi.advanceTimersByTimeAsync(1);
+  const agent = await connecting;
+  expect(await observed).toBe(agent);
+  agent.release();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(state.sockets).toHaveLength(2);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it.each([false, { maxRetries: 0 }])(
+  'disables explicit busy retries with %j',
+  async (retry) => {
+    const onRetry = vi.fn();
+    const rejected = expect(
+      connectRemoteAgent({ host: 'test.invalid', port: 1, retry, onRetry })
+    ).rejects.toMatchObject({
+      code: 'AGENT_BUSY',
+      message: 'Another connection is using this agent.',
+    });
+    await Promise.all([rejected, vi.advanceTimersByTimeAsync(0)]);
+    expect(state.sockets).toHaveLength(1);
+    expect(state.sockets[0]!.destroyed).toBe(true);
+    expect(onRetry).not.toHaveBeenCalled();
+  }
+);
+
+it.each(['AUTHENTICATION_FAILED', 'HANDSHAKE_FAILED', 'CONNECTION_FAILED'])(
+  'does not retry an explicit connection rejected with %s',
+  async (code) => {
+    state.open = code !== 'CONNECTION_FAILED';
+    state.respond = (socket) => {
+      if (code === 'HANDSHAKE_FAILED') event(socket, 'agent.ready', {});
+      else socket.emit('error', new Error('Rejected.'));
+    };
+    const onRetry = vi.fn();
+    const rejected = expect(
+      connectRemoteAgent({
+        host: 'test.invalid',
+        port: 1,
+        retry: { maxRetries: 2, intervalMs: 10 },
+        onRetry,
+      })
+    ).rejects.toMatchObject({ code });
+    await Promise.all([rejected, vi.advanceTimersByTimeAsync(100)]);
+    expect(state.sockets).toHaveLength(1);
+    expect(onRetry).not.toHaveBeenCalled();
+  }
+);

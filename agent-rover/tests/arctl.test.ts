@@ -3,6 +3,7 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+import { connectTestAgent } from './helpers/test-connection';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { writeFileSync } from 'node:fs';
@@ -22,44 +23,39 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { PNG } from 'pngjs';
 
-import {
-  connectRemoteAgent,
-  type RemoteApplicationLaunchOptions,
-} from '../src/index';
+import { type RemoteApplicationLaunchOptions } from '../src/index';
 
 import { defaultFakeWindow, startFakeTcpAgent } from './helpers/fake-tcp-agent';
 import { encodeTcpFrame, tcpFrameKindJson } from '../src/driver/tcp-frame';
 
+import { createConfigurationFixture } from './helpers/configuration-fixture';
+
 const executable = fileURLToPath(new URL('../dist/arctl.mjs', import.meta.url));
 
-const cliEnvironment = (overrides: NodeJS.ProcessEnv): NodeJS.ProcessEnv => ({
-  ...process.env,
-  AGENT_ROVER_HOST: undefined,
-  AGENT_ROVER_PORT: undefined,
-  AGENT_ROVER_AUTH_TOKEN: undefined,
-  ...overrides,
-});
-
-const runArctl = async (args: readonly string[], env: NodeJS.ProcessEnv) =>
-  await new Promise<{ code: number; stdout: string; stderr: string }>(
-    (resolve, reject) => {
-      execFile(
-        process.execPath,
-        [executable, ...args],
-        {
-          env: cliEnvironment(env),
-          timeout: 20000,
-        },
-        (error, stdout, stderr) => {
-          if (error !== null && typeof error.code !== 'number') {
-            reject(error);
-          } else {
-            resolve({ code: error?.code ?? 0, stdout, stderr });
+const runArctl = async (args: readonly string[], configuration: string) => {
+  const fixture = await createConfigurationFixture(configuration);
+  try {
+    return await new Promise<{ code: number; stdout: string; stderr: string }>(
+      (resolve, reject) => {
+        execFile(
+          process.execPath,
+          [executable, ...args],
+          {
+            cwd: fixture.workingDirectory,
+            env: fixture.environment,
+            timeout: 20000,
+          },
+          (error, stdout, stderr) => {
+            if (error !== null && typeof error.code !== 'number') reject(error);
+            else resolve({ code: error?.code ?? 0, stdout, stderr });
           }
-        }
-      );
-    }
-  );
+        );
+      }
+    );
+  } finally {
+    await fixture.close();
+  }
+};
 
 describe('arctl', () => {
   it.each([
@@ -98,26 +94,26 @@ describe('arctl', () => {
         const address = server.address();
         if (address === null || typeof address === 'string')
           throw new Error('Expected TCP address.');
-        const result = await runArctl(['windows', ...args], {
-          AGENT_ROVER_HOST: '127.0.0.1',
-          AGENT_ROVER_PORT: String(address.port),
-        });
+        const result = await runArctl(
+          ['windows', ...args],
+          `[default]\n127.0.0.1:${address.port}=\n`
+        );
         expect(result.code, result.stderr).toBe(1);
         expect(result.stderr).toContain('AGENT_BUSY');
         const notices = Array.from(
           { length: attempts - 1 },
           (_, index) =>
-            `[agent-rover] Agent at 127.0.0.1:${address.port} is busy (AGENT_BUSY). Retrying in 0.001s (${index + 1}/${attempts - 1}).\n`
+            `No available agent in section "default". 127.0.0.1:${address.port} (AGENT_BUSY): Another connection is using this agent. Retrying in 0.001s (${index + 1}/${attempts - 1}).\n`
         ).join('');
         if (args.includes('--json')) {
           expect(result.stdout).toBe('');
           expect(result.stderr).toBe(
-            `${notices}arctl: AGENT_BUSY: Another connection is using this agent.\n`
+            `${notices}arctl: AGENT_BUSY: No available agent in section "default". 127.0.0.1:${address.port} (AGENT_BUSY): Another connection is using this agent.\n`
           );
         } else {
           expect(result.stdout).toBe(notices);
           expect(result.stderr).toBe(
-            'arctl: AGENT_BUSY: Another connection is using this agent.\n'
+            `arctl: AGENT_BUSY: No available agent in section "default". 127.0.0.1:${address.port} (AGENT_BUSY): Another connection is using this agent.\n`
           );
         }
         expect(connections).toBe(attempts);
@@ -140,11 +136,7 @@ describe('arctl', () => {
       try {
         const result = await runArctl(
           ['windows', ...(json ? ['--json'] : [])],
-          {
-            AGENT_ROVER_HOST: fake.host,
-            AGENT_ROVER_PORT: String(fake.port),
-            AGENT_ROVER_AUTH_TOKEN: token,
-          }
+          `[default]\n${fake.host}:${fake.port}=${token}\n`
         );
         expect(result.code).toBe(0);
         expect(result.stdout).not.toContain(token);
@@ -181,7 +173,7 @@ describe('arctl', () => {
             '--json',
             ...(windowId === undefined ? [] : ['--window', windowId]),
           ],
-          { AGENT_ROVER_HOST: fake.host, AGENT_ROVER_PORT: String(fake.port) }
+          `[default]\n${fake.host}:${fake.port}=\n`
         );
         expect(result.code, result.stderr).toBe(0);
         expect(result.stderr).toBe('');
@@ -214,10 +206,7 @@ describe('arctl', () => {
         return undefined;
       },
     });
-    const env = {
-      AGENT_ROVER_HOST: fake.host,
-      AGENT_ROVER_PORT: String(fake.port),
-    };
+    const configuration = `[default]\n${fake.host}:${fake.port}=\n`;
     try {
       await writeFile(path, 'keep original');
       for (const args of [
@@ -225,7 +214,7 @@ describe('arctl', () => {
         ['screenshot', join(path, 'nested.png')],
         ['screenshot', join(directory, 'invalid.png'), '--window', '0xmissing'],
       ]) {
-        const result = await runArctl(args, env);
+        const result = await runArctl(args, configuration);
         expect(result.code, result.stderr).toBe(1);
         expect(result.stdout).toBe('');
       }
@@ -250,10 +239,10 @@ describe('arctl', () => {
       },
     });
     try {
-      const result = await runArctl(['screenshot', path], {
-        AGENT_ROVER_HOST: fake.host,
-        AGENT_ROVER_PORT: String(fake.port),
-      });
+      const result = await runArctl(
+        ['screenshot', path],
+        `[default]\n${fake.host}:${fake.port}=\n`
+      );
       expect(result.code).toBe(1);
       expect(result.stdout).toBe('');
       expect(await readFile(path, 'utf8')).toBe('competing output');
@@ -266,11 +255,8 @@ describe('arctl', () => {
   it('recursively copies directory contents including empty directories, preserving extra entries', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'arctl-tree-'));
     const fake = await startFakeTcpAgent({});
-    const env = {
-      AGENT_ROVER_HOST: fake.host,
-      AGENT_ROVER_PORT: String(fake.port),
-    };
-    const observer = await connectRemoteAgent({
+    const configuration = `[default]\n${fake.host}:${fake.port}=\n`;
+    const observer = await connectTestAgent({
       host: fake.host,
       port: fake.port,
     });
@@ -292,7 +278,7 @@ describe('arctl', () => {
       );
       const put = await runArctl(
         ['put', '-r', source + '/', 'C:/tree/', '--json'],
-        env
+        configuration
       );
       expect(put.code, put.stderr).toBe(0);
       expect(JSON.parse(put.stdout).result).toMatchObject({
@@ -311,7 +297,7 @@ describe('arctl', () => {
       ).toBe('remote keeper');
       const get = await runArctl(
         ['get', 'C:/tree/', target + '/', '-r', '--json'],
-        env
+        configuration
       );
       expect(get.code, get.stderr).toBe(0);
       expect(JSON.parse(get.stdout).result).toMatchObject({
@@ -333,7 +319,7 @@ describe('arctl', () => {
         ['put', '-r', join(source, 'zero'), 'C:/bad'],
         ['get', '-r', 'C:/tree/zero', join(target, 'bad')],
       ]) {
-        expect((await runArctl(args, env)).code).toBe(1);
+        expect((await runArctl(args, configuration)).code).toBe(1);
       }
     } finally {
       observer.release();
@@ -368,7 +354,7 @@ describe('arctl', () => {
           return undefined;
         },
       });
-      const observer = await connectRemoteAgent({
+      const observer = await connectTestAgent({
         host: fake.host,
         port: fake.port,
       });
@@ -388,10 +374,10 @@ describe('arctl', () => {
           command === 'put'
             ? ['put', '-r', directory, 'C:/target']
             : ['get', '-r', 'C:/tree', join(directory, 'target')];
-        const result = await runArctl(args, {
-          AGENT_ROVER_HOST: fake.host,
-          AGENT_ROVER_PORT: String(fake.port),
-        });
+        const result = await runArctl(
+          args,
+          `[default]\n${fake.host}:${fake.port}=\n`
+        );
         expect(result.code).toBe(1);
         expect(result.stdout).toBe('');
         expect(result.stderr).toContain('Injected transfer failure');
@@ -414,14 +400,11 @@ describe('arctl', () => {
     async (command) => {
       const directory = await mkdtemp(join(tmpdir(), 'arctl-tree-collision-'));
       const fake = await startFakeTcpAgent({});
-      const observer = await connectRemoteAgent({
+      const observer = await connectTestAgent({
         host: fake.host,
         port: fake.port,
       });
-      const env = {
-        AGENT_ROVER_HOST: fake.host,
-        AGENT_ROVER_PORT: String(fake.port),
-      };
+      const configuration = `[default]\n${fake.host}:${fake.port}=\n`;
       try {
         for (const sourceIsDirectory of [true, false]) {
           const name = sourceIsDirectory ? 'directory-source' : 'file-source';
@@ -442,7 +425,7 @@ describe('arctl', () => {
             command === 'put'
               ? ['put', '-r', local, remote]
               : ['get', '-r', remote, local];
-          const result = await runArctl(args, env);
+          const result = await runArctl(args, configuration);
           expect(result.code, result.stderr).toBe(1);
           expect((await stat(join(local, 'item'))).isDirectory()).toBe(
             (command === 'put') === sourceIsDirectory
@@ -472,18 +455,20 @@ describe('arctl', () => {
     async (data) => {
       const directory = await mkdtemp(join(tmpdir(), 'arctl-file-'));
       const fake = await startFakeTcpAgent({});
-      const env = {
-        AGENT_ROVER_HOST: fake.host,
-        AGENT_ROVER_PORT: String(fake.port),
-      };
+      const configuration = `[default]\n${fake.host}:${fake.port}=\n`;
       const source = join(directory, '日本語 source.bin');
       const target = join(directory, 'download', 'nested', 'result.bin');
       const remote = 'C:\\arctl\\deep\\data.bin';
       try {
         await writeFile(source, Buffer.from('old'));
-        expect((await runArctl(['put', source, remote], env)).code).toBe(0);
+        expect(
+          (await runArctl(['put', source, remote], configuration)).code
+        ).toBe(0);
         await writeFile(source, data);
-        const uploaded = await runArctl(['put', source, remote, '--json'], env);
+        const uploaded = await runArctl(
+          ['put', source, remote, '--json'],
+          configuration
+        );
         expect(uploaded.code, uploaded.stderr).toBe(0);
         expect(JSON.parse(uploaded.stdout)).toEqual({
           command: 'put',
@@ -497,7 +482,7 @@ describe('arctl', () => {
         });
         const downloaded = await runArctl(
           ['get', remote, target, '--json'],
-          env
+          configuration
         );
         expect(downloaded.code, downloaded.stderr).toBe(0);
         expect(JSON.parse(downloaded.stdout).result).toEqual({
@@ -509,7 +494,9 @@ describe('arctl', () => {
         });
         expect(await readFile(target)).toEqual(data);
         await writeFile(target, 'old local contents');
-        expect((await runArctl(['get', remote, target], env)).code).toBe(0);
+        expect(
+          (await runArctl(['get', remote, target], configuration)).code
+        ).toBe(0);
         expect(await readFile(target)).toEqual(data);
       } finally {
         await fake.close();
@@ -521,11 +508,8 @@ describe('arctl', () => {
   it('rejects file/directory collisions and preserves the destination in both directions', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'arctl-file-collision-'));
     const fake = await startFakeTcpAgent({});
-    const env = {
-      AGENT_ROVER_HOST: fake.host,
-      AGENT_ROVER_PORT: String(fake.port),
-    };
-    const observer = await connectRemoteAgent({
+    const configuration = `[default]\n${fake.host}:${fake.port}=\n`;
+    const observer = await connectTestAgent({
       host: fake.host,
       port: fake.port,
     });
@@ -546,7 +530,7 @@ describe('arctl', () => {
         ['put', destination, 'C:/file'],
         ['get', 'C:/directory', source],
       ]) {
-        const result = await runArctl(args, env);
+        const result = await runArctl(args, configuration);
         expect(result.code, JSON.stringify(args)).toBe(1);
         expect(result.stdout).toBe('');
         expect(result.stderr).not.toBe('');
@@ -571,9 +555,7 @@ describe('arctl', () => {
   it.each([['--help'], ['windows', '--help'], ['--version']])(
     'runs %j without a connection',
     async (...args) => {
-      const result = await runArctl(args, {
-        AGENT_ROVER_HOST: 'unused.invalid',
-      });
+      const result = await runArctl(args, `[default]\nunused.invalid:39397=\n`);
       expect(result.code).toBe(0);
       expect(result.stderr).toBe('');
       expect(result.stdout).toMatch(
@@ -582,60 +564,51 @@ describe('arctl', () => {
     }
   );
 
-  it('authenticates using explicit settings before and after the command', async () => {
+  it.each([true, false])(
+    'authenticates using a named section before or after the command (%s)',
+    async (before) => {
+      const fake = await startFakeTcpAgent({
+        authToken: 'explicit-test-token',
+        windows: [
+          defaultFakeWindow,
+          { ...defaultFakeWindow, id: '0x1002', visible: false },
+        ],
+      });
+      try {
+        const result = await runArctl(
+          before
+            ? ['--section', 'ci.windows', 'windows', '--json']
+            : ['windows', '--section', 'ci.windows', '--json'],
+          `[default]\nunused.invalid=wrong-token\n[ci.windows]\n${fake.host}:${fake.port}=explicit-test-token\n`
+        );
+        expect(result.code).toBe(0);
+        expect(result.stderr).toBe('');
+        expect(JSON.parse(result.stdout)).toEqual({
+          command: 'windows',
+          result: [
+            {
+              id: defaultFakeWindow.id,
+              pid: defaultFakeWindow.process.id,
+              processName: defaultFakeWindow.process.name,
+              title: defaultFakeWindow.title,
+            },
+          ],
+        });
+      } finally {
+        await fake.close();
+      }
+    }
+  );
+
+  it('uses the default section and displays readable window results', async () => {
     const fake = await startFakeTcpAgent({
-      authToken: 'explicit-test-token',
-      windows: [
-        defaultFakeWindow,
-        { ...defaultFakeWindow, id: '0x1002', visible: false },
-      ],
+      authToken: 'default-test-token',
     });
     try {
       const result = await runArctl(
-        [
-          '--host',
-          fake.host,
-          'windows',
-          '--port',
-          String(fake.port),
-          '--token',
-          'explicit-test-token',
-          '--json',
-        ],
-        {
-          AGENT_ROVER_HOST: 'unused.invalid',
-          AGENT_ROVER_PORT: 'invalid',
-          AGENT_ROVER_AUTH_TOKEN: 'wrong-test-token',
-        }
+        ['windows'],
+        `[default]\n${fake.host}:${fake.port}=default-test-token\n`
       );
-      expect(result.code).toBe(0);
-      expect(result.stderr).toBe('');
-      expect(JSON.parse(result.stdout)).toEqual({
-        command: 'windows',
-        result: [
-          {
-            id: defaultFakeWindow.id,
-            pid: defaultFakeWindow.process.id,
-            processName: defaultFakeWindow.process.name,
-            title: defaultFakeWindow.title,
-          },
-        ],
-      });
-    } finally {
-      await fake.close();
-    }
-  });
-
-  it('uses environment settings and displays readable window results', async () => {
-    const fake = await startFakeTcpAgent({
-      authToken: 'environment-test-token',
-    });
-    try {
-      const result = await runArctl(['windows'], {
-        AGENT_ROVER_HOST: fake.host,
-        AGENT_ROVER_PORT: String(fake.port),
-        AGENT_ROVER_AUTH_TOKEN: 'environment-test-token',
-      });
       expect(result.code).toBe(0);
       expect(result.stdout).toContain(defaultFakeWindow.id);
       expect(result.stdout).toContain(defaultFakeWindow.process.name);
@@ -651,8 +624,8 @@ describe('arctl', () => {
     const fake = await startFakeTcpAgent({ windows: [] });
     try {
       const result = await runArctl(
-        ['windows', '--host', fake.host, '--port', String(fake.port), '--json'],
-        {}
+        ['windows', '--json'],
+        `[default]\n${fake.host}:${fake.port}=\n`
       );
       expect(result.code).toBe(0);
       expect(JSON.parse(result.stdout)).toEqual({
@@ -682,18 +655,16 @@ describe('arctl', () => {
         ['unknown'],
         ['windows', 'extra'],
         ['windows', '--unknown'],
-        ['windows', '--host', ''],
-        ['windows', '--port', '0'],
-        ['windows', '--port', '65536'],
-        ['windows', '--port', '1.5'],
+        ['windows', '--section', ''],
+        ['windows', '--section', 'missing'],
         ['windows', '--timeout', '0'],
         ['windows', '--timeout', 'NaN'],
-        ['windows', '--token'],
+        ['windows', '--section'],
       ]) {
-        const result = await runArctl(args, {
-          AGENT_ROVER_HOST: '127.0.0.1',
-          AGENT_ROVER_PORT: String(address.port),
-        });
+        const result = await runArctl(
+          args,
+          `[default]\n127.0.0.1:${address.port}=\n`
+        );
         expect(result.code, JSON.stringify(args)).toBe(2);
         expect(result.stdout).toBe('');
         expect(result.stderr).not.toBe('');
@@ -719,11 +690,10 @@ describe('arctl', () => {
       }),
     });
     try {
-      const result = await runArctl(['windows', '--json'], {
-        AGENT_ROVER_HOST: fake.host,
-        AGENT_ROVER_PORT: String(fake.port),
-        AGENT_ROVER_AUTH_TOKEN: token,
-      });
+      const result = await runArctl(
+        ['windows', '--json'],
+        `[default]\n${fake.host}:${fake.port}=${token}\n`
+      );
       expect(result.code).toBe(1);
       expect(result.stdout).toBe('');
       expect(result.stderr).toContain('OPERATION_FAILED');
@@ -745,17 +715,13 @@ describe('arctl', () => {
       'a"b',
       '',
       '--help',
-      '--host',
-      'child-host',
+      '--section',
+      'child-section',
     ];
     try {
       const result = await runArctl(
         [
           'launch',
-          '--host',
-          fake.host,
-          '--port',
-          String(fake.port),
           '--json',
           '--cwd',
           'C:\\work space',
@@ -773,7 +739,7 @@ describe('arctl', () => {
           'C:\\work space\\app.exe',
           ...arguments_,
         ],
-        {}
+        `[default]\n${fake.host}:${fake.port}=\n`
       );
       expect(result.code, result.stderr).toBe(0);
       expect(result.stderr).toBe('');
@@ -790,7 +756,7 @@ describe('arctl', () => {
           stderrPath: 'C:\\work space\\stderr.log',
         },
       ]);
-      const observer = await connectRemoteAgent({
+      const observer = await connectTestAgent({
         host: fake.host,
         port: fake.port,
       });
@@ -818,15 +784,15 @@ describe('arctl', () => {
       disconnectAfterRequest: ['applications.launch'],
     });
     try {
-      const result = await runArctl(['launch', '--', 'app.exe'], {
-        AGENT_ROVER_HOST: fake.host,
-        AGENT_ROVER_PORT: String(fake.port),
-      });
+      const result = await runArctl(
+        ['launch', '--', 'app.exe'],
+        `[default]\n${fake.host}:${fake.port}=\n`
+      );
       expect(result.code).toBe(1);
       expect(result.stdout).toBe('');
       expect(result.stderr).toContain('outcome is unknown');
       expect(launches).toHaveLength(1);
-      const observer = await connectRemoteAgent({
+      const observer = await connectTestAgent({
         host: fake.host,
         port: fake.port,
       });
@@ -849,13 +815,11 @@ describe('arctl', () => {
       ['launch', '--env', 'MISSING_VALUE', '--', 'app.exe'],
       ['launch', '--cwd', '', '--', 'app.exe'],
     ]) {
-      const result = await runArctl(args, {
-        AGENT_ROVER_HOST: 'unused.invalid',
-      });
+      const result = await runArctl(args, `[default]\nunused.invalid:39397=\n`);
       expect(result.code, JSON.stringify(args)).toBe(2);
       expect(result.stdout).toBe('');
     }
-    const help = await runArctl(['launch', '--help'], {});
+    const help = await runArctl(['launch', '--help'], '');
     expect(help.code).toBe(0);
     expect(help.stdout).toContain('--env');
     expect(help.stdout).toContain('-- <command>');
@@ -869,12 +833,13 @@ describe('arctl', () => {
     const address = server.address();
     if (address === null || typeof address === 'string')
       throw new Error('Expected a TCP listener.');
+    const fixture = await createConfigurationFixture(
+      `[default]\n127.0.0.1:${address.port}=\n`
+    );
     const connected = once(server, 'connection');
     const child = spawn(process.execPath, [executable, 'windows'], {
-      env: cliEnvironment({
-        AGENT_ROVER_HOST: '127.0.0.1',
-        AGENT_ROVER_PORT: String(address.port),
-      }),
+      cwd: fixture.workingDirectory,
+      env: fixture.environment,
       stdio: 'ignore',
     });
     const exited = once(child, 'exit');
@@ -890,6 +855,7 @@ describe('arctl', () => {
         child.kill('SIGKILL');
         await exited;
       }
+      await fixture.close();
       await new Promise<void>((resolve) => {
         server.close(() => {
           resolve();

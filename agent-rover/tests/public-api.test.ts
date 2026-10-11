@@ -3,10 +3,10 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+import { connectTestAgent } from './helpers/test-connection';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 
 import {
-  connectRemoteAgent,
   packageName,
   type CapturedVideoResult,
   type CapturedVideoStream,
@@ -20,7 +20,7 @@ describe('public package entry', () => {
 
   it('exposes directory synchronization methods from the file system API', async () => {
     const fakeAgent = await startFakeTcpAgent({});
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -35,7 +35,7 @@ describe('public package entry', () => {
 
   it('exposes distinct video stream and persisted-file overloads', async () => {
     const fakeAgent = await startFakeTcpAgent({});
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });

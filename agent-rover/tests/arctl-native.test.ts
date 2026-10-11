@@ -3,6 +3,7 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+import { connectTestAgent } from './helpers/test-connection';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import {
@@ -18,13 +19,15 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { PNG } from 'pngjs';
-import { connectRemoteAgent, type RemoteAgent } from '../src/index';
+import { type RemoteAgent } from '../src/index';
 import { waitForResult } from '../src/wait';
 import { nativeTestPaths } from './helpers/native-paths';
 
 const { repositoryDirectory: root, agentsDirectory } = nativeTestPaths(
   import.meta.url
 );
+import { createConfigurationFixture } from './helpers/configuration-fixture';
+
 const exec = promisify(execFile);
 const environment = { ...process.env, WINEDEBUG: '-all' };
 const port = 39751;
@@ -36,20 +39,24 @@ let remoteFixture: string;
 const fixture = join(agentsDirectory, '.build/arctl/launch-amd64.exe');
 const control = join(agentsDirectory, '.build/gui/control-amd64.exe');
 
-const arctl = async (args: readonly string[]) =>
-  await exec(
-    process.execPath,
-    [join(root, 'agent-rover/dist/arctl.mjs'), ...args],
-    {
-      env: {
-        ...environment,
-        AGENT_ROVER_HOST: '127.0.0.1',
-        AGENT_ROVER_PORT: String(port),
-        AGENT_ROVER_AUTH_TOKEN: undefined,
-      },
-      timeout: 30000,
-    }
+const arctl = async (args: readonly string[]) => {
+  const fixture = await createConfigurationFixture(
+    `[default]\n127.0.0.1:${port}=\n`
   );
+  try {
+    return await exec(
+      process.execPath,
+      [join(root, 'agent-rover/dist/arctl.mjs'), ...args],
+      {
+        cwd: fixture.workingDirectory,
+        env: fixture.environment,
+        timeout: 60000,
+      }
+    );
+  } finally {
+    await fixture.close();
+  }
+};
 
 it('round-trips binary and empty files through the Windows file API', async () => {
   const source = join(directory, '日本語 data.bin');
@@ -254,7 +261,7 @@ beforeAll(async () => {
   observer = await waitForResult(
     async () => {
       try {
-        return await connectRemoteAgent({
+        return await connectTestAgent({
           host: '127.0.0.1',
           port,
           timeoutMs: 10000,

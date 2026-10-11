@@ -4,7 +4,8 @@ import { createConnection, type Socket } from 'node:net';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { expect, it } from 'vitest';
-import { connectRemoteAgent } from '../../agent-rover/src/driver/connection';
+
+import { connectTestAgent } from '../../agent-rover/tests/helpers/test-connection';
 import {
   createTcpFrameDecoder,
   tcpFrameKindJson,
@@ -43,7 +44,7 @@ it.each(['amd64', 'i686'])(
       ],
       { env: environment, stdio: 'ignore' }
     );
-    const clients: Awaited<ReturnType<typeof connectRemoteAgent>>[] = [];
+    const clients: Awaited<ReturnType<typeof connectTestAgent>>[] = [];
     const sockets: Socket[] = [];
     try {
       // Reserving the sole slot starts at TCP admission, including authentication.
@@ -68,7 +69,7 @@ it.each(['amd64', 'i686'])(
       );
       const attempts = await Promise.allSettled(
         Array.from({ length: 3 }, async () => {
-          const client = await connectRemoteAgent({
+          const client = await connectTestAgent({
             host: '127.0.0.1',
             port,
             authToken: token,
@@ -107,7 +108,7 @@ it.each(['amd64', 'i686'])(
       expect(owner.destroyed).toBe(false);
       owner.destroy();
 
-      const first = await connectRemoteAgent({
+      const first = await connectTestAgent({
         host: '127.0.0.1',
         port,
         authToken: token,
@@ -125,7 +126,7 @@ it.each(['amd64', 'i686'])(
       });
       expect((await first.capabilities()).platform).toBe('windows');
       await expect(
-        connectRemoteAgent({
+        connectTestAgent({
           host: '127.0.0.1',
           port,
           authToken: token,
@@ -134,7 +135,7 @@ it.each(['amd64', 'i686'])(
       ).rejects.toMatchObject({ code: 'AGENT_BUSY' });
       expect(await first.processes.exists(managed.id)).toBe(true);
       first.release();
-      const next = await connectRemoteAgent({
+      const next = await connectTestAgent({
         host: '127.0.0.1',
         port,
         authToken: token,

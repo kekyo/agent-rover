@@ -1286,33 +1286,45 @@ export interface RemoteAgent extends Releaseable {
   ) => Promise<void>;
 }
 
-/** Retry settings for connections rejected because the agent is already in use. */
+/** Retry settings for section rounds or explicit connections rejected as busy. */
 export interface RemoteConnectionRetryOptions {
-  /** Maximum retries after the initial attempt. Defaults to 360; zero disables retries. */
+  /** Maximum additional section rounds or explicit busy retries. Defaults to 360; zero disables retries. */
   readonly maxRetries?: number;
-  /** Delay after each rejection in milliseconds. Defaults to 10000; must be an integer from 0 through 2147483647. */
+  /** Delay between section rounds or explicit busy retries in milliseconds. Defaults to 10000; must be an integer from 0 through 2147483647. */
   readonly intervalMs?: number;
 }
 
 /** Options used to connect to a remote agent. */
 export interface ConnectRemoteAgentOptions {
-  /** Agent host name, FQDN, or IP address. */
-  readonly host: string;
-  /** Agent TCP port. */
-  readonly port: number;
-  /** Token printed by the agent process. Overrides AGENT_ROVER_AUTH_TOKEN. */
-  readonly authToken?: string;
+  /**
+   * Section in .agent-rover. Defaults to default.
+   * @remarks Searches the working directory first, then the user's home if the
+   * file or section is absent. An empty section or invalid file is an error.
+   * Cannot be combined with host, port, or authToken.
+   */
+  readonly section?: string;
+  /** Explicit agent host name, FQDN, or IP address. Requires port and excludes section. Bypasses .agent-rover. */
+  readonly host?: string;
+  /** Explicit TCP port from 1 through 65535. Requires host and excludes section. */
+  readonly port?: number;
+  /**
+   * Explicit connection token. Requires host and port and excludes section.
+   * @remarks Overrides AGENT_ROVER_AUTH_TOKEN. An empty string disables authentication.
+   * Section-based connections use only their configured credentials.
+   */
+  readonly authToken?: string | undefined;
   /** Timeout for each connection attempt and each request, in milliseconds. */
   readonly timeoutMs?: number;
   /**
-   * Retry connections rejected with AGENT_BUSY. Defaults to true.
-   * @remarks True uses 360 retries at 10000 ms intervals. False disables retries.
-   * Authentication, transport, and other handshake errors are never retried.
+   * Retry complete shuffled rounds when every candidate fails. Defaults to true.
+   * @remarks True uses 360 additional rounds at 10000 ms intervals. False tries one round.
+   * Busy, authentication, transport, and handshake failures advance to the next candidate.
+   * Explicit connections preserve the legacy behavior: only AGENT_BUSY is retried.
    */
   readonly retry?: boolean | RemoteConnectionRetryOptions;
   /**
-   * Reports each busy-connection retry before its delay begins.
-   * @param message Human-readable notice with the target, retry count, and delay, without a trailing newline.
+   * Reports each section round or explicit busy retry before its delay begins.
+   * @param message Human-readable notice with the section or explicit target, retry count, and delay, without credentials or a trailing newline.
    * @remarks Defaults to writing one line directly to standard error so test runners can display it while waiting.
    * A supplied callback replaces that output. It is not called when no retry will occur.
    */

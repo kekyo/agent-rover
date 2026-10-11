@@ -3,14 +3,15 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+import { connectTestAgent } from './helpers/test-connection';
 import { describe, expect, it } from 'vitest';
-import { connectRemoteAgent } from '../src/index';
+
 import { startFakeTcpAgent } from './helpers/fake-tcp-agent';
 
 describe('managed cleanup completion', () => {
   it('rejects new waits after release has started', async () => {
     const fake = await startFakeTcpAgent({});
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fake.host,
       port: fake.port,
     });
@@ -42,7 +43,7 @@ describe('managed cleanup completion', () => {
             }
           : undefined,
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fake.host,
       port: fake.port,
     });
@@ -84,7 +85,7 @@ describe('managed cleanup completion', () => {
         };
       },
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fake.host,
       port: fake.port,
     });
@@ -129,7 +130,7 @@ describe('managed cleanup completion', () => {
             }
           : undefined,
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fake.host,
       port: fake.port,
     });
@@ -177,7 +178,7 @@ describe('managed cleanup completion', () => {
             }
           : undefined,
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fake.host,
       port: fake.port,
     });
@@ -209,7 +210,7 @@ describe('managed cleanup completion', () => {
 
   it('joins concurrent release and async disposal without double releasing resources', async () => {
     const fake = await startFakeTcpAgent({});
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fake.host,
       port: fake.port,
     });
@@ -237,7 +238,7 @@ describe('managed cleanup completion', () => {
     const fake = await startFakeTcpAgent({
       dropResponses: { 'process.releaseManaged': 1 },
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fake.host,
       port: fake.port,
       timeoutMs: 100,
