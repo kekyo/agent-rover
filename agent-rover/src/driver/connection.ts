@@ -1603,6 +1603,12 @@ export const connectRemoteAgent = async (
   const settings = typeof retry === 'object' ? retry : undefined;
   const maxRetries = retry === false ? 0 : (settings?.maxRetries ?? 360);
   const intervalMs = settings?.intervalMs ?? 10000;
+  const onRetry =
+    options.onRetry ??
+    ((message: string): void => {
+      // Console interception can hide output until a test fails; report waits live.
+      process.stderr.write(`${message}\n`);
+    });
   if (
     !Number.isSafeInteger(maxRetries) ||
     maxRetries < 0 ||
@@ -1627,6 +1633,9 @@ export const connectRemoteAgent = async (
         error.code !== 'AGENT_BUSY'
       )
         throw error;
+      onRetry(
+        `[agent-rover] Agent at ${options.host}:${options.port} is busy (AGENT_BUSY). Retrying in ${intervalMs / 1000}s (${retries + 1}/${maxRetries}).`
+      );
       await delay(intervalMs);
     }
   }

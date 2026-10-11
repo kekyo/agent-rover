@@ -57,6 +57,7 @@ const event = (socket: Socket, name: string, data: unknown): void => {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
   state.sockets = [];
   state.open = true;
   state.respond = (socket) =>
@@ -67,6 +68,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   for (const socket of state.sockets) socket.destroy();
+  vi.restoreAllMocks();
   vi.useRealTimers();
 });
 
@@ -88,6 +90,7 @@ it.each([false, { maxRetries: 0 }])(
     expect(state.sockets).toHaveLength(1);
     expect(state.sockets[0]!.destroyed).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
+    expect(process.stderr.write).not.toHaveBeenCalled();
   }
 );
 
@@ -111,11 +114,18 @@ it('retries at the configured interval and connects when the agent is free', asy
     }
   })();
   await vi.advanceTimersByTimeAsync(0);
+  expect(process.stderr.write).toHaveBeenCalledExactlyOnceWith(
+    '[agent-rover] Agent at test.invalid:1 is busy (AGENT_BUSY). Retrying in 0.25s (1/2).\n'
+  );
   expect(state.sockets[0]!.destroyed).toBe(true);
   await vi.advanceTimersByTimeAsync(249);
   expect(state.sockets).toHaveLength(1);
   await vi.advanceTimersByTimeAsync(1);
   expect(state.sockets).toHaveLength(2);
+  expect(process.stderr.write).toHaveBeenNthCalledWith(
+    2,
+    '[agent-rover] Agent at test.invalid:1 is busy (AGENT_BUSY). Retrying in 0.25s (2/2).\n'
+  );
   expect(state.sockets[1]!.destroyed).toBe(true);
   await vi.advanceTimersByTimeAsync(250);
   expect(state.sockets).toHaveLength(3);
@@ -124,6 +134,7 @@ it('retries at the configured interval and connects when the agent is free', asy
   agent.release();
   await vi.advanceTimersByTimeAsync(0);
   expect(vi.getTimerCount()).toBe(0);
+  expect(process.stderr.write).toHaveBeenCalledTimes(2);
 });
 
 it('defaults to 360 retries at ten-second intervals, then reports AGENT_BUSY', async () => {
@@ -144,6 +155,10 @@ it('defaults to 360 retries at ten-second intervals, then reports AGENT_BUSY', a
   await vi.advanceTimersByTimeAsync(359 * 10000);
   await expect(observed).resolves.toMatchObject({ code: 'AGENT_BUSY' });
   expect(state.sockets).toHaveLength(361);
+  expect(process.stderr.write).toHaveBeenCalledTimes(360);
+  expect(process.stderr.write).toHaveBeenLastCalledWith(
+    '[agent-rover] Agent at test.invalid:1 is busy (AGENT_BUSY). Retrying in 10s (360/360).\n'
+  );
   expect(state.sockets.every((socket) => socket.destroyed)).toBe(true);
   expect(vi.getTimerCount()).toBe(0);
 });
@@ -176,6 +191,7 @@ it.each(['network', 'authentication', 'invalid rejection'])(
     expect(state.sockets).toHaveLength(1);
     expect(state.sockets[0]!.destroyed).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
+    expect(process.stderr.write).not.toHaveBeenCalled();
   }
 );
 
@@ -199,5 +215,39 @@ it.each([
     ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
     await Promise.all([rejected, vi.advanceTimersByTimeAsync(100)]);
     expect(state.sockets).toHaveLength(0);
+    expect(process.stderr.write).not.toHaveBeenCalled();
   }
 );
+
+it('sends retry notices to a custom reporter instead of stderr', async () => {
+  const onRetry = vi.fn();
+  const rejected = expect(
+    connectRemoteAgent({
+      host: 'test.invalid',
+      port: 1,
+      retry: { maxRetries: 2, intervalMs: 250 },
+      onRetry,
+    })
+  ).rejects.toMatchObject({ code: 'AGENT_BUSY' });
+  await Promise.all([rejected, vi.advanceTimersByTimeAsync(500)]);
+  expect(onRetry.mock.calls).toEqual([
+    [
+      '[agent-rover] Agent at test.invalid:1 is busy (AGENT_BUSY). Retrying in 0.25s (1/2).',
+    ],
+    [
+      '[agent-rover] Agent at test.invalid:1 is busy (AGENT_BUSY). Retrying in 0.25s (2/2).',
+    ],
+  ]);
+  expect(process.stderr.write).not.toHaveBeenCalled();
+});
+
+it('does not report waiting when the first connection succeeds', async () => {
+  state.respond = (socket) =>
+    event(socket, 'agent.ready', { capabilities: defaultFakeCapabilities });
+  const connecting = connectRemoteAgent({ host: 'test.invalid', port: 1 });
+  await vi.advanceTimersByTimeAsync(0);
+  const agent = await connecting;
+  agent.release();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(process.stderr.write).not.toHaveBeenCalled();
+});

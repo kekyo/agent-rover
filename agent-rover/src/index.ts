@@ -1310,6 +1310,13 @@ export interface ConnectRemoteAgentOptions {
    * Authentication, transport, and other handshake errors are never retried.
    */
   readonly retry?: boolean | RemoteConnectionRetryOptions;
+  /**
+   * Reports each busy-connection retry before its delay begins.
+   * @param message Human-readable notice with the target, retry count, and delay, without a trailing newline.
+   * @remarks Defaults to writing one line directly to standard error so test runners can display it while waiting.
+   * A supplied callback replaces that output. It is not called when no retry will occur.
+   */
+  readonly onRetry?: (message: string) => void;
 }
 
 /** Stable error codes raised by the remote agent driver. */

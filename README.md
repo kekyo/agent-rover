@@ -372,6 +372,9 @@ to complete. Unsupported recording and encoding failures are reported as errors.
 ### Results And Interruption
 
 Success results go to stdout and errors to stderr, including with `--json`.
+Before each busy-connection retry, stdout shows the target, delay in seconds,
+and retry count. With `--json`, these notices go to stderr so stdout contains
+only the result JSON.
 Exit codes are `0` for success, `1` for connection or operation failure,
 `2` for invalid arguments, and `130` for Ctrl+C.
 If a disconnect or deadline leaves the outcome unknown, the CLI reports that
@@ -422,6 +425,18 @@ Use `retry: false` or `maxRetries: 0` to disable retries.
 When retries are disabled or exhausted, the error's `RemoteAgentError.code` is
 `AGENT_BUSY`. `timeoutMs` applies to each connection attempt, not the total
 retry wait.
+
+Before each retry delay, the driver writes a message like this directly to
+stderr. It is visible while tests run, including in Vitest.
+
+```text
+[agent-rover] Agent at 192.0.2.10:39397 is busy (AGENT_BUSY). Retrying in 10s (1/360).
+```
+
+Set `onRetry` to a callback to receive the message instead of the default output.
+The callback receives a string without a trailing newline, suitable for passing
+to a logger. When no retry will occur, no notice is emitted and the callback
+is not called.
 
 Code example:
 

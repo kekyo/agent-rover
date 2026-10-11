@@ -66,6 +66,10 @@ describe('arctl', () => {
     { args: ['--no-retry'], attempts: 1 },
     { args: ['--retry-count', '0'], attempts: 1 },
     { args: ['--retry-count', '2', '--retry-interval', '0.001'], attempts: 3 },
+    {
+      args: ['--json', '--retry-count', '2', '--retry-interval', '0.001'],
+      attempts: 3,
+    },
   ])(
     'reports a busy agent after the requested attempts: $args',
     async ({ args, attempts }) => {
@@ -100,7 +104,22 @@ describe('arctl', () => {
         });
         expect(result.code, result.stderr).toBe(1);
         expect(result.stderr).toContain('AGENT_BUSY');
-        expect(result.stdout).toBe('');
+        const notices = Array.from(
+          { length: attempts - 1 },
+          (_, index) =>
+            `[agent-rover] Agent at 127.0.0.1:${address.port} is busy (AGENT_BUSY). Retrying in 0.001s (${index + 1}/${attempts - 1}).\n`
+        ).join('');
+        if (args.includes('--json')) {
+          expect(result.stdout).toBe('');
+          expect(result.stderr).toBe(
+            `${notices}arctl: AGENT_BUSY: Another connection is using this agent.\n`
+          );
+        } else {
+          expect(result.stdout).toBe(notices);
+          expect(result.stderr).toBe(
+            'arctl: AGENT_BUSY: Another connection is using this agent.\n'
+          );
+        }
         expect(connections).toBe(attempts);
       } finally {
         await new Promise<void>((resolve, reject) =>
