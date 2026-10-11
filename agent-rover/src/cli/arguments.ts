@@ -90,7 +90,7 @@ export const parseArctlArguments = (
     )
     .option(
       '--section <NAME>',
-      'Section in ~/.agent-rover (default: default)',
+      'Section in .agent-rover (working directory, then home; default: default)',
       'default'
     )
     .option(

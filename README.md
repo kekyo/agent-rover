@@ -187,8 +187,14 @@ describe('remote agent smoke test', () => {
 
 ### Connection Configuration
 
-The SDK and `arctl` read the same `.agent-rover` file in your home directory:
-`$HOME/.agent-rover` on Linux, usually `%USERPROFILE%\.agent-rover` on Windows.
+The SDK and `arctl` prefer `.agent-rover` in the working directory at invocation.
+If that file or the requested section is absent, they look for the same section
+in your home directory's `.agent-rover`: `$HOME/.agent-rover` on Linux, usually
+`%USERPROFILE%\.agent-rover` on Windows.
+Register shared test machines in the home file and place a configuration in the
+working directory when particular tests need their own machines.
+The working directory is `process.cwd()` when the connection starts, rather than
+the script's location. Parent directories are not searched.
 Save it as UTF-8, with one `host[:port]=token` entry per line under a section.
 
 ```ini
@@ -207,6 +213,11 @@ Select a section with `connectRemoteAgent({ section: 'windows' })` or
 `arctl --section windows windows`. The default is `default`.
 Section names are case-sensitive and literal, including dots. Sections do not
 inherit entries from `default`.
+For example, if the working directory's file contains only `windows`, that
+section comes from the local file while `default` is looked up in the home file.
+The first matching section supplies the entire candidate list; entries from
+different files are not merged. If every candidate is busy or otherwise fails,
+retries keep using that list. Connection failures do not switch to the home file.
 
 The default port is 39397; explicit ports must be integers from 1 to 65535.
 Enclose IPv6 addresses in brackets, such as `[::1]`.
@@ -222,9 +233,11 @@ BOM and CRLF/LF line endings are supported.
 
 Entries before a section, repeated section names, and duplicate endpoints in a
 section are errors. Endpoint comparison ignores hostname case and omission of
-the default port. An unreadable file or a missing or empty selected section
-fails before connecting. Syntax errors include the file name and line number,
-without echoing configuration lines or tokens.
+the default port. An empty local file has no sections, so the home file is checked.
+An explicitly empty selected section, syntax error, or read error fails
+immediately before connecting. If neither file provides the requested section,
+the error identifies its name and the searched paths. Syntax errors include the
+file name and line number, without echoing configuration lines or tokens.
 
 Run the repository's Notepad sample from its root with
 `AGENT_ROVER_SAMPLE_SECTION=windows npm run sample:notepad`.
