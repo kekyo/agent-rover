@@ -45,6 +45,13 @@ agent-rover provides small agent programs that can be used in Windows and X11 en
 By starting an agent on the target OS, you can remotely operate applications from a Node.js environment through a Jest-like testing interface.
 In other words, the operations that we humans perform against applications in a remote session over RDP can be done through an API.
 
+Register the endpoint and its token in `$HOME/.agent-rover` first.
+
+```ini
+[default]
+test-agent.example.com=<access-token>
+```
+
 With agent-rover, you can write test code like this:
 
 ```typescript
@@ -53,10 +60,7 @@ import { writeFile } from 'node:fs/promises';
 import { connectRemoteAgent } from 'agent-rover';
 
 // Connect to the remote agent.
-const agent = await connectRemoteAgent({
-  host: 'test-agent.example.com', // Target host.
-  authToken: '<access-token>', // Access token.
-});
+const agent = await connectRemoteAgent();
 
 // Save a file in the remote environment.
 await agent.files.writeFile(
@@ -120,7 +124,8 @@ By default, the agent accepts one driver connection at a time.
 While a driver is connected, later connections receive `AGENT_BUSY` and are closed.
 The agent remains busy during authentication and while stopping the previous
 connection's operations and owned applications after disconnection.
-Drivers retry by default, up to 360 times at ten-second intervals.
+The driver advances to the next candidate in its section. After all candidates
+fail, it waits ten seconds and retries, up to 360 additional rounds by default.
 
 To retain the previous behavior of accepting multiple connections, start the
 agent with `--connection-mode multiple`. Use `--connection-mode single` to
@@ -132,7 +137,7 @@ C:\> agent-amd64.exe --connection-mode multiple
 
 Double-click the tray icon or choose “Show logs” to open the viewer.
 The version banner, token field and Copy button appear above the log list.
-Use Copy to copy the token into the driver's `authToken` option.
+Use Copy to register the token in `$HOME/.agent-rover` on the driver machine.
 When you supply a token with `--unsafe-token`, the token field and Copy button are hidden.
 Closing the viewer keeps the agent running; choose “Exit” from the tray to stop it.
 
@@ -160,10 +165,7 @@ import { connectRemoteAgent } from 'agent-rover';
 describe('remote agent smoke test', () => {
   it('finds a running Notepad window', async () => {
     // Connect to the remote agent.
-    const agent = await connectRemoteAgent({
-      host: '192.0.2.10',
-      authToken: '<access-token>',
-    });
+    const agent = await connectRemoteAgent();
 
     try {
       // Enumerate windows.
@@ -182,6 +184,52 @@ describe('remote agent smoke test', () => {
   });
 });
 ```
+
+### Connection Configuration
+
+The SDK and `arctl` read the same `.agent-rover` file in your home directory:
+`$HOME/.agent-rover` on Linux, usually `%USERPROFILE%\.agent-rover` on Windows.
+Save it as UTF-8, with one `host[:port]=token` entry per line under a section.
+
+```ini
+[default]
+test-agent.example.com=<access-token>
+
+[windows]
+foo.bar.com=<foo-token>
+baz.hoge.com:12345=<baz-token>
+
+[local]
+[::1]:39397=
+```
+
+Select a section with `connectRemoteAgent({ section: 'windows' })` or
+`arctl --section windows windows`. The default is `default`.
+Section names are case-sensitive and literal, including dots. Sections do not
+inherit entries from `default`.
+
+The default port is 39397; explicit ports must be integers from 1 to 65535.
+Enclose IPv6 addresses in brackets, such as `[::1]`.
+An empty token selects unauthenticated access. Hosts and tokens are never
+filled in from arguments or environment variables.
+
+Blank lines and whole-line comments beginning with `#` or `;`
+after leading whitespace are accepted. The first `=` separates the address
+from the token, and surrounding whitespace is trimmed. Any subsequent `=`,
+`#`, `;`, `,`, or quote is part of the literal token.
+There is no unquoting, escaping, variable expansion, or inline comment parsing.
+BOM and CRLF/LF line endings are supported.
+
+Entries before a section, repeated section names, and duplicate endpoints in a
+section are errors. Endpoint comparison ignores hostname case and omission of
+the default port. An unreadable file or a missing or empty selected section
+fails before connecting. Syntax errors include the file name and line number,
+without echoing configuration lines or tokens.
+
+Run the repository's Notepad sample from its root with
+`AGENT_ROVER_SAMPLE_SECTION=windows npm run sample:notepad`.
+This variable selects a configuration section. Without it, the sample is skipped
+when running the full test suite.
 
 ### Network Path Notes
 
@@ -289,12 +337,10 @@ work without a connection.
 
 ### Connection And Examples
 
-These examples use Bash. Set the authentication token to the value shown by the agent.
+These examples use Bash. Register the endpoint in the `default` section of
+`$HOME/.agent-rover` before running them.
 
 ```bash
-export AGENT_ROVER_HOST=192.0.2.10
-export AGENT_ROVER_AUTH_TOKEN='...'
-
 arctl put ./app.exe 'C:\work\app.exe'
 arctl launch --cwd 'C:\work' -- 'C:\work\app.exe' --debug
 arctl get 'C:\work\result.log' ./result.log
@@ -309,30 +355,31 @@ arctl record ./window.mp4 --seconds 10 --window 0x12345
 ```
 
 Replace the example window ID with a value from `arctl windows`.
-In PowerShell, set the connection with `$env:AGENT_ROVER_HOST = '192.0.2.10'`
-and `$env:AGENT_ROVER_AUTH_TOKEN = '...'`.
+PowerShell uses the same configuration file. Each invocation selects a server
+again; use a section containing just one endpoint when multiple commands must
+operate on the same machine.
 
-| Common option | Environment variable | Default and purpose |
-| :-- | :-- | :-- |
-| `--host <HOST>` | `AGENT_ROVER_HOST` | Required through either setting. |
-| `--port <PORT>` | `AGENT_ROVER_PORT` | `39397`; an integer from 1 to 65535. |
-| `--token <TOKEN>` | `AGENT_ROVER_AUTH_TOKEN` | Authentication token; optional for agents without authentication. |
-| `--timeout <SECONDS>` | None | Deadline per connection attempt and individual request; defaults to 30 seconds. |
-| `--no-retry` | None | Exit with an error without retrying a busy connection. |
-| `--retry-count <COUNT>` | None | Maximum retries after the initial attempt; defaults to `360`. `0` disables retries. |
-| `--retry-interval <SECONDS>` | None | Delay between retries; defaults to `10` seconds. Accepts 0 to 2147483.647 seconds in millisecond increments. |
-| `--json` | None | Prints success as `{"command":"...","result":...}`. |
+| Common option | Default and purpose |
+| :-- | :-- |
+| `--section <NAME>` | Section in `.agent-rover`; defaults to `default`. |
+| `--timeout <SECONDS>` | Deadline per connection attempt and individual request; defaults to 30 seconds. |
+| `--no-retry` | Try every candidate once, then exit if none connects. |
+| `--retry-count <COUNT>` | Maximum additional rounds after the first; defaults to `360`. `0` allows one round only. |
+| `--retry-interval <SECONDS>` | Wait after every candidate has failed; defaults to `10` seconds. Accepts 0 to 2147483.647 seconds in millisecond increments. |
+| `--json` | Prints success as `{"command":"...","result":...}`. |
 
-Common options can precede or follow the subcommand and override environment variables.
+Common options can precede or follow the subcommand.
 The recording duration itself is separate from the request deadline.
 `--timeout` accepts 0.001 to 2147483.647 seconds, matching the
 [Node.js timer range](https://nodejs.org/docs/latest-v24.x/api/timers.html#settimeoutcallback-delay-args).
 
-Connections to busy agents are attempted up to 361 times, including the initial attempt.
-For example, `--retry-count 12 --retry-interval 5` retries up to 12 times at
-five-second intervals after the first rejection.
-`--no-retry` overrides the count and interval settings. Authentication and
-transport failures are not retried.
+Each round shuffles the candidates and tries them in sequence. Busy agents,
+authentication failures, and transport failures advance to the next candidate
+without a retry delay. Waiting occurs only after every candidate has failed.
+The default limit is 361 rounds, including the first.
+For example, `--retry-count 12 --retry-interval 5` waits five seconds after a
+failed round and starts up to 12 additional rounds.
+`--no-retry` overrides the count and interval settings.
 
 ### Command Behavior
 
@@ -373,11 +420,11 @@ to complete. Unsupported recording and encoding failures are reported as errors.
 ### Results And Interruption
 
 Success results go to stdout and errors to stderr, including with `--json`.
-Before each busy-connection retry, stdout shows the target, delay in seconds,
-and retry count. With `--json`, these notices go to stderr so stdout contains
+Before each retry wait, stdout shows the section, each endpoint failure,
+the delay in seconds, and the retry count. With `--json`, these notices go to stderr so stdout contains
 only the result JSON.
 Exit codes are `0` for success, `1` for connection or operation failure,
-`2` for invalid arguments, and `130` for Ctrl+C.
+`2` for invalid arguments or configuration, and `130` for Ctrl+C.
 If a disconnect or deadline leaves the outcome unknown, the CLI reports that
 uncertainty and does not retry the operation automatically.
 Applications already started, files already transferred, and completed captures
@@ -398,7 +445,7 @@ In code examples, an already connected `RemoteAgent` is referred to as `agent` w
 
 | API | Description |
 | :-- | :-- |
-| `connectRemoteAgent(options)` | Connects to the remote agent and returns a `RemoteAgent`. |
+| `connectRemoteAgent(options?)` | Tries the selected section and returns a `RemoteAgent` for the first accepted candidate. |
 | `RemoteAgent.capabilities()` | Gets the connected agent's protocol version, platform, and feature list. |
 | `RemoteAgent.release()` | Closes the connection to the remote agent. |
 | `RemoteAgent.desktop()` | Reads desktop placement, monitor DPI, and a configuration revision together. |
@@ -409,29 +456,32 @@ In code examples, an already connected `RemoteAgent` is referred to as `agent` w
 | `RemoteAgent.recordVideo(durationMs, outputPath, options?)` | Captures the whole screen, or a specified rectangle, as an H.264 MP4 file. |
 | `RemoteAgent.recordVideo(durationMs, options?)` | Captures video and returns a temporary-file-backed readable stream. |
 
-- Pass the agent `host`, `port`, and, as needed, `authToken` and `timeoutMs` to `connectRemoteAgent()`.
-- If `authToken` is omitted, the `AGENT_ROVER_AUTH_TOKEN` environment variable can also be used.
+`connectRemoteAgent()` uses the `default` section. Set `section` to select another,
+and optionally supply `timeoutMs`, `retry`, or `onRetry`.
+Each call reads one configuration snapshot and keeps it throughout retries.
 
-`retry` defaults to `true`. Only connections rejected because the agent is busy
-are retried, up to 360 times at ten-second intervals.
-The initial attempt is excluded from the retry count, allowing up to 361 attempts.
-Authentication and transport failures are not retried, and established sessions
-are not automatically reconnected after disconnection.
+Each round shuffles complete host/token pairs and tries them in sequence.
+The first candidate to complete authentication and the protocol handshake wins.
+A failure, including a busy agent or authentication failure, advances immediately
+to the next candidate. After every candidate fails, the driver waits ten seconds,
+reshuffles, and starts another round.
+`retry` defaults to `true`, allowing 360 additional rounds, or 361 in total.
+Established sessions are not automatically reconnected after disconnection.
 
 Set the count and interval with, for example,
 `retry: { maxRetries: 12, intervalMs: 5000 }`. Omitted fields use their defaults.
 `maxRetries` must be a nonnegative safe integer; `intervalMs` must be an integer
-from 0 through 2147483647.
-Use `retry: false` or `maxRetries: 0` to disable retries.
-When retries are disabled or exhausted, the error's `RemoteAgentError.code` is
-`AGENT_BUSY`. `timeoutMs` applies to each connection attempt, not the total
-retry wait.
+from 0 through 2147483647. With `retry: false` or `maxRetries: 0`, every candidate
+is still tried once. If none connects, the error includes every failure from
+the last round. A shared failure code is preserved; mixed codes produce
+`CONNECTION_FAILED`. `timeoutMs` applies to each connection attempt, not the
+total retry wait.
 
 Before each retry delay, the driver writes a message like this directly to
 stderr. It is visible while tests run, including in Vitest.
 
 ```text
-[agent-rover] Agent at 192.0.2.10:39397 is busy (AGENT_BUSY). Retrying in 10s (1/360).
+No available agent in section "default". 192.0.2.10:39397 (AGENT_BUSY): Another connection is using this agent. Retrying in 10s (1/360).
 ```
 
 Set `onRetry` to a callback to receive the message instead of the default output.
@@ -448,9 +498,7 @@ import { connectRemoteAgent } from 'agent-rover';
 
 // Connect to the remote agent.
 const agent = await connectRemoteAgent({
-  host: '192.0.2.10',
-  port: 39397,
-  authToken: process.env.AGENT_ROVER_AUTH_TOKEN,
+  section: 'windows',
   timeoutMs: 30000,
 });
 

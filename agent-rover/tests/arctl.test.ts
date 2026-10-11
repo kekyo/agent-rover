@@ -711,8 +711,8 @@ describe('arctl', () => {
       'a"b',
       '',
       '--help',
-      '--host',
-      'child-host',
+      '--section',
+      'child-section',
     ];
     try {
       const result = await runArctl(

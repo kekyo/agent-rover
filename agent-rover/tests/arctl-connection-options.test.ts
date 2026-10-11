@@ -6,9 +6,12 @@
 import { expect, it } from 'vitest';
 import { parseArctlArguments } from '../src/cli/arguments';
 
-it('retries busy connections 360 times at ten-second intervals by default', () => {
+it('uses default and retries failed rounds 360 times at ten-second intervals', () => {
   expect(parseArctlArguments(['windows'], 'test')).toMatchObject({
-    connection: { retry: { maxRetries: 360, intervalMs: 10000 } },
+    connection: {
+      section: 'default',
+      retry: { maxRetries: 360, intervalMs: 10000 },
+    },
   });
 });
 
