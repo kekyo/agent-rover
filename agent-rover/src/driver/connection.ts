@@ -1590,8 +1590,49 @@ const createTransport = (
     timeoutMs,
   });
 
-/** Connects to a remote agent-rover agent. */
+/**
+ * Connects to a remote agent-rover agent, retrying when it is already in use.
+ * @param options Agent address, authentication, per-attempt timeout, and retry settings.
+ * @returns An accepted remote session.
+ * @remarks Exhausted or disabled retries report AGENT_BUSY. Other connection failures are not retried.
+ */
 export const connectRemoteAgent = async (
+  options: ConnectRemoteAgentOptions
+): Promise<RemoteAgent> => {
+  const retry = options.retry ?? true;
+  const settings = typeof retry === 'object' ? retry : undefined;
+  const maxRetries = retry === false ? 0 : (settings?.maxRetries ?? 360);
+  const intervalMs = settings?.intervalMs ?? 10000;
+  if (
+    !Number.isSafeInteger(maxRetries) ||
+    maxRetries < 0 ||
+    !Number.isInteger(intervalMs) ||
+    intervalMs < 0 ||
+    intervalMs > 2147483647
+  ) {
+    throw createRemoteAgentError(
+      'INVALID_ARGUMENT',
+      'retry.maxRetries must be a non-negative safe integer and retry.intervalMs must be an integer from 0 through 2147483647.'
+    );
+  }
+  for (let retries = 0; ; ++retries) {
+    try {
+      return await connectRemoteAgentOnce(options);
+    } catch (error) {
+      if (
+        retries >= maxRetries ||
+        typeof error !== 'object' ||
+        error === null ||
+        !('code' in error) ||
+        error.code !== 'AGENT_BUSY'
+      )
+        throw error;
+      await delay(intervalMs);
+    }
+  }
+};
+
+const connectRemoteAgentOnce = async (
   options: ConnectRemoteAgentOptions
 ): Promise<RemoteAgent> => {
   const timeoutMs = options.timeoutMs ?? defaultTimeoutMs;
@@ -1961,6 +2002,23 @@ export const connectRemoteAgent = async (
     },
     onMessage: (message) => {
       try {
+        if (message.kind === 'event' && message.name === 'agent.rejected') {
+          if (readyState === undefined || readyState.settled) return;
+          const data = message.data;
+          if (
+            !isRecord(data) ||
+            data.code !== 'AGENT_BUSY' ||
+            typeof data.message !== 'string'
+          ) {
+            throw new Error('Invalid connection rejection event.');
+          }
+          settleReady(
+            readyState,
+            'reject',
+            createRemoteAgentError('AGENT_BUSY', data.message)
+          );
+          return;
+        }
         if (message.kind === 'response') {
           pending.acceptResponse(message);
           return;
@@ -2009,7 +2067,14 @@ export const connectRemoteAgent = async (
     },
   });
 
-  const connectedCapabilities = await ready;
+  let connectedCapabilities: RemoteAgentCapabilities;
+  try {
+    connectedCapabilities = await ready;
+  } catch (error) {
+    // Finish closing a rejected attempt before waiting or opening its replacement.
+    await transport.close();
+    throw error;
+  }
   const activeTransport = transport;
   const connectedFeatures = new Set(connectedCapabilities.features);
 
