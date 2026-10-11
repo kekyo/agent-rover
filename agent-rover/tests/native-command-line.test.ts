@@ -44,6 +44,7 @@ describe('native command line quoting', () => {
       String.raw`
 #include "command_line.h"
 
+#include <cstdio>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -71,7 +72,7 @@ int main() {
   }
   const wchar_t* missing_mode[] = {L"agent.exe", L"--connection-mode"};
   if (agent_rover::ParseAgentCommandLine(2, missing_mode).ok) return 1;
-  for (const auto value : {L"1", L"64", L"128", L"4096", L"17592186044415"}) {
+  for (const auto value : {L"1", L"64", L"128", L"512", L"4096", L"17592186044415"}) {
     const wchar_t* arguments[] = {L"agent.exe", L"--max-transfer-size", value};
     const auto result = agent_rover::ParseAgentCommandLine(3, arguments);
     if (!result.ok) {
@@ -97,7 +98,10 @@ int main() {
   if (agent_rover::ParseAgentCommandLine(2, missing_limit).ok ||
       agent_rover::ParseAgentCommandLine(3, missing_before_flag).ok) return 1;
   const wchar_t* defaults[] = {L"agent.exe"};
-  if (agent_rover::ParseAgentCommandLine(1, defaults).options.max_transfer_bytes != 64ull * 1024 * 1024) return 1;
+  if (agent_rover::ParseAgentCommandLine(1, defaults).options.max_transfer_bytes != 512ull * 1024 * 1024) {
+    std::fputs("Default transfer limit must be 512 MiB.\n", stderr);
+    return 1;
+  }
 
   const wchar_t* start_with_token[] = {
       L"agent-rover-agent.exe",

@@ -24,7 +24,7 @@ static void ShowUsage() {
       L"  agent-rover-agent.exe [--host <host>] [--port <port>] [--unsafe-token <token>] [-n|--no-auth] [--connection-mode <single|multiple>] [--max-transfer-size <MiB>]\n"
       L"  agent-rover-agent.exe --help\n\n"
       L"--connection-mode: single or multiple (default: single).\n"
-      L"--max-transfer-size: positive integer in MiB (default: 64).\n", L"agent-rover", MB_OK);
+      L"--max-transfer-size: positive integer in MiB (default: 512).\n", L"agent-rover", MB_OK);
 }
 
 }  // namespace agent_rover

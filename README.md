@@ -218,7 +218,7 @@ At capacity, new captures and recordings cannot start; operations that do not
 require captured output remain available.
 
 Whole-file reads and the combined incoming transfer data retained per connection
-are limited to 64 MiB by default.
+are limited to 512 MiB by default.
 Set `--max-transfer-size 128` at agent startup to change the limit to a positive
 integer number of MiB. The same limit applies when retrieving captured stdout
 or stderr.

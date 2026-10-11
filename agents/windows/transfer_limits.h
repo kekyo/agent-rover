@@ -12,7 +12,7 @@ namespace agent_rover {
 /** Number of bytes in one mebibyte. */
 inline constexpr uint64_t kBytesPerMiB = 1024 * 1024;
 /** Default whole-file read and retained incoming transfer budget. */
-inline constexpr uint64_t kDefaultMaxTransferBytes = 64 * kBytesPerMiB;
+inline constexpr uint64_t kDefaultMaxTransferBytes = 512 * kBytesPerMiB;
 
 }  // namespace agent_rover
 
