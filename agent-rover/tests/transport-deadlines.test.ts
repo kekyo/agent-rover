@@ -3,11 +3,12 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+import { connectTestAgent } from './helpers/test-connection';
 import { EventEmitter } from 'node:events';
 import type { Socket } from 'node:net';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createTcpFrameTransport } from '../src/driver/transport';
-import { connectRemoteAgent } from '../src/index';
+
 import { encodeTcpFrame, tcpFrameKindJson } from '../src/driver/tcp-frame';
 import { defaultFakeCapabilities } from './helpers/fake-tcp-agent';
 import { protocolVersion } from '../src/protocol_version';
@@ -105,7 +106,7 @@ it('closes before authentication without sending an application Close frame', as
 }, 3000);
 
 it('observes request timeout during a stalled send and disconnects the session', async () => {
-  const connecting = connectRemoteAgent({
+  const connecting = connectTestAgent({
     host: 'test.invalid',
     port: 1,
     timeoutMs: 100,

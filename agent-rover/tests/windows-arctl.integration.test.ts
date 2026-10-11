@@ -3,6 +3,7 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+import { connectTestAgent } from './helpers/test-connection';
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdir, mkdtemp, readFile } from 'node:fs/promises';
@@ -10,7 +11,6 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
-  connectRemoteAgent,
   type RemoteAgent,
   type RemoteManagedProcess,
   type CapturedVideoResult,
@@ -28,6 +28,8 @@ if (process.env.AGENT_ROVER_REQUIRE_WINDOWS_TESTS === '1' && !enabled)
   throw new Error(
     'Windows CLI tests require AGENT_ROVER_WIN11_HOST and AGENT_ROVER_WIN11_TOKEN.'
   );
+import { createConfigurationFixture } from './helpers/configuration-fixture';
+
 const exec = promisify(execFile);
 const { repositoryDirectory: root, agentsDirectory } = nativeTestPaths(
   import.meta.url
@@ -47,20 +49,23 @@ const palette = [
   [40, 90, 220],
 ];
 
-const arctl = async (args: readonly string[]) =>
-  await exec(
-    process.execPath,
-    [join(root, 'agent-rover/dist/arctl.mjs'), ...args],
-    {
-      env: {
-        ...process.env,
-        AGENT_ROVER_HOST: host,
-        AGENT_ROVER_PORT: String(port),
-        AGENT_ROVER_AUTH_TOKEN: token,
-      },
-      timeout: 60000,
-    }
+const arctl = async (args: readonly string[]) => {
+  const fixture = await createConfigurationFixture(
+    `[default]\n${host}:${port}=${token}\n`
   );
+  try {
+    return await exec(
+      process.execPath,
+      [join(root, 'agent-rover/dist/arctl.mjs'), ...args],
+      {
+        env: fixture.environment,
+        timeout: 60000,
+      }
+    );
+  } finally {
+    await fixture.close();
+  }
+};
 
 describe.skipIf(!enabled)('Windows arctl capture', () => {
   beforeAll(async () => {
@@ -96,7 +101,7 @@ describe.skipIf(!enabled)('Windows arctl capture', () => {
     agent = await waitForResult(
       async () => {
         try {
-          return await connectRemoteAgent({
+          return await connectTestAgent({
             host: host!,
             port,
             authToken: token,

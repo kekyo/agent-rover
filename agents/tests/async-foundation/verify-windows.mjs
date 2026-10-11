@@ -1,35 +1,32 @@
 // Runs the compatibility probes on the explicitly configured Windows machine.
-import assert from 'node:assert/strict';
-import { readFile, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
-import { connectRemoteAgent } from '../../../agent-rover/dist/index.mjs';
+import assert from "node:assert/strict";
+import { readFile, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { connectRemoteAgent } from "../../../agent-rover/dist/index.mjs";
 
-const host = process.env.AGENT_ROVER_WIN11_HOST;
-const authToken = process.env.AGENT_ROVER_WIN11_TOKEN;
-if (!host || !authToken)
-  throw new Error('Windows host and token must be configured.');
-const output = resolve(import.meta.dirname, '../../.build/async-foundation');
+const section = process.env.AGENT_ROVER_WIN11_SECTION;
+if (!section)
+  throw new Error("Set AGENT_ROVER_WIN11_SECTION to a .agent-rover section.");
+const output = resolve(import.meta.dirname, "../../.build/async-foundation");
 const agent = await connectRemoteAgent({
-  host,
-  port: 39397,
-  authToken,
+  section,
   timeoutMs: 30000,
 });
 let directory;
 const results = [];
 try {
-  directory = await agent.files.mkdtemp('agent-rover-cardio-');
-  for (const architecture of ['amd64', 'i686']) {
-    for (const probe of ['core', 'handles', 'runtime']) {
+  directory = await agent.files.mkdtemp("agent-rover-cardio-");
+  for (const architecture of ["amd64", "i686"]) {
+    for (const probe of ["core", "handles", "runtime"]) {
       const name = `${probe}-${architecture}.exe`;
       const remote = `${directory}\\${name}`;
       await agent.files.writeFile(
         remote,
-        await readFile(resolve(output, name))
+        await readFile(resolve(output, name)),
       );
       const process = await agent.processes.launchManaged({
         path: remote,
-        arguments: probe === 'runtime' ? ['--native-modal'] : [],
+        arguments: probe === "runtime" ? ["--native-modal"] : [],
         captureStdout: true,
         captureStderr: true,
         createNoWindow: true,
@@ -40,7 +37,7 @@ try {
         const stdout = await process.stdoutText();
         const stderr = await process.stderrText();
         assert.equal(snapshot.root.exitCode, 0, `${name}: ${stderr}`);
-        if (probe === 'runtime') {
+        if (probe === "runtime") {
           assert.match(stdout, /nested message loop passed/u);
           assert.match(stdout, /native popup menu and sizing loop passed/u);
         }
@@ -57,8 +54,8 @@ try {
     }
   }
   await writeFile(
-    resolve(output, 'windows11-results.json'),
-    `${JSON.stringify({ date: new Date().toISOString(), results }, null, 2)}\n`
+    resolve(output, "windows11-results.json"),
+    `${JSON.stringify({ date: new Date().toISOString(), results }, null, 2)}\n`,
   );
 } finally {
   try {

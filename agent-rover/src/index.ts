@@ -1286,33 +1286,29 @@ export interface RemoteAgent extends Releaseable {
   ) => Promise<void>;
 }
 
-/** Retry settings for connections rejected because the agent is already in use. */
+/** Retry settings for complete rounds through a configured section. */
 export interface RemoteConnectionRetryOptions {
-  /** Maximum retries after the initial attempt. Defaults to 360; zero disables retries. */
+  /** Maximum additional rounds after the first pass through all candidates. Defaults to 360; zero disables retries. */
   readonly maxRetries?: number;
-  /** Delay after each rejection in milliseconds. Defaults to 10000; must be an integer from 0 through 2147483647. */
+  /** Delay between failed rounds in milliseconds. Defaults to 10000; must be an integer from 0 through 2147483647. */
   readonly intervalMs?: number;
 }
 
 /** Options used to connect to a remote agent. */
 export interface ConnectRemoteAgentOptions {
-  /** Agent host name, FQDN, or IP address. */
-  readonly host: string;
-  /** Agent TCP port. */
-  readonly port: number;
-  /** Token printed by the agent process. Overrides AGENT_ROVER_AUTH_TOKEN. */
-  readonly authToken?: string;
+  /** Section in the current user's .agent-rover file. Defaults to default. */
+  readonly section?: string;
   /** Timeout for each connection attempt and each request, in milliseconds. */
   readonly timeoutMs?: number;
   /**
-   * Retry connections rejected with AGENT_BUSY. Defaults to true.
-   * @remarks True uses 360 retries at 10000 ms intervals. False disables retries.
-   * Authentication, transport, and other handshake errors are never retried.
+   * Retry complete shuffled rounds when every candidate fails. Defaults to true.
+   * @remarks True uses 360 additional rounds at 10000 ms intervals. False tries one round.
+   * Busy, authentication, transport, and handshake failures advance to the next candidate.
    */
   readonly retry?: boolean | RemoteConnectionRetryOptions;
   /**
-   * Reports each busy-connection retry before its delay begins.
-   * @param message Human-readable notice with the target, retry count, and delay, without a trailing newline.
+   * Reports each failed round before its retry delay begins.
+   * @param message Human-readable notice with the section, failed targets, round count, and delay, without credentials or a trailing newline.
    * @remarks Defaults to writing one line directly to standard error so test runners can display it while waiting.
    * A supplied callback replaces that output. It is not called when no retry will occur.
    */

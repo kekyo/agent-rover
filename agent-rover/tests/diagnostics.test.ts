@@ -3,17 +3,14 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+import { connectTestAgent } from './helpers/test-connection';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import {
-  connectRemoteAgent,
-  saveDiagnostics,
-  withDiagnostics,
-} from '../src/index';
+import { saveDiagnostics, withDiagnostics } from '../src/index';
 import { defaultFakeWindow, startFakeTcpAgent } from './helpers/fake-tcp-agent';
 
 it('captures a wide window tree without emitting listener warnings', async () => {
@@ -29,7 +26,7 @@ it('captures a wide window tree without emitting listener warnings', async () =>
     windows,
     childrenByWindowId: { 'wide-window-0': children },
   });
-  const agent = await connectRemoteAgent({
+  const agent = await connectTestAgent({
     host: fakeAgent.host,
     port: fakeAgent.port,
   });
@@ -85,7 +82,7 @@ describe.concurrent('diagnostics artifacts', () => {
     });
     const outputDirectory = await mkdtemp(join(tmpdir(), 'agent-rover-diag-'));
 
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       authToken,
       host: fakeAgent.host,
       port: fakeAgent.port,
@@ -175,7 +172,7 @@ describe.concurrent('diagnostics artifacts', () => {
   it('saves diagnostics on failure and rethrows the original error', async () => {
     const fakeAgent = await startFakeTcpAgent({});
     const outputDirectory = await mkdtemp(join(tmpdir(), 'agent-rover-diag-'));
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -206,7 +203,7 @@ describe.concurrent('diagnostics artifacts', () => {
       launchedStdout: 'stdout text',
     });
     const outputDirectory = await mkdtemp(join(tmpdir(), 'agent-rover-diag-'));
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });

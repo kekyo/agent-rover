@@ -4,7 +4,8 @@ import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { expect, it } from 'vitest';
-import { connectRemoteAgent } from '../../agent-rover/src/driver/connection';
+
+import { connectTestAgent } from '../../agent-rover/tests/helpers/test-connection';
 import { waitForResult } from '../../agent-rover/src/wait';
 
 const root = resolve(import.meta.dirname, '..');
@@ -59,9 +60,9 @@ it('restarts the host when worker termination cannot complete after disconnect',
     await waitForResult(
       async () => {
         let candidate:
-          Awaited<ReturnType<typeof connectRemoteAgent>> | undefined;
+          Awaited<ReturnType<typeof connectTestAgent>> | undefined;
         try {
-          candidate = await connectRemoteAgent({
+          candidate = await connectTestAgent({
             host: '127.0.0.1',
             port,
             timeoutMs: 3000,
@@ -77,7 +78,7 @@ it('restarts the host when worker termination cannot complete after disconnect',
       },
       { timeoutMs: 60000 }
     );
-  let agent: Awaited<ReturnType<typeof connectRemoteAgent>> | undefined;
+  let agent: Awaited<ReturnType<typeof connectTestAgent>> | undefined;
   let applicationPid: number | undefined;
   let interrupted: Promise<string> | undefined;
   try {

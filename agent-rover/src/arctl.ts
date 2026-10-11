@@ -5,7 +5,8 @@
 // https://github.com/kekyo/agent-rover
 
 import type { RemoteAgent } from './index';
-import { connectRemoteAgent } from './driver/connection';
+import { connectRemoteAgentInSection } from './driver/connection';
+import { loadConnectionSection } from './driver/configuration';
 import { version } from './generated/packageMetadata';
 import { parseArctlArguments } from './cli/arguments';
 import { launchArctlApplication, listArctlWindows } from './cli/commands';
@@ -18,20 +19,7 @@ const main = async (): Promise<number> => {
   let executing = false;
   let interrupted = false;
   const interruption = new AbortController();
-  const secrets = [process.env.AGENT_ROVER_AUTH_TOKEN];
-  for (let index = 0; index < args.length; ++index) {
-    const arg = args[index];
-    if (arg === '--') break;
-    if (arg === '--token') secrets.push(args[index + 1]);
-    else if (arg?.startsWith('--token='))
-      secrets.push(arg.slice('--token='.length));
-  }
-  const redact = (text: string): string => {
-    for (const secret of secrets) {
-      if (secret) text = text.replaceAll(secret, '[redacted]');
-    }
-    return text;
-  };
+  let redact = (text: string): string => text;
   const onInterrupt = (): void => {
     interrupted = true;
     interruption.abort();
@@ -47,11 +35,15 @@ const main = async (): Promise<number> => {
   };
   process.on('SIGINT', onInterrupt);
   try {
-    const parsed = parseArctlArguments(args, process.env, version);
+    const parsed = parseArctlArguments(args, version);
     if (parsed.action === 'display') {
       process.stdout.write(parsed.text);
       return 0;
     }
+    const section = await loadConnectionSection(
+      parsed.connection.section ?? 'default'
+    );
+    redact = section.redact;
     const writeResult = (result: unknown, text: string): void => {
       process.stdout.write(
         parsed.json
@@ -60,7 +52,7 @@ const main = async (): Promise<number> => {
       );
     };
     executing = true;
-    agent = await connectRemoteAgent({
+    agent = await connectRemoteAgentInSection(section, {
       ...parsed.connection,
       onRetry: (message) => {
         const output = parsed.json ? process.stderr : process.stdout;

@@ -3,16 +3,16 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+import { connectTestAgent } from './helpers/test-connection';
 import { describe, expect, it } from 'vitest';
 
-import { connectRemoteAgent } from '../src/index';
 import { startFakeTcpAgent } from './helpers/fake-tcp-agent';
 
 describe.concurrent('file transfer and event logs', () => {
   it('writes and reads a remote file through the agent', async () => {
     const fakeAgent = await startFakeTcpAgent({});
 
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -34,7 +34,7 @@ describe.concurrent('file transfer and event logs', () => {
   it('manages remote filesystem entries', async () => {
     const fakeAgent = await startFakeTcpAgent({});
 
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -115,7 +115,7 @@ describe.concurrent('file transfer and event logs', () => {
       ],
     });
 
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });

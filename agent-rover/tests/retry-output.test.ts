@@ -16,6 +16,7 @@ import {
   encodeTcpFrame,
   tcpFrameKindJson,
 } from '../src/driver/tcp-frame';
+import { createConfigurationFixture } from './helpers/configuration-fixture';
 import { defaultFakeCapabilities } from './helpers/fake-tcp-agent';
 
 it.each(['arctl', 'arctl-json', 'vitest-forks', 'vitest-threads'])(
@@ -86,17 +87,13 @@ it.each(['arctl', 'arctl-json', 'vitest-forks', 'vitest-threads'])(
     const address = server.address();
     if (address === null || typeof address === 'string')
       throw new Error('Expected TCP address.');
-    const notice = `[agent-rover] Agent at 127.0.0.1:${address.port} is busy (AGENT_BUSY). Retrying in 0.01s (1/1).\n`;
+    const notice = `No available agent in section "default". 127.0.0.1:${address.port} (AGENT_BUSY): Another connection is using this agent. Retrying in 0.01s (1/1).\n`;
     const cli = runner.startsWith('arctl');
     let args: string[];
     if (cli) {
       args = [
         fileURLToPath(new URL('../dist/arctl.mjs', import.meta.url)),
         'windows',
-        '--host',
-        '127.0.0.1',
-        '--port',
-        String(address.port),
         '--timeout',
         '5',
         '--retry-count',
@@ -116,7 +113,7 @@ it.each(['arctl', 'arctl-json', 'vitest-forks', 'vitest-threads'])(
         `
 import { connectRemoteAgent } from ${JSON.stringify(fileURLToPath(new URL('../dist/index.mjs', import.meta.url)))};
 it('connects after a visible retry notice', async () => {
-  const agent = await connectRemoteAgent({ host: '127.0.0.1', port: ${address.port}, timeoutMs: 5000, retry: { maxRetries: 1, intervalMs: 10 } });
+  const agent = await connectRemoteAgent({ timeoutMs: 5000, retry: { maxRetries: 1, intervalMs: 10 } });
   try { expect(await agent.windows()).toEqual([]); } finally { agent.release(); }
 }, 10000);
 `
@@ -137,9 +134,12 @@ it('connects after a visible retry notice', async () => {
         '--reporter=default',
       ];
     }
+    const fixture = await createConfigurationFixture(
+      `[default]\n127.0.0.1:${address.port}=\n`
+    );
     const child = spawn(process.execPath, args, {
       cwd: directory,
-      env: { ...process.env, AGENT_ROVER_AUTH_TOKEN: undefined },
+      env: fixture.environment,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     const exited = once(child, 'close');
@@ -183,6 +183,7 @@ it('connects after a visible retry notice', async () => {
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve()))
       );
+      await fixture.close();
       await rm(directory, { recursive: true, force: true });
     }
   },

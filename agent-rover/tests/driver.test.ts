@@ -3,6 +3,7 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+import { connectTestAgent } from './helpers/test-connection';
 import { createHmac } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { connect as connectTcpSocket, type Socket } from 'node:net';
@@ -12,7 +13,6 @@ import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
-  connectRemoteAgent,
   type AsyncReleaseable,
   type AppWindowSnapshot,
   type RemoteApplicationLaunchOptions,
@@ -126,7 +126,7 @@ const waitForClientConnect = async (socket: Socket): Promise<void> =>
 describe.concurrent('remote agent connection api', () => {
   it('connects to a tcp frame agent and reads capabilities', async () => {
     const fakeAgent = await startFakeTcpAgent({});
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -144,7 +144,7 @@ describe.concurrent('remote agent connection api', () => {
     const fakeAgent = await startFakeTcpAgent({
       authToken: 'correct-token',
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       authToken: 'correct-token',
       host: fakeAgent.host,
       port: fakeAgent.port,
@@ -162,7 +162,7 @@ describe.concurrent('remote agent connection api', () => {
 
   it('authenticates with an explicit token even when no auth is required', async () => {
     const fakeAgent = await startFakeTcpAgent({});
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       authToken: 'unused-token',
       host: fakeAgent.host,
       port: fakeAgent.port,
@@ -177,78 +177,13 @@ describe.concurrent('remote agent connection api', () => {
     }
   });
 
-  it(
-    'uses AGENT_ROVER_AUTH_TOKEN when no explicit tcp token is provided',
-    { concurrent: false },
-    async () => {
-      const original = process.env.AGENT_ROVER_AUTH_TOKEN;
-      process.env.AGENT_ROVER_AUTH_TOKEN = 'env-token';
-      const fakeAgent = await startFakeTcpAgent({
-        authToken: 'env-token',
-      });
-      try {
-        const agent = await connectRemoteAgent({
-          host: fakeAgent.host,
-          port: fakeAgent.port,
-        });
-        try {
-          await expect(agent.capabilities()).resolves.toMatchObject({
-            platform: 'windows',
-          });
-        } finally {
-          agent.release();
-        }
-      } finally {
-        if (original === undefined) {
-          delete process.env.AGENT_ROVER_AUTH_TOKEN;
-        } else {
-          process.env.AGENT_ROVER_AUTH_TOKEN = original;
-        }
-        await fakeAgent.close();
-      }
-    }
-  );
-
-  it(
-    'prefers the explicit tcp token over AGENT_ROVER_AUTH_TOKEN',
-    { concurrent: false },
-    async () => {
-      const original = process.env.AGENT_ROVER_AUTH_TOKEN;
-      process.env.AGENT_ROVER_AUTH_TOKEN = 'wrong-env-token';
-      const fakeAgent = await startFakeTcpAgent({
-        authToken: 'explicit-token',
-      });
-      try {
-        const agent = await connectRemoteAgent({
-          authToken: 'explicit-token',
-          host: fakeAgent.host,
-          port: fakeAgent.port,
-        });
-        try {
-          await expect(agent.capabilities()).resolves.toMatchObject({
-            platform: 'windows',
-          });
-        } finally {
-          agent.release();
-        }
-      } finally {
-        if (original === undefined) {
-          delete process.env.AGENT_ROVER_AUTH_TOKEN;
-        } else {
-          process.env.AGENT_ROVER_AUTH_TOKEN = original;
-        }
-        await fakeAgent.close();
-      }
-    }
-  );
-
   it('rejects tcp connections with missing or incorrect tokens', async () => {
     const missingTokenAgent = await startFakeTcpAgent({
       authToken: 'required',
     });
     try {
       await expect(
-        connectRemoteAgent({
+        connectTestAgent({
           host: missingTokenAgent.host,
           port: missingTokenAgent.port,
           timeoutMs: 1000,
@@ -265,7 +200,7 @@ describe.concurrent('remote agent connection api', () => {
     });
     try {
       await expect(
-        connectRemoteAgent({
+        connectTestAgent({
           authToken: 'wrong',
           host: wrongTokenAgent.host,
           port: wrongTokenAgent.port,
@@ -396,7 +331,7 @@ describe.concurrent('remote agent connection api', () => {
 
   it('uses TCP binary frames for file and screenshot payloads', async () => {
     const fakeAgent = await startFakeTcpAgent({});
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -425,7 +360,7 @@ describe.concurrent('remote agent connection api', () => {
     const videoData = Buffer.from('fake streamed h264 mp4');
     const videoRequests: Record<string, unknown>[] = [];
     const fakeAgent = await startFakeTcpAgent({ videoData, videoRequests });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -477,7 +412,7 @@ describe.concurrent('remote agent connection api', () => {
     const outputPath = join(directory, 'capture.mp4');
     const videoData = Buffer.from('fake persisted h264 mp4');
     const fakeAgent = await startFakeTcpAgent({ videoData });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -508,7 +443,7 @@ describe.concurrent('remote agent connection api', () => {
     const original = Buffer.from('keep existing file');
     await writeFile(outputPath, original);
     const fakeAgent = await startFakeTcpAgent({});
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -526,7 +461,7 @@ describe.concurrent('remote agent connection api', () => {
 
   it('validates video capture options at the public API boundary', async () => {
     const fakeAgent = await startFakeTcpAgent({});
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -550,7 +485,7 @@ describe.concurrent('remote agent connection api', () => {
 
   it('reports connection failures with a stable error code', async () => {
     await expect(
-      connectRemoteAgent({
+      connectTestAgent({
         host: '127.0.0.1',
         port: 0,
         timeoutMs: 1000,
@@ -566,7 +501,7 @@ describe.concurrent('remote agent connection api', () => {
     });
     try {
       await expect(
-        connectRemoteAgent({
+        connectTestAgent({
           host: fakeAgent.host,
           port: fakeAgent.port,
         })
@@ -580,7 +515,7 @@ describe.concurrent('remote agent connection api', () => {
 
   it('rejects operations after release', async () => {
     const fakeAgent = await startFakeTcpAgent({});
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -599,7 +534,7 @@ describe.concurrent('remote agent connection api', () => {
 
   it('lists top-level windows and traverses descendants', async () => {
     const fakeAgent = await startFakeTcpAgent({});
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -657,7 +592,7 @@ describe.concurrent('remote agent connection api', () => {
       },
       windows: [rootWindow],
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -717,7 +652,7 @@ describe.concurrent('remote agent connection api', () => {
     const fakeAgent = await startFakeTcpAgent({
       inputOperations: operations,
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -771,7 +706,7 @@ describe.concurrent('remote agent connection api', () => {
     const fakeAgent = await startFakeTcpAgent({
       inputOperations: operations,
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -822,7 +757,7 @@ describe.concurrent('remote agent connection api', () => {
     const fakeAgent = await startFakeTcpAgent({
       inputOperations: operations,
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -901,7 +836,7 @@ describe.concurrent('remote agent connection api', () => {
     const fakeAgent = await startFakeTcpAgent({
       inputOperations: operations,
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -951,7 +886,7 @@ describe.concurrent('remote agent connection api', () => {
     const fakeAgent = await startFakeTcpAgent({
       inputOperations: operations,
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -989,7 +924,7 @@ describe.concurrent('remote agent connection api', () => {
     const fakeAgent = await startFakeTcpAgent({
       inputOperations: operations,
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -1048,7 +983,7 @@ describe.concurrent('remote agent connection api', () => {
       closedWindowIds,
       launches,
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -1089,7 +1024,7 @@ describe.concurrent('remote agent connection api', () => {
     const fakeAgent = await startFakeTcpAgent({
       launches,
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -1169,7 +1104,7 @@ describe.concurrent('remote agent connection api', () => {
       },
       launches,
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -1252,7 +1187,7 @@ describe.concurrent('remote agent connection api', () => {
       managedLaunches,
       releasedManagedProcessIds,
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -1331,7 +1266,7 @@ describe.concurrent('remote agent connection api', () => {
       killedProcessIds,
       launches,
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -1357,7 +1292,7 @@ describe.concurrent('remote agent connection api', () => {
     const fakeAgent = await startFakeTcpAgent({
       killedProcessIds,
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -1380,7 +1315,7 @@ describe.concurrent('remote agent connection api', () => {
     const fakeAgent = await startFakeTcpAgent({
       windows: [],
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -1446,7 +1381,7 @@ describe.concurrent('remote agent connection api', () => {
     const fakeAgent = await startFakeTcpAgent({
       windows: [],
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -1513,7 +1448,7 @@ describe.concurrent('remote agent connection api', () => {
     const fakeAgent = await startFakeTcpAgent({
       windows: [],
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -1559,7 +1494,7 @@ describe.concurrent('remote agent connection api', () => {
     const fakeAgent = await startFakeTcpAgent({
       windows: [],
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -1616,7 +1551,7 @@ describe.concurrent('remote agent connection api', () => {
       clientBounds: { x: -292, y: 51, width: 624, height: 441 },
     };
     const fakeAgent = await startFakeTcpAgent({ windows: [expected] });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -1632,7 +1567,7 @@ describe.concurrent('remote agent connection api', () => {
 
   it('controls window activation, state, bounds, and snapshots', async () => {
     const fakeAgent = await startFakeTcpAgent({});
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -1687,7 +1622,7 @@ describe.concurrent('remote agent connection api', () => {
     const fakeAgent = await startFakeTcpAgent({
       windows: [],
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -1772,7 +1707,7 @@ describe.concurrent('remote agent connection api', () => {
         },
       ],
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -1811,7 +1746,7 @@ describe.concurrent('remote agent connection api', () => {
       monitors: [monitor],
       windows: [window],
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -1826,7 +1761,7 @@ describe.concurrent('remote agent connection api', () => {
 
   it('reads screen geometry, cursor state, and screenshots', async () => {
     const fakeAgent = await startFakeTcpAgent({});
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });

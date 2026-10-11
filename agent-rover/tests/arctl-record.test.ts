@@ -17,24 +17,39 @@ import {
   startFakeTcpAgent,
 } from './helpers/fake-tcp-agent';
 
+import { createConfigurationFixture } from './helpers/configuration-fixture';
+
 const executable = fileURLToPath(new URL('../dist/arctl.mjs', import.meta.url));
-const run = async (args: readonly string[], env: NodeJS.ProcessEnv) =>
-  await new Promise<{ code: number; stdout: string; stderr: string }>(
-    (resolve, reject) => {
-      execFile(
-        process.execPath,
-        [executable, ...args],
-        {
-          env: { ...process.env, AGENT_ROVER_AUTH_TOKEN: undefined, ...env },
-          timeout: 15000,
-        },
-        (error, stdout, stderr) => {
-          if (error !== null && typeof error.code !== 'number') reject(error);
-          else resolve({ code: error?.code ?? 0, stdout, stderr });
-        }
-      );
-    }
-  );
+const run = async (
+  args: readonly string[],
+  configuration: string,
+  tempDirectory: string | undefined
+) => {
+  const fixture = await createConfigurationFixture(configuration);
+  try {
+    return await new Promise<{ code: number; stdout: string; stderr: string }>(
+      (resolve, reject) => {
+        execFile(
+          process.execPath,
+          [executable, ...args],
+          {
+            env: {
+              ...fixture.environment,
+              ...(tempDirectory === undefined ? {} : { TMPDIR: tempDirectory }),
+            },
+            timeout: 15000,
+          },
+          (error, stdout, stderr) => {
+            if (error !== null && typeof error.code !== 'number') reject(error);
+            else resolve({ code: error?.code ?? 0, stdout, stderr });
+          }
+        );
+      }
+    );
+  } finally {
+    await fixture.close();
+  }
+};
 
 it.each([undefined, defaultFakeWindow.id])(
   'records, transfers, and saves for longer than one request timeout (%s)',
@@ -58,7 +73,8 @@ it.each([undefined, defaultFakeWindow.id])(
           '--json',
           ...(windowId === undefined ? [] : ['--window', windowId]),
         ],
-        { AGENT_ROVER_HOST: fake.host, AGENT_ROVER_PORT: String(fake.port) }
+        `[default]\n${fake.host}:${fake.port}=\n`,
+        undefined
       );
       expect(result.code, result.stderr).toBe(0);
       expect(result.stderr).toBe('');
@@ -91,7 +107,7 @@ it.each([undefined, defaultFakeWindow.id])(
 );
 
 it('validates recording duration, FPS, and required output before connecting', async () => {
-  const env = { AGENT_ROVER_HOST: 'unused.invalid', AGENT_ROVER_PORT: '39397' };
+  const configuration = `[default]\nunused.invalid:39397=\n`;
   for (const args of [
     ['record'],
     ['record', 'out.mp4'],
@@ -111,11 +127,11 @@ it('validates recording duration, FPS, and required output before connecting', a
       value,
     ]),
   ]) {
-    const result = await run(args, env);
+    const result = await run(args, configuration, undefined);
     expect(result.code, JSON.stringify(args)).toBe(2);
     expect(result.stdout).toBe('');
   }
-  const help = await run(['record', '--help'], env);
+  const help = await run(['record', '--help'], configuration, undefined);
   expect(help.code).toBe(0);
   expect(help.stdout).toContain('--seconds');
 });
@@ -135,7 +151,8 @@ it('reports unsupported video without sending a recording request', async () => 
   try {
     const result = await run(
       ['record', join(directory, 'output.mp4'), '--seconds', '1'],
-      { AGENT_ROVER_HOST: fake.host, AGENT_ROVER_PORT: String(fake.port) }
+      `[default]\n${fake.host}:${fake.port}=\n`,
+      undefined
     );
     expect(result.code).toBe(1);
     expect(result.stdout).toBe('');
@@ -165,10 +182,11 @@ it('protects an existing video and rejects an unknown window before recording', 
         '0xmissing',
       ],
     ]) {
-      const result = await run(args, {
-        AGENT_ROVER_HOST: fake.host,
-        AGENT_ROVER_PORT: String(fake.port),
-      });
+      const result = await run(
+        args,
+        `[default]\n${fake.host}:${fake.port}=\n`,
+        undefined
+      );
       expect(result.code).toBe(1);
       expect(result.stdout).toBe('');
     }
@@ -191,15 +209,15 @@ it('interrupts after receiving the recording request, without waiting for the du
       return undefined;
     },
   });
+  const fixture = await createConfigurationFixture(
+    `[default]\n${fake.host}:${fake.port}=\n`
+  );
   const child = spawn(
     process.execPath,
     [executable, 'record', join(directory, 'output.mp4'), '--seconds', '600'],
     {
       env: {
-        ...process.env,
-        AGENT_ROVER_HOST: fake.host,
-        AGENT_ROVER_PORT: String(fake.port),
-        AGENT_ROVER_AUTH_TOKEN: undefined,
+        ...fixture.environment,
         TMPDIR: directory,
       },
       stdio: 'ignore',
@@ -218,6 +236,7 @@ it('interrupts after receiving the recording request, without waiting for the du
       await exited;
     }
     await fake.close();
+    await fixture.close();
     await rm(directory, { recursive: true, force: true });
   }
 }, 10000);
@@ -242,11 +261,8 @@ it.each(['start', 'transfer'] as const)(
           '--seconds',
           phase === 'start' ? '600' : '0.001',
         ],
-        {
-          AGENT_ROVER_HOST: fake.host,
-          AGENT_ROVER_PORT: String(fake.port),
-          TMPDIR: directory,
-        }
+        `[default]\n${fake.host}:${fake.port}=\n`,
+        directory
       );
       expect(result.code).toBe(1);
       expect(result.stdout).toBe('');
