@@ -6,11 +6,12 @@
 import { expect, it } from 'vitest';
 import { parseArctlArguments } from '../src/cli/arguments';
 
-it('retries busy connections 360 times at ten-second intervals by default', () => {
-  expect(
-    parseArctlArguments(['windows'], { AGENT_ROVER_HOST: 'localhost' }, 'test')
-  ).toMatchObject({
-    connection: { retry: { maxRetries: 360, intervalMs: 10000 } },
+it('uses default and retries failed rounds 360 times at ten-second intervals', () => {
+  expect(parseArctlArguments(['windows'], {}, 'test')).toMatchObject({
+    connection: {
+      section: 'default',
+      retry: { maxRetries: 360, intervalMs: 10000 },
+    },
   });
 });
 
@@ -44,13 +45,9 @@ it.each([
       ['windows', ...args],
       [...args, 'windows'],
     ]) {
-      expect(
-        parseArctlArguments(
-          invocation,
-          { AGENT_ROVER_HOST: 'localhost' },
-          'test'
-        )
-      ).toMatchObject({ connection: { retry } });
+      expect(parseArctlArguments(invocation, {}, 'test')).toMatchObject({
+        connection: { retry },
+      });
     }
   }
 );
@@ -68,10 +65,6 @@ it.each([
   ['--retry-interval', ''],
 ])('rejects invalid retry settings %s %s', (option, value) => {
   expect(() =>
-    parseArctlArguments(
-      ['windows', option, value],
-      { AGENT_ROVER_HOST: 'localhost' },
-      'test'
-    )
+    parseArctlArguments(['windows', option, value], {}, 'test')
   ).toThrow(option);
 });

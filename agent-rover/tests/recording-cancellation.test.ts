@@ -3,9 +3,10 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+import { connectTestAgent } from './helpers/test-connection';
 import { createDeferred } from 'async-primitives';
 import { expect, it, vi } from 'vitest';
-import { connectRemoteAgent } from '../src/index';
+
 import { startFakeTcpAgent } from './helpers/fake-tcp-agent';
 
 it.each(['release', 'disconnect'] as const)(
@@ -21,7 +22,7 @@ it.each(['release', 'disconnect'] as const)(
         return undefined;
       },
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fake.host,
       port: fake.port,
     });

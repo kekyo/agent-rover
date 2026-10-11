@@ -3,13 +3,13 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+import { connectTestAgent } from './helpers/test-connection';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { connectRemoteAgent } from '../src/index';
 import { startFakeTcpAgent } from './helpers/fake-tcp-agent';
 
 const temporaryDirectories: string[] = [];
@@ -49,7 +49,7 @@ describe('directory synchronization', () => {
     await writeLocalFile(localPath, 'nested/missing.txt', 'missing');
 
     const fakeAgent = await startFakeTcpAgent({});
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -91,7 +91,7 @@ describe('directory synchronization', () => {
     await writeLocalFile(localPath, 'keep.txt', 'keep');
 
     const fakeAgent = await startFakeTcpAgent({});
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -127,7 +127,7 @@ describe('directory synchronization', () => {
     await writeLocalFile(localPath, 'keep.txt', 'keep');
 
     const fakeAgent = await startFakeTcpAgent({});
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -168,7 +168,7 @@ describe('directory synchronization', () => {
         'C:/sync/app.dll': 1,
       },
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });
@@ -195,7 +195,7 @@ describe('directory synchronization', () => {
     const localPath = await createLocalDirectory();
     const missingPath = await createLocalDirectory();
     const fakeAgent = await startFakeTcpAgent({});
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });

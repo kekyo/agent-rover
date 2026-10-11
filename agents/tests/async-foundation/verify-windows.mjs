@@ -4,15 +4,12 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { connectRemoteAgent } from '../../../agent-rover/dist/index.mjs';
 
-const host = process.env.AGENT_ROVER_WIN11_HOST;
-const authToken = process.env.AGENT_ROVER_WIN11_TOKEN;
-if (!host || !authToken)
-  throw new Error('Windows host and token must be configured.');
+const section = process.env.AGENT_ROVER_WIN11_SECTION;
+if (!section)
+  throw new Error('Set AGENT_ROVER_WIN11_SECTION to a .agent-rover section.');
 const output = resolve(import.meta.dirname, '../../.build/async-foundation');
 const agent = await connectRemoteAgent({
-  host,
-  port: 39397,
-  authToken,
+  section,
   timeoutMs: 30000,
 });
 let directory;

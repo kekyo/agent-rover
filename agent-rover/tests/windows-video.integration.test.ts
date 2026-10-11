@@ -3,6 +3,7 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+import { connectTestAgent } from './helpers/test-connection';
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
@@ -15,7 +16,7 @@ import { describe, expect, it } from 'vitest';
 import { connectWindowsBootstrap } from './helpers/windows-bootstrap';
 import { waitForResult } from '../src/wait';
 
-import { connectRemoteAgent, type RemoteAgent } from '../src/index';
+import { type RemoteAgent } from '../src/index';
 
 interface CommandResult {
   readonly stderr: string;
@@ -68,7 +69,7 @@ const connectToTestAgent = async (
   return await waitForResult(
     async () => {
       try {
-        return await connectRemoteAgent({
+        return await connectTestAgent({
           authToken: token,
           host,
           port: testAgentPort,
@@ -340,7 +341,7 @@ describe('Windows cleanup integration', () => {
           agent = await waitForResult(
             async () => {
               try {
-                return await connectRemoteAgent({
+                return await connectTestAgent({
                   host: requireEnvironment(hostEnvironmentName),
                   authToken: token,
                   port,

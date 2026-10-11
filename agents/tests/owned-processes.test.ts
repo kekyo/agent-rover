@@ -3,7 +3,8 @@ import { once } from 'node:events';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { expect, it } from 'vitest';
-import { connectRemoteAgent } from '../../agent-rover/src/driver/connection';
+
+import { connectTestAgent } from '../../agent-rover/tests/helpers/test-connection';
 import { waitForResult } from '../../agent-rover/src/wait';
 
 const root = resolve(import.meta.dirname, '..');
@@ -46,17 +47,17 @@ it.each(['worker', 'host', 'supervisor'])(
         stdio: 'ignore',
       }
     );
-    let agent: Awaited<ReturnType<typeof connectRemoteAgent>> | undefined;
+    let agent: Awaited<ReturnType<typeof connectTestAgent>> | undefined;
     let ownedPid: number | undefined;
     let preservedPid: number | undefined;
     let childPid: number | undefined;
-    let observer: Awaited<ReturnType<typeof connectRemoteAgent>> | undefined;
+    let observer: Awaited<ReturnType<typeof connectTestAgent>> | undefined;
     let interrupted: Promise<string> | undefined;
     try {
       agent = await waitForResult(
         async () => {
           try {
-            return await connectRemoteAgent({
+            return await connectTestAgent({
               host: '127.0.0.1',
               port,
               timeoutMs: 10000,
@@ -153,7 +154,7 @@ it.each(['worker', 'host', 'supervisor'])(
       expect(await interrupted).toBe('DISCONNECTED');
       await run('running', String(preservedPid));
       if (failure === 'worker') {
-        observer = await connectRemoteAgent({
+        observer = await connectTestAgent({
           host: '127.0.0.1',
           port,
           timeoutMs: 10000,

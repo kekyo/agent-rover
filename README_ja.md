@@ -43,17 +43,21 @@ agent-roverには、WindowsとX11環境で使用できる小さな「エージ�
 つまり、我々人間がRDPを通じてリモートセッションでアプリケーションを操作したりする事を、
 APIで実現できるということです！
 
-agent-roverを使用すれば、テストコードを以下のように書けます:
+接続先とトークンを、あらかじめ`$HOME/.agent-rover`に登録します。
+
+```ini
+[default]
+test-agent.example.com=<access-token>
+```
+
+agent-roverを使用すれば、テストコードを以下のように書けます。
 
 ```typescript
 import { connectRemoteAgent } from 'agent-rover';
 import { waitForResult } from 'agent-rover/testing';
 
 // リモートエージェントに接続する
-const agent = await connectRemoteAgent({
-  host: 'test-agent.example.com',  // ターゲットのホスト
-  authToken: '<access-token>',     // アクセストークン
-});
+const agent = await connectRemoteAgent();
 
 // リモート環境にファイルを保存
 await agent.files.writeFile(`C:\test.txt`, Buffer.from('test text file'));
@@ -115,7 +119,8 @@ C:\> agent-amd64.exe
 既定では、1つのドライバー接続だけを受け付けます。
 接続中のドライバーがある場合、後続の接続には`AGENT_BUSY`を返して閉じます。
 認証中や、切断後の処理・管理アプリの停止を待っている間も使用中として扱います。
-ドライバーは既定で10秒間隔、最大360回リトライします。
+設定ファイルで接続するドライバーは、同じセクション内の次の接続先を試します。
+全接続先への試行が失敗した場合は、既定で10秒待ち、最大360回リトライします。
 
 従来どおり複数の接続を受け付けるには、起動時に`--connection-mode multiple`を指定してください。
 単一接続を明示する場合は`--connection-mode single`です。
@@ -126,7 +131,7 @@ C:\> agent-amd64.exe --connection-mode multiple
 
 トレイのアイコンをダブルクリックするか、「Show logs」を選ぶとビューアーが開きます。
 上部にバージョンバナー、その下にトークン欄と「Copy」ボタン、ログ一覧が表示されます。
-「Copy」ボタンでトークンをコピーして、ドライバーの`authToken`へ指定してください。
+「Copy」ボタンでトークンをコピーして、ドライバー側の`$HOME/.agent-rover`に登録してください。
 `--unsafe-token`でトークンを指定した場合、トークン欄と「Copy」ボタンは表示されません。
 ウィンドウを閉じてもエージェントは常駐します。終了する場合はトレイの「Exit」を選びます。
 
@@ -151,10 +156,7 @@ import { connectRemoteAgent } from 'agent-rover';
 describe('remote agent smoke test', () => {
   it('finds a running Notepad window', async () => {
     // リモートエージェントに接続
-    const agent = await connectRemoteAgent({
-      host: '192.0.2.10',
-      authToken: '<access-token>',
-    });
+    const agent = await connectRemoteAgent();
 
     try {
       // ウインドウ群を列挙
@@ -173,6 +175,101 @@ describe('remote agent smoke test', () => {
   });
 });
 ```
+
+### 接続設定ファイル
+
+SDKと`arctl`は、呼び出し時の作業ディレクトリにある`.agent-rover`を優先します。
+ファイルまたは指定セクションがなければ、ホームディレクトリの`.agent-rover`で同名セクションを探します。
+ホームの設定ファイルは、Linuxでは`$HOME/.agent-rover`、Windowsでは通常`%USERPROFILE%\.agent-rover`です。
+共通のテストマシンはホームに登録し、テストごとに接続先を選びたい場合は作業ディレクトリに設定を置いてください。
+作業ディレクトリは接続開始時の`process.cwd()`で決まり、スクリプトの配置場所とは異なります。親ディレクトリの探索は行いません。
+UTF-8で保存し、セクションごとに`ホスト[:ポート]=トークン`を1行ずつ記述してください。
+
+```ini
+[default]
+test-agent.example.com=<access-token>
+
+[windows]
+foo.bar.com=<foo-token>
+baz.hoge.com:12345=<baz-token>
+
+[local]
+[::1]:39397=
+```
+
+SDKでは`connectRemoteAgent({ section: 'windows' })`、CLIでは`arctl --section windows windows`のように選択します。
+省略時は`default`です。セクション名は大文字・小文字を区別し、`.`も名前の一部として扱います。
+各セクションは独立しており、`default`の設定を継承しません。
+例えば、作業ディレクトリの設定に`windows`だけがある場合、`windows`はそこから読み込み、`default`はホームを探します。
+最初に見つかったセクションの接続先一覧を使い、別ファイルの一覧とは結合しません。
+全接続先がビジーなどで接続できない場合も、選んだ一覧で再試行します。
+接続失敗を理由にホームの設定へ切り替えることはありません。
+
+ポートの既定値は39397で、明示する場合は1〜65535の整数です。
+IPv6アドレスは`[::1]`のように角括弧で囲みます。
+トークンが空なら認証なしで接続します。セクション内のホストやトークンを引数・環境変数から補うことはありません。
+
+空行と、行頭の空白を除いて`#`または`;`で始まるコメント行を使えます。
+先頭の`=`でホストとトークンを分け、前後の空白を除きます。
+値の途中の`=`、`#`、`;`、`,`、引用符はそのままトークンの一部になります。
+引用符の除去、エスケープ、変数展開、行末コメントの解釈は行いません。BOMとCRLF/LF改行に対応します。
+
+セクションより前の接続先、同名セクション、同一セクション内の接続先の重複はエラーです。
+重複判定ではホスト名の大文字・小文字と、既定ポートの省略を区別しません。
+作業ディレクトリの設定ファイルが空なら、セクションがないためホームの設定を確認します。
+指定セクションがあるのに接続先が空の場合や、構文・読み取りのエラーがある場合は、接続前にエラーとして処理を終了します。
+両方のファイルを探してもセクションが見つからなければ、セクション名と探索したパスを表示してエラーにします。
+書式エラーにはファイル名と行番号を表示し、設定行やトークンは表示しません。
+
+リポジトリ付属のNotepadサンプルは、ルートから`AGENT_ROVER_SAMPLE_SECTION=windows npm run sample:notepad`で実行できます。
+この環境変数で設定ファイルのセクションを選びます。未指定なら、全体テストに含まれるサンプルはスキップします。
+
+### ホストを明示する接続（任意）
+
+通常は`.agent-rover`を使いますが、従来どおりSDKの`host`・`port`・`authToken`でも接続できます。
+明示指定時は、作業ディレクトリとホームのどちらの`.agent-rover`も参照しません。
+指定が不完全な場合や接続に失敗した場合も、設定ファイルへ切り替えません。
+
+```typescript
+const agent = await connectRemoteAgent({
+  host: 'test-agent.example.com',
+  port: 39397,
+  authToken: '<access-token>',
+});
+try {
+  console.log(await agent.windows());
+} finally {
+  agent.release();
+}
+```
+
+SDKでは`host`と`port`の両方が必要です。
+`authToken`を省略すると`AGENT_ROVER_AUTH_TOKEN`を使い、環境変数も未設定または空なら認証なしで接続します。
+`authToken: ''`を指定すると、環境変数にかかわらず認証なしになります。
+SDKは`AGENT_ROVER_HOST`と`AGENT_ROVER_PORT`を参照しません。
+`section`と`host`・`port`・`authToken`のいずれかを併用すると、`INVALID_ARGUMENT`で終了します。
+
+CLIでは、次のオプションをコマンドの前後に指定できます。
+
+```bash
+arctl --host test-agent.example.com --port 39397 --token '<access-token>' windows
+```
+
+| オプション | 省略時の値 |
+| :-- | :-- |
+| `--host <HOST>` | `AGENT_ROVER_HOST`。明示指定で接続する場合は必須です。 |
+| `--port <PORT>` | `AGENT_ROVER_PORT`。未設定なら`39397`です。 |
+| `--token <TOKEN>` | `AGENT_ROVER_AUTH_TOKEN`。未設定または空なら認証なしです。 |
+
+各オプションは環境変数より優先します。`--token ''`はエラーです。
+`--section`と`--host`・`--port`・`--token`のいずれかを併用すると、終了コード`2`で終了します。
+接続オプションを省略しても、`AGENT_ROVER_HOST`が設定されていれば明示指定で接続します。
+ポートやトークンの環境変数だけでは明示指定に切り替わらず、`default`セクションを使います。
+`--section`を指定した場合は、これら3つの環境変数を接続設定に使いません。
+
+明示指定時は従来どおり、使用中を示す`AGENT_BUSY`の場合だけ再試行します。
+既定では10秒間隔で最大360回リトライし、SDKの`retry`、CLIの`--retry-count`・`--retry-interval`で変更できます。
+SDKの`retry: false`やCLIの`--no-retry`で無効にできます。認証失敗や通信エラーでは直ちに終了します。
 
 ### ネットワーク経路の注意
 
@@ -260,12 +357,9 @@ arctl --help
 
 ### 接続とコマンド例
 
-次の例はBash向けです。認証トークンには、エージェントに表示されている値を設定します。
+次の例はBash向けです。`$HOME/.agent-rover`の`default`セクションに接続先を登録してから実行します。
 
 ```bash
-export AGENT_ROVER_HOST=192.0.2.10
-export AGENT_ROVER_AUTH_TOKEN='...'
-
 arctl put ./app.exe 'C:\work\app.exe'
 arctl launch --cwd 'C:\work' -- 'C:\work\app.exe' --debug
 arctl get 'C:\work\result.log' ./result.log
@@ -280,28 +374,29 @@ arctl record ./window.mp4 --seconds 10 --window 0x12345
 ```
 
 ウィンドウIDは、`arctl windows`で得た値に置き換えてください。
-PowerShellでは、接続設定を`$env:AGENT_ROVER_HOST = '192.0.2.10'`、
-`$env:AGENT_ROVER_AUTH_TOKEN = '...'`の形式で設定できます。
+PowerShellでも同じ設定ファイルを使います。
+コマンドごとに接続先を選び直すため、複数のコマンドで同じマシンを操作する場合は、接続先が1つだけのセクションを指定してください。
 
-| 共通オプション | 環境変数 | 既定値・用途 |
-| :-- | :-- | :-- |
-| `--host <HOST>` | `AGENT_ROVER_HOST` | 接続先。どちらかで指定が必要です。 |
-| `--port <PORT>` | `AGENT_ROVER_PORT` | `39397`。1〜65535の整数を指定します。 |
-| `--token <TOKEN>` | `AGENT_ROVER_AUTH_TOKEN` | 認証トークン。認証不要の接続先では省略できます。 |
-| `--timeout <SECONDS>` | なし | 接続試行1回ごとと、個々の通信待ちの期限。既定は30秒です。 |
-| `--no-retry` | なし | 使用中による接続拒否をリトライせず、エラーで終了します。 |
-| `--retry-count <COUNT>` | なし | 初回を除く最大リトライ回数。既定は`360`、`0`で無効です。 |
-| `--retry-interval <SECONDS>` | なし | リトライ間隔。既定は`10`秒。0〜2147483.647秒をミリ秒単位で指定します。 |
-| `--json` | なし | 成功結果を`{"command":"...","result":...}`のJSONで出力します。 |
+| 共通オプション | 既定値・用途 |
+| :-- | :-- |
+| `--section <NAME>` | `.agent-rover`のセクション名。既定は`default`です。 |
+| `--timeout <SECONDS>` | 接続試行1回ごとと、個々の通信待ちの期限。既定は30秒です。 |
+| `--no-retry` | 全接続先を一巡だけ試し、接続できなければ終了します。 |
+| `--retry-count <COUNT>` | 初回の一巡を除く最大リトライ回数。既定は`360`、`0`で一巡だけ試します。 |
+| `--retry-interval <SECONDS>` | 全接続先への試行が失敗した後の待機時間。既定は`10`秒。0〜2147483.647秒をミリ秒単位で指定します。 |
+| `--json` | 成功結果を`{"command":"...","result":...}`のJSONで出力します。 |
 
-共通オプションはサブコマンドの前後に指定でき、環境変数より優先します。
+共通オプションはサブコマンドの前後に指定できます。
+ホストやトークンを直接渡す方法は、[ホストを明示する接続（任意）](#ホストを明示する接続任意)を参照してください。
 録画時間そのものは、通信待ちの期限に含みません。
 `--timeout`は0.001〜2147483.647秒を指定できます。
 この範囲は[Node.jsのタイマー仕様](https://nodejs.org/docs/latest-v24.x/api/timers.html#settimeoutcallback-delay-args)に合わせています。
 
-使用中のエージェントへの接続は、初回を含めて最大361回試行します。
-`--retry-count 12 --retry-interval 5`なら、初回の拒否後に5秒間隔で最大12回リトライします。
-`--no-retry`は回数や間隔の指定より優先します。認証失敗や通信エラーはリトライしません。
+セクションから接続する場合は、各回の開始時に接続先をランダムに並べ替え、順に試します。
+使用中、認証失敗、通信エラーなどで接続できなければ、待機を挟まず次へ進みます。
+全接続先への試行が失敗したときだけ待機します。既定では初回を含めて最大361巡です。
+`--retry-count 12 --retry-interval 5`なら、一巡の失敗後に5秒待ち、最大12回やり直します。
+`--no-retry`は回数や間隔の指定より優先します。
 
 ### 各コマンドの動作
 
@@ -340,9 +435,9 @@ PowerShellでは、接続設定を`$env:AGENT_ROVER_HOST = '192.0.2.10'`、
 ### 結果と中断
 
 成功結果は標準出力、エラーは標準エラーへ出します。`--json`でもエラーを結果JSONに混ぜません。
-エージェントが使用中の場合は、待機のたびに接続先、次のリトライまでの秒数、リトライ回数を標準出力へ表示します。
+待機のたびにセクション名、各接続先の失敗理由、待機秒数、リトライ回数を標準出力へ表示します。明示指定時は、セクション名の代わりに指定したホストとポートを表示します。
 `--json`では、この待機メッセージを標準エラーへ出し、標準出力には結果JSONだけを出します。
-終了コードは、成功が`0`、接続や操作の失敗が`1`、引数の誤りが`2`、Ctrl+Cによる中断が`130`です。
+終了コードは、成功が`0`、接続や操作の失敗が`1`、引数や設定ファイルの誤りが`2`、Ctrl+Cによる中断が`130`です。
 通信断や期限切れで結果を確認できない場合は、成否不明と表示し、操作を自動再実行しません。
 中断や失敗の前に起動したアプリ、転送済みの内容、保存済みの撮影結果は残します。
 書き込み途中のファイルを元に戻すことは保証しません。
@@ -360,7 +455,7 @@ agent-roverは特定のテストフレームワークに依存しません。
 
 | API | 内容 |
 | :-- | :-- |
-| `connectRemoteAgent(options)` | リモートエージェントへ接続し、`RemoteAgent`を返します。 |
+| `connectRemoteAgent(options?)` | セクション内の接続先を試し、最初に接続できたエージェントの`RemoteAgent`を返します。 |
 | `RemoteAgent.capabilities()` | 接続先エージェントのプロトコルバージョン、プラットフォーム、機能一覧を取得します。 |
 | `RemoteAgent.release()` | リモートエージェントとの接続を閉じます。 |
 | `RemoteAgent.desktop()` | デスクトップ配置、モニターDPI、構成リビジョンをまとめて取得します。 |
@@ -371,23 +466,29 @@ agent-roverは特定のテストフレームワークに依存しません。
 | `RemoteAgent.recordVideo(durationMs, outputPath, options?)` | 画面全体、または指定矩形をH.264 MP4ファイルとしてキャプチャします。 |
 | `RemoteAgent.recordVideo(durationMs, options?)` | 動画をキャプチャし、テンポラリファイルを元にしたReadableStreamを返します。 |
 
-- `connectRemoteAgent()`には、エージェントの`host`、`port`、必要に応じて`authToken`と`timeoutMs`を指定します。
-- `authToken`を省略した場合は、環境変数`AGENT_ROVER_AUTH_TOKEN`も使用できます。
+`connectRemoteAgent()`は`default`セクションを使います。
+別のセクションは`section`で指定し、必要に応じて`timeoutMs`、`retry`、`onRetry`を設定します。
+設定は接続呼び出しごとに読み込み、その呼び出しの再試行中は読み直しません。
+従来の`host`・`port`・`authToken`も使えます。詳細は[ホストを明示する接続（任意）](#ホストを明示する接続任意)を参照してください。
 
-`retry`の既定値は`true`です。エージェントが使用中で接続を拒否した場合だけ、10秒間隔で最大360回リトライします。
-初回の接続は回数に含めないため、接続試行は最大361回です。
-認証失敗や通信エラーはリトライせず、接続後に切断されても自動では再接続しません。
+セクションから接続する場合は、各回の開始時にホストとトークンの組をランダムに並べ替え、順に接続します。
+認証とハンドシェークを完了した最初の接続先を使います。
+接続に失敗した場合は、使用中や認証失敗も含めて、待機を挟まず次の接続先を試します。
+全接続先への試行が失敗すると10秒待ち、並べ替えから繰り返します。
+`retry`の既定値は`true`で、初回を除いて最大360回、計361巡まで試します。
+接続後に切断されたセッションは、自動では再接続しません。
 
 回数と間隔は`retry: { maxRetries: 12, intervalMs: 5000 }`のように指定できます。
 省略した値には既定値を使います。`maxRetries`は0以上の安全な整数、`intervalMs`は0〜2147483647の整数です。
-`retry: false`または`maxRetries: 0`でリトライを無効にできます。
-リトライを無効にした場合や、回数を使い切った場合は、`RemoteAgentError.code`が`AGENT_BUSY`のエラーになります。
+`retry: false`または`maxRetries: 0`でも、全接続先を一巡は試します。
+接続できずに終了する場合は、最後の一巡の失敗理由をエラーに含めます。
+理由がすべて同じコードならそのコードを返し、異なる場合は`CONNECTION_FAILED`を返します。
 `timeoutMs`は接続試行1回ごとの期限で、リトライ全体の待ち時間は含みません。
 
 リトライの待機を始めるたびに、次のようなメッセージを標準エラーへ直接出力します。Vitestでもテストの実行中に確認できます。
 
 ```text
-[agent-rover] Agent at 192.0.2.10:39397 is busy (AGENT_BUSY). Retrying in 10s (1/360).
+No available agent in section "default". 192.0.2.10:39397 (AGENT_BUSY): Another connection is using this agent. Retrying in 10s (1/360).
 ```
 
 `onRetry`は、既定の出力に代えてメッセージを受け取るためのコールバックです。
@@ -403,9 +504,7 @@ import { connectRemoteAgent } from 'agent-rover';
 
 // リモートエージェントに接続
 const agent = await connectRemoteAgent({
-  host: '192.0.2.10',
-  port: 39397,
-  authToken: process.env.AGENT_ROVER_AUTH_TOKEN,
+  section: 'windows',
   timeoutMs: 30000,
 });
 

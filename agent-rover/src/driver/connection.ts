@@ -88,7 +88,13 @@ import type {
   RemoteWaitOptions,
   RemoteWindowQuery,
 } from '../index';
-import { resolveAuthToken } from '../auth';
+import {
+  loadConnectionSection,
+  type ConnectionEndpoint,
+  type ConnectionSection,
+} from './configuration';
+import { selectConnection, selectExplicitConnection } from './selection';
+import { createCredentialRedactor, resolveAuthToken } from '../auth';
 import { waitForResult } from '../wait';
 import {
   type ResourceDeadline,
@@ -104,11 +110,7 @@ import {
   type ProtocolBinaryTransferChunk,
 } from '../protocol';
 import { protocolVersion } from '../protocol_version';
-import {
-  createTcpFrameTransport,
-  type ProtocolTransport,
-  type ProtocolTransportCallbacks,
-} from './transport';
+import { createTcpFrameTransport, type ProtocolTransport } from './transport';
 import {
   createFileBinaryTransferReceiver,
   removeCompletedFileBinaryTransfer,
@@ -1576,76 +1578,187 @@ const settleReady = (
   }
 };
 
-const createTransport = (
-  options: ConnectRemoteAgentOptions,
-  timeoutMs: number,
-  authToken: string | undefined,
-  callbacks: ProtocolTransportCallbacks
-): ProtocolTransport =>
-  createTcpFrameTransport({
-    callbacks,
-    authToken,
-    host: options.host,
-    port: options.port,
-    timeoutMs,
-  });
+interface ConnectionAttemptOptions extends ConnectionEndpoint {
+  readonly timeoutMs: number;
+}
 
-/**
- * Connects to a remote agent-rover agent, retrying when it is already in use.
- * @param options Agent address, authentication, per-attempt timeout, and retry settings.
- * @returns An accepted remote session.
- * @remarks Exhausted or disabled retries report AGENT_BUSY. Other connection failures are not retried.
- */
-export const connectRemoteAgent = async (
+const validateConnectionOptions = (
   options: ConnectRemoteAgentOptions
-): Promise<RemoteAgent> => {
-  const retry = options.retry ?? true;
-  const settings = typeof retry === 'object' ? retry : undefined;
-  const maxRetries = retry === false ? 0 : (settings?.maxRetries ?? 360);
-  const intervalMs = settings?.intervalMs ?? 10000;
-  const onRetry =
-    options.onRetry ??
-    ((message: string): void => {
-      // Console interception can hide output until a test fails; report waits live.
-      process.stderr.write(`${message}\n`);
-    });
+): void => {
   if (
-    !Number.isSafeInteger(maxRetries) ||
-    maxRetries < 0 ||
-    !Number.isInteger(intervalMs) ||
-    intervalMs < 0 ||
-    intervalMs > 2147483647
+    options === null ||
+    typeof options !== 'object' ||
+    Array.isArray(options) ||
+    Object.keys(options).some(
+      (key) =>
+        ![
+          'section',
+          'host',
+          'port',
+          'authToken',
+          'timeoutMs',
+          'retry',
+          'onRetry',
+        ].includes(key)
+    )
   ) {
     throw createRemoteAgentError(
       'INVALID_ARGUMENT',
-      'retry.maxRetries must be a non-negative safe integer and retry.intervalMs must be an integer from 0 through 2147483647.'
+      'Unknown connection option.'
     );
   }
-  for (let retries = 0; ; ++retries) {
-    try {
-      return await connectRemoteAgentOnce(options);
-    } catch (error) {
-      if (
-        retries >= maxRetries ||
-        typeof error !== 'object' ||
-        error === null ||
-        !('code' in error) ||
-        error.code !== 'AGENT_BUSY'
-      )
-        throw error;
-      onRetry(
-        `[agent-rover] Agent at ${options.host}:${options.port} is busy (AGENT_BUSY). Retrying in ${intervalMs / 1000}s (${retries + 1}/${maxRetries}).`
-      );
-      await delay(intervalMs);
-    }
+  if (
+    options.timeoutMs !== undefined &&
+    (!Number.isFinite(options.timeoutMs) ||
+      options.timeoutMs < 1 ||
+      options.timeoutMs > 2147483647)
+  ) {
+    throw createRemoteAgentError(
+      'INVALID_ARGUMENT',
+      'timeoutMs must be between 1 and 2147483647.'
+    );
   }
 };
 
-const connectRemoteAgentOnce = async (
+/** A validated direct endpoint or a loaded configuration section. */
+export type ResolvedConnectionTarget = {
+  /** Filters credentials from user-visible text. */
+  readonly redact: (text: string) => string;
+} & (
+  | {
+      /** Direct connection without configuration access. */ readonly kind: 'explicit';
+      /** Validated address and credential. */ readonly endpoint: ConnectionEndpoint;
+    }
+  | {
+      /** Connection through a configured section. */ readonly kind: 'section';
+      /** Snapshot retained throughout retries. */ readonly section: ConnectionSection;
+    }
+);
+
+/**
+ * Resolves mutually exclusive connection options before opening a socket.
+ * @param options Section or explicit address, authentication, and retry controls.
+ * @returns The selected connection target and its credential filter.
+ * @remarks Explicit options never inspect .agent-rover, including on validation errors.
+ */
+export const resolveConnectionTarget = async (
+  options: ConnectRemoteAgentOptions
+): Promise<ResolvedConnectionTarget> => {
+  validateConnectionOptions(options);
+  if (
+    options.host !== undefined ||
+    options.port !== undefined ||
+    options.authToken !== undefined
+  ) {
+    if (options.section !== undefined)
+      throw createRemoteAgentError(
+        'INVALID_ARGUMENT',
+        'section cannot be combined with host, port, or authToken.'
+      );
+    if (
+      typeof options.host !== 'string' ||
+      options.host.trim() === '' ||
+      typeof options.port !== 'number' ||
+      !Number.isInteger(options.port) ||
+      options.port < 1 ||
+      options.port > 65535
+    ) {
+      throw createRemoteAgentError(
+        'INVALID_ARGUMENT',
+        'Explicit connections require a nonempty host and an integer port from 1 through 65535.'
+      );
+    }
+    if (
+      options.authToken !== undefined &&
+      typeof options.authToken !== 'string'
+    )
+      throw createRemoteAgentError(
+        'INVALID_ARGUMENT',
+        'authToken must be a string.'
+      );
+    const endpoint = {
+      host: options.host,
+      port: options.port,
+      authToken: resolveAuthToken(options.authToken),
+    };
+    return {
+      kind: 'explicit',
+      endpoint,
+      redact: createCredentialRedactor([endpoint.authToken]),
+    };
+  }
+  const section = await loadConnectionSection(options.section ?? 'default');
+  return { kind: 'section', section, redact: section.redact };
+};
+
+/**
+ * Connects using .agent-rover or an explicitly specified host and port.
+ * @param options Mutually exclusive section or explicit address, authentication, and retry settings.
+ * @returns The first authenticated, protocol-compatible session.
+ * @remarks The default section is default. The working directory takes priority;
+ * only a missing file or section falls back to the user's home. The selected
+ * snapshot is retained throughout retries. Failed candidates are closed before
+ * trying the next; delays occur only between complete shuffled rounds.
+ * Explicit connections bypass configuration and retry only AGENT_BUSY failures.
+ */
+export const connectRemoteAgent = async (
+  options: ConnectRemoteAgentOptions = {}
+): Promise<RemoteAgent> => {
+  return await connectRemoteAgentToTarget(
+    await resolveConnectionTarget(options),
+    options
+  );
+};
+
+/**
+ * Connects using a target already resolved by the SDK or CLI.
+ * @param target Validated endpoint or configuration snapshot.
+ * @param options Per-attempt timeout and retry controls.
+ * @returns The accepted session.
+ */
+export const connectRemoteAgentToTarget = async (
+  target: ResolvedConnectionTarget,
   options: ConnectRemoteAgentOptions
 ): Promise<RemoteAgent> => {
-  const timeoutMs = options.timeoutMs ?? defaultTimeoutMs;
-  const authToken = resolveAuthToken(options.authToken);
+  if (target.kind === 'section')
+    return await connectRemoteAgentInSection(target.section, options);
+  return await selectExplicitConnection(
+    target.endpoint,
+    options,
+    async (endpoint) =>
+      await connectRemoteAgentOnce({
+        ...endpoint,
+        timeoutMs: options.timeoutMs ?? defaultTimeoutMs,
+      })
+  );
+};
+
+/**
+ * Connects using a configuration snapshot already loaded by the CLI.
+ * @param section Validated candidates and the credential filter for this call.
+ * @param options Per-attempt timeout, retry settings, and output callback.
+ * @returns The accepted session.
+ */
+export const connectRemoteAgentInSection = async (
+  section: ConnectionSection,
+  options: ConnectRemoteAgentOptions
+): Promise<RemoteAgent> => {
+  validateConnectionOptions(options);
+  return await selectConnection(
+    section,
+    options,
+    async (endpoint) =>
+      await connectRemoteAgentOnce({
+        ...endpoint,
+        timeoutMs: options.timeoutMs ?? defaultTimeoutMs,
+      })
+  );
+};
+
+const connectRemoteAgentOnce = async (
+  options: ConnectionAttemptOptions
+): Promise<RemoteAgent> => {
+  const { timeoutMs, authToken } = options;
   const pending = createPendingRequestTable({
     requestTimeoutMs: timeoutMs,
   });
@@ -1964,115 +2077,121 @@ const connectRemoteAgentOnce = async (
   const preReadyErrorCode = (): RemoteAgentErrorCode =>
     socketOpened ? 'AUTHENTICATION_FAILED' : 'CONNECTION_FAILED';
 
-  transport = createTransport(options, timeoutMs, authToken, {
-    onBinaryChunk: async (chunk): Promise<void> => {
-      try {
-        await acceptBinaryChunk(chunk);
-      } catch (error) {
+  transport = createTcpFrameTransport({
+    host: options.host,
+    port: options.port,
+    timeoutMs,
+    authToken,
+    callbacks: {
+      onBinaryChunk: async (chunk): Promise<void> => {
+        try {
+          await acceptBinaryChunk(chunk);
+        } catch (error) {
+          const wrapped = createRemoteAgentError(
+            'PROTOCOL_ERROR',
+            error instanceof Error ? error.message : 'Invalid binary transfer.'
+          );
+          pending.rejectAll('PROTOCOL_ERROR', wrapped.message);
+          rejectBinaryTransferWaiters(wrapped);
+          rejectFileBinaryTransferWaiters(wrapped);
+          await cleanupFileBinaryTransfers();
+          void transport?.close();
+        }
+      },
+      onClose: (message) => {
+        disconnected = true;
         const wrapped = createRemoteAgentError(
-          'PROTOCOL_ERROR',
-          error instanceof Error ? error.message : 'Invalid binary transfer.'
+          readyState?.settled === true ? 'DISCONNECTED' : preReadyErrorCode(),
+          message
         );
-        pending.rejectAll('PROTOCOL_ERROR', wrapped.message);
+        recordingCancellation.abort(wrapped);
+        if (readyState !== undefined) {
+          settleReady(readyState, 'reject', wrapped);
+        }
+        pending.rejectAll('DISCONNECTED', wrapped.message);
         rejectBinaryTransferWaiters(wrapped);
         rejectFileBinaryTransferWaiters(wrapped);
-        await cleanupFileBinaryTransfers();
-        void transport?.close();
-      }
-    },
-    onClose: (message) => {
-      disconnected = true;
-      const wrapped = createRemoteAgentError(
-        readyState?.settled === true ? 'DISCONNECTED' : preReadyErrorCode(),
-        message
-      );
-      recordingCancellation.abort(wrapped);
-      if (readyState !== undefined) {
-        settleReady(readyState, 'reject', wrapped);
-      }
-      pending.rejectAll('DISCONNECTED', wrapped.message);
-      rejectBinaryTransferWaiters(wrapped);
-      rejectFileBinaryTransferWaiters(wrapped);
-      void cleanupFileBinaryTransfers();
-    },
-    onError: (error) => {
-      const wrapped = createRemoteAgentError(
-        readyState?.settled === true ? 'DISCONNECTED' : preReadyErrorCode(),
-        error.message
-      );
-      recordingCancellation.abort(wrapped);
-      if (readyState !== undefined) {
-        settleReady(readyState, 'reject', wrapped);
-      }
-      pending.rejectAll('DISCONNECTED', wrapped.message);
-      rejectBinaryTransferWaiters(wrapped);
-      rejectFileBinaryTransferWaiters(wrapped);
-      void cleanupFileBinaryTransfers();
-    },
-    onMessage: (message) => {
-      try {
-        if (message.kind === 'event' && message.name === 'agent.rejected') {
-          if (readyState === undefined || readyState.settled) return;
-          const data = message.data;
-          if (
-            !isRecord(data) ||
-            data.code !== 'AGENT_BUSY' ||
-            typeof data.message !== 'string'
-          ) {
-            throw new Error('Invalid connection rejection event.');
-          }
-          settleReady(
-            readyState,
-            'reject',
-            createRemoteAgentError('AGENT_BUSY', data.message)
-          );
-          return;
+        void cleanupFileBinaryTransfers();
+      },
+      onError: (error) => {
+        const wrapped = createRemoteAgentError(
+          readyState?.settled === true ? 'DISCONNECTED' : preReadyErrorCode(),
+          error.message
+        );
+        recordingCancellation.abort(wrapped);
+        if (readyState !== undefined) {
+          settleReady(readyState, 'reject', wrapped);
         }
-        if (message.kind === 'response') {
-          pending.acceptResponse(message);
-          return;
-        }
-        if (message.kind === 'event' && message.name === 'agent.ready') {
-          const eventData = isRecord(message.data) ? message.data : undefined;
-          const capabilities = parseCapabilities(
-            isRecord(eventData)
-              ? (eventData.capabilities as JsonValue)
-              : undefined
-          );
-          if (capabilities.protocolVersion !== protocolVersion) {
-            if (readyState !== undefined) {
-              settleReady(
-                readyState,
-                'reject',
-                createRemoteAgentError(
-                  'HANDSHAKE_FAILED',
-                  `Unsupported protocol version: ${capabilities.protocolVersion}.`
-                )
-              );
+        pending.rejectAll('DISCONNECTED', wrapped.message);
+        rejectBinaryTransferWaiters(wrapped);
+        rejectFileBinaryTransferWaiters(wrapped);
+        void cleanupFileBinaryTransfers();
+      },
+      onMessage: (message) => {
+        try {
+          if (message.kind === 'event' && message.name === 'agent.rejected') {
+            if (readyState === undefined || readyState.settled) return;
+            const data = message.data;
+            if (
+              !isRecord(data) ||
+              data.code !== 'AGENT_BUSY' ||
+              typeof data.message !== 'string'
+            ) {
+              throw new Error('Invalid connection rejection event.');
             }
-            void transport?.close();
+            settleReady(
+              readyState,
+              'reject',
+              createRemoteAgentError('AGENT_BUSY', data.message)
+            );
             return;
           }
-          if (readyState !== undefined) {
-            settleReady(readyState, 'resolve', capabilities);
+          if (message.kind === 'response') {
+            pending.acceptResponse(message);
+            return;
           }
+          if (message.kind === 'event' && message.name === 'agent.ready') {
+            const eventData = isRecord(message.data) ? message.data : undefined;
+            const capabilities = parseCapabilities(
+              isRecord(eventData)
+                ? (eventData.capabilities as JsonValue)
+                : undefined
+            );
+            if (capabilities.protocolVersion !== protocolVersion) {
+              if (readyState !== undefined) {
+                settleReady(
+                  readyState,
+                  'reject',
+                  createRemoteAgentError(
+                    'HANDSHAKE_FAILED',
+                    `Unsupported protocol version: ${capabilities.protocolVersion}.`
+                  )
+                );
+              }
+              void transport?.close();
+              return;
+            }
+            if (readyState !== undefined) {
+              settleReady(readyState, 'resolve', capabilities);
+            }
+          }
+        } catch (error) {
+          if (readyState !== undefined) {
+            settleReady(
+              readyState,
+              'reject',
+              createRemoteAgentError(
+                'HANDSHAKE_FAILED',
+                error instanceof Error ? error.message : 'Invalid handshake.'
+              )
+            );
+          }
+          void transport?.close();
         }
-      } catch (error) {
-        if (readyState !== undefined) {
-          settleReady(
-            readyState,
-            'reject',
-            createRemoteAgentError(
-              'HANDSHAKE_FAILED',
-              error instanceof Error ? error.message : 'Invalid handshake.'
-            )
-          );
-        }
-        void transport?.close();
-      }
-    },
-    onOpen: () => {
-      socketOpened = true;
+      },
+      onOpen: () => {
+        socketOpened = true;
+      },
     },
   });
 

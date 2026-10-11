@@ -3,13 +3,14 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+import { connectTestAgent } from './helpers/test-connection';
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { expect, it } from 'vitest';
-import { connectRemoteAgent, type RemoteAgent } from '../src/index';
+import { type RemoteAgent } from '../src/index';
 import { waitForResult } from '../src/wait';
 import { nativeTestPaths } from './helpers/native-paths';
 import { connectWindowsBootstrap } from './helpers/windows-bootstrap';
@@ -67,7 +68,7 @@ for (const [architecture, limitMiB] of [
         agent = await waitForResult(
           async () => {
             try {
-              return await connectRemoteAgent({
+              return await connectTestAgent({
                 host: host!,
                 port,
                 authToken: token,

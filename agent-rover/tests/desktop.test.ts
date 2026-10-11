@@ -3,8 +3,9 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+import { connectTestAgent } from './helpers/test-connection';
 import { describe, expect, it } from 'vitest';
-import { connectRemoteAgent, type RemoteMonitor } from '../src/index';
+import { type RemoteMonitor } from '../src/index';
 import { defaultFakeWindow, startFakeTcpAgent } from './helpers/fake-tcp-agent';
 
 const primary: RemoteMonitor = {
@@ -29,7 +30,7 @@ const left: RemoteMonitor = {
 describe('desktop observations', () => {
   it('returns geometry and DPI together and identifies configuration changes', async () => {
     const fake = await startFakeTcpAgent({ monitors: [primary, left] });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fake.host,
       port: fake.port,
     });
@@ -70,7 +71,7 @@ describe('desktop observations', () => {
         },
       ],
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fake.host,
       port: fake.port,
     });
@@ -99,7 +100,7 @@ describe('desktop observations', () => {
     const fake = await startFakeTcpAgent({
       monitors: [{ ...primary, ...values }],
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fake.host,
       port: fake.port,
     });
@@ -135,7 +136,7 @@ describe('placement and diagnostics', () => {
             }
           : undefined,
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fake.host,
       port: fake.port,
     });
@@ -190,7 +191,7 @@ describe('placement and diagnostics', () => {
           return undefined;
         },
       });
-      const agent = await connectRemoteAgent({
+      const agent = await connectTestAgent({
         host: fake.host,
         port: fake.port,
       });
@@ -244,7 +245,7 @@ describe('placement and diagnostics', () => {
         return undefined;
       },
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fake.host,
       port: fake.port,
     });
@@ -276,7 +277,7 @@ describe('placement and diagnostics', () => {
         return undefined;
       },
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fake.host,
       port: fake.port,
     });
@@ -304,7 +305,7 @@ describe('placement and diagnostics', () => {
     'does not accept unavailable or undisplayed placement: %j',
     async (snapshot) => {
       const fake = await startFakeTcpAgent({ windows: [snapshot] });
-      const agent = await connectRemoteAgent({
+      const agent = await connectTestAgent({
         host: fake.host,
         port: fake.port,
       });
@@ -325,7 +326,7 @@ describe('placement and diagnostics', () => {
 
   it('rejects invalid placement conditions before waiting', async () => {
     const fake = await startFakeTcpAgent({});
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fake.host,
       port: fake.port,
     });
@@ -358,7 +359,7 @@ describe('placement and diagnostics', () => {
         return undefined;
       },
     });
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fake.host,
       port: fake.port,
     });

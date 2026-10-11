@@ -3,10 +3,11 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+import { connectTestAgent } from './helpers/test-connection';
 import { PNG } from 'pngjs';
 import { describe, expect, it } from 'vitest';
 
-import { compareImages, connectRemoteAgent } from '../src/index';
+import { compareImages } from '../src/index';
 import { startFakeTcpAgent } from './helpers/fake-tcp-agent';
 
 const solidPng = (
@@ -33,7 +34,7 @@ describe.concurrent('window screenshots', () => {
       screenshotImage: solidPng(640, 480, [0, 0, 0, 255]),
     });
 
-    const agent = await connectRemoteAgent({
+    const agent = await connectTestAgent({
       host: fakeAgent.host,
       port: fakeAgent.port,
     });

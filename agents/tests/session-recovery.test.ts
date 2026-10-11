@@ -3,7 +3,8 @@ import { once } from 'node:events';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { expect, it } from 'vitest';
-import { connectRemoteAgent } from '../../agent-rover/src/driver/connection';
+
+import { connectTestAgent } from '../../agent-rover/tests/helpers/test-connection';
 import { waitForResult } from '../../agent-rover/src/wait';
 
 const root = resolve(import.meta.dirname, '..');
@@ -54,11 +55,11 @@ it('recovers desktop execution after TCP disconnect while capture cleanup is loc
   });
   let holder: ReturnType<typeof spawn> | undefined;
   let holderPid: string | undefined;
-  let first: Awaited<ReturnType<typeof connectRemoteAgent>> | undefined;
-  let second: Awaited<ReturnType<typeof connectRemoteAgent>> | undefined;
+  let first: Awaited<ReturnType<typeof connectTestAgent>> | undefined;
+  let second: Awaited<ReturnType<typeof connectTestAgent>> | undefined;
   let interrupted: Promise<void> | undefined;
   const connect = async () =>
-    await connectRemoteAgent({ host: '127.0.0.1', port, timeoutMs: 10000 });
+    await connectTestAgent({ host: '127.0.0.1', port, timeoutMs: 10000 });
   try {
     await ready;
     first = await waitForResult(
