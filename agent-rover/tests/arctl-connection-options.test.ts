@@ -7,7 +7,7 @@ import { expect, it } from 'vitest';
 import { parseArctlArguments } from '../src/cli/arguments';
 
 it('uses default and retries failed rounds 360 times at ten-second intervals', () => {
-  expect(parseArctlArguments(['windows'], 'test')).toMatchObject({
+  expect(parseArctlArguments(['windows'], {}, 'test')).toMatchObject({
     connection: {
       section: 'default',
       retry: { maxRetries: 360, intervalMs: 10000 },
@@ -45,7 +45,7 @@ it.each([
       ['windows', ...args],
       [...args, 'windows'],
     ]) {
-      expect(parseArctlArguments(invocation, 'test')).toMatchObject({
+      expect(parseArctlArguments(invocation, {}, 'test')).toMatchObject({
         connection: { retry },
       });
     }
@@ -64,7 +64,7 @@ it.each([
   ['--retry-interval', '2147483.648'],
   ['--retry-interval', ''],
 ])('rejects invalid retry settings %s %s', (option, value) => {
-  expect(() => parseArctlArguments(['windows', option, value], 'test')).toThrow(
-    option
-  );
+  expect(() =>
+    parseArctlArguments(['windows', option, value], {}, 'test')
+  ).toThrow(option);
 });

@@ -34,6 +34,9 @@ export const createConfigurationFixture = async (
     workingDirectory,
     environment: {
       ...process.env,
+      AGENT_ROVER_HOST: undefined,
+      AGENT_ROVER_PORT: undefined,
+      AGENT_ROVER_AUTH_TOKEN: undefined,
       AGENT_ROVER_TEST_CONFIG_HOME: directory,
       NODE_OPTIONS:
         `${process.env.NODE_OPTIONS ?? ''} --import=${preload}`.trim(),

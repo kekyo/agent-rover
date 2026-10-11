@@ -5,8 +5,11 @@
 // https://github.com/kekyo/agent-rover
 
 import type { RemoteAgent } from './index';
-import { connectRemoteAgentInSection } from './driver/connection';
-import { loadConnectionSection } from './driver/configuration';
+import { authTokenEnvVarName, createCredentialRedactor } from './auth';
+import {
+  connectRemoteAgentToTarget,
+  resolveConnectionTarget,
+} from './driver/connection';
 import { version } from './generated/packageMetadata';
 import { parseArctlArguments } from './cli/arguments';
 import { launchArctlApplication, listArctlWindows } from './cli/commands';
@@ -19,7 +22,17 @@ const main = async (): Promise<number> => {
   let executing = false;
   let interrupted = false;
   const interruption = new AbortController();
-  let redact = (text: string): string => text;
+  const tokens = [process.env[authTokenEnvVarName]];
+  // Collect credentials before parsing so argument errors cannot expose them.
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index]!;
+    if (argument === '--') break;
+    if (argument === '--token') tokens.push(args[++index]);
+    else if (argument.startsWith('--token='))
+      tokens.push(argument.slice('--token='.length));
+  }
+  const redactProvided = createCredentialRedactor(tokens);
+  let redact = redactProvided;
   const onInterrupt = (): void => {
     interrupted = true;
     interruption.abort();
@@ -35,15 +48,13 @@ const main = async (): Promise<number> => {
   };
   process.on('SIGINT', onInterrupt);
   try {
-    const parsed = parseArctlArguments(args, version);
+    const parsed = parseArctlArguments(args, process.env, version);
     if (parsed.action === 'display') {
       process.stdout.write(parsed.text);
       return 0;
     }
-    const section = await loadConnectionSection(
-      parsed.connection.section ?? 'default'
-    );
-    redact = section.redact;
+    const target = await resolveConnectionTarget(parsed.connection);
+    redact = (text) => redactProvided(target.redact(text));
     const writeResult = (result: unknown, text: string): void => {
       process.stdout.write(
         parsed.json
@@ -52,7 +63,7 @@ const main = async (): Promise<number> => {
       );
     };
     executing = true;
-    agent = await connectRemoteAgentInSection(section, {
+    agent = await connectRemoteAgentToTarget(target, {
       ...parsed.connection,
       onRetry: (message) => {
         const output = parsed.json ? process.stderr : process.stdout;

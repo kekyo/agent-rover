@@ -19,9 +19,13 @@ import {
 import { createConfigurationFixture } from './helpers/configuration-fixture';
 import { defaultFakeCapabilities } from './helpers/fake-tcp-agent';
 
-it.each(['arctl', 'arctl-json', 'vitest-forks', 'vitest-threads'])(
-  'shows a busy notice before the connection can succeed (%s)',
-  async (runner) => {
+it.each(
+  ['arctl', 'arctl-json', 'vitest-forks', 'vitest-threads'].flatMap((runner) =>
+    [false, true].map((explicit) => ({ runner, explicit }))
+  )
+)(
+  'shows a busy notice before the connection can succeed ($runner, explicit: $explicit)',
+  async ({ runner, explicit }) => {
     const directory = await mkdtemp(
       join(tmpdir(), 'agent-rover-retry-output-')
     );
@@ -87,7 +91,9 @@ it.each(['arctl', 'arctl-json', 'vitest-forks', 'vitest-threads'])(
     const address = server.address();
     if (address === null || typeof address === 'string')
       throw new Error('Expected TCP address.');
-    const notice = `No available agent in section "default". 127.0.0.1:${address.port} (AGENT_BUSY): Another connection is using this agent. Retrying in 0.01s (1/1).\n`;
+    const notice = explicit
+      ? `[agent-rover] Agent at 127.0.0.1:${address.port} is busy (AGENT_BUSY). Retrying in 0.01s (1/1).\n`
+      : `No available agent in section "default". 127.0.0.1:${address.port} (AGENT_BUSY): Another connection is using this agent. Retrying in 0.01s (1/1).\n`;
     const cli = runner.startsWith('arctl');
     let args: string[];
     if (cli) {
@@ -100,6 +106,9 @@ it.each(['arctl', 'arctl-json', 'vitest-forks', 'vitest-threads'])(
         '1',
         '--retry-interval',
         '0.01',
+        ...(explicit
+          ? ['--host', '127.0.0.1', '--port', String(address.port)]
+          : []),
         ...(runner === 'arctl-json' ? ['--json'] : []),
       ];
     } else {
@@ -113,7 +122,7 @@ it.each(['arctl', 'arctl-json', 'vitest-forks', 'vitest-threads'])(
         `
 import { connectRemoteAgent } from ${JSON.stringify(fileURLToPath(new URL('../dist/index.mjs', import.meta.url)))};
 it('connects after a visible retry notice', async () => {
-  const agent = await connectRemoteAgent({ timeoutMs: 5000, retry: { maxRetries: 1, intervalMs: 10 } });
+  const agent = await connectRemoteAgent({ ${explicit ? `host: '127.0.0.1', port: ${address.port},` : ''} timeoutMs: 5000, retry: { maxRetries: 1, intervalMs: 10 } });
   try { expect(await agent.windows()).toEqual([]); } finally { agent.release(); }
 }, 10000);
 `

@@ -16,10 +16,10 @@ const exec = promisify(execFile);
 
 it.each(
   ['module', 'commonjs'].flatMap((format) =>
-    ['home', 'working'].map((source) => ({ format, source }))
+    ['home', 'working', 'explicit'].map((source) => ({ format, source }))
   )
 )(
-  'loads the $source default section from the packaged $format entry',
+  'connects using $source settings from the packaged $format entry',
   async ({ format, source }) => {
     const fake = await startFakeTcpAgent({ authToken: 'package-token' });
     const configuration = `[default]\n${fake.host}:${fake.port}=package-token\n`;
@@ -50,7 +50,7 @@ it.each(
           '--input-type=module',
           '-e',
           `${load}
-      const agent = await connectRemoteAgent();
+      const agent = await connectRemoteAgent(${source === 'explicit' ? JSON.stringify({ host: fake.host, port: fake.port, authToken: 'package-token' }) : ''});
       try { console.log((await agent.capabilities()).platform); }
       finally { agent.release(); }
     `,
