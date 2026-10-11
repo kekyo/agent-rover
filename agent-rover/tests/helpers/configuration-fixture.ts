@@ -3,12 +3,14 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 /** Isolated configuration for CLI and package subprocess tests. */
 export interface ConfigurationFixture {
+  /** Empty working directory, separate from the configured home directory. */
+  readonly workingDirectory: string;
   /** Environment that loads the test-only home directory shim. */
   readonly environment: NodeJS.ProcessEnv;
   /** Removes the isolated configuration directory. */
@@ -24,9 +26,12 @@ export const createConfigurationFixture = async (
   text: string
 ): Promise<ConfigurationFixture> => {
   const directory = await mkdtemp(join(tmpdir(), 'agent-rover-cli-config-'));
+  const workingDirectory = join(directory, 'working');
+  await mkdir(workingDirectory);
   await writeFile(join(directory, '.agent-rover'), text);
   const preload = new URL('./configuration-home.mjs', import.meta.url).href;
   return {
+    workingDirectory,
     environment: {
       ...process.env,
       AGENT_ROVER_TEST_CONFIG_HOME: directory,

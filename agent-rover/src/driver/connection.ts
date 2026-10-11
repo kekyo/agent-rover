@@ -1611,10 +1611,12 @@ const validateConnectionOptions = (
 };
 
 /**
- * Connects using a section of the current user's .agent-rover configuration.
+ * Connects using a section of .agent-rover in the working directory or user's home.
  * @param options Section name, per-attempt timeout, and retry settings.
  * @returns The first authenticated, protocol-compatible session.
- * @remarks The default section is default. Failed candidates are closed before
+ * @remarks The default section is default. The working directory takes priority;
+ * only a missing file or section falls back to the user's home. The selected
+ * snapshot is retained throughout retries. Failed candidates are closed before
  * trying the next; delays occur only between complete shuffled rounds.
  */
 export const connectRemoteAgent = async (

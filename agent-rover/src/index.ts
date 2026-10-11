@@ -1296,7 +1296,11 @@ export interface RemoteConnectionRetryOptions {
 
 /** Options used to connect to a remote agent. */
 export interface ConnectRemoteAgentOptions {
-  /** Section in the current user's .agent-rover file. Defaults to default. */
+  /**
+   * Section in .agent-rover. Defaults to default.
+   * @remarks Searches the working directory first, then the user's home if the
+   * file or section is absent. An empty section or invalid file is an error.
+   */
   readonly section?: string;
   /** Timeout for each connection attempt and each request, in milliseconds. */
   readonly timeoutMs?: number;

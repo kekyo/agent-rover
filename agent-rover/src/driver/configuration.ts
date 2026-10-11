@@ -99,56 +99,79 @@ export const parseConnectionConfiguration = (
 };
 
 /**
- * Reads and validates one configuration snapshot.
- * @param path Configuration file to read.
+ * Reads and validates the first available configuration section.
+ * @param paths Configuration files in priority order.
  * @param name Exact name of the section to select.
- * @returns Nonempty candidates and a filter for all credentials in the file.
- * @remarks The caller retains this snapshot throughout all retry rounds.
+ * @returns Nonempty candidates and a filter for all credentials in the selected file.
+ * @remarks Missing files and missing sections advance to the next file. Empty
+ * sections, syntax errors, and other read errors fail immediately. The caller
+ * retains this snapshot throughout all retry rounds.
  */
 export const readConnectionSection = async (
-  path: string,
+  paths: readonly string[],
   name: string
 ): Promise<ConnectionSection> => {
   if (typeof name !== 'string' || name.trim() === '') {
     throw configurationError('section must be a nonempty string.');
   }
-  let text: string;
-  try {
-    text = await readFile(path, 'utf8');
-  } catch {
-    throw configurationError(`Cannot read agent configuration: ${path}.`);
-  }
-  const sections = parseConnectionConfiguration(text, path);
-  const endpoints = sections.get(name);
-  if (endpoints === undefined || endpoints.length === 0) {
-    throw configurationError(
-      `Selected section is missing or empty in ${path}.`
-    );
-  }
-  // Match longer credentials first, so a shared prefix cannot expose a suffix.
-  const tokens = [
-    ...new Set(
-      [...sections.values()].flatMap((entries) =>
-        entries.flatMap(({ authToken }) =>
-          authToken === undefined ? [] : [authToken]
-        )
+  for (const path of paths) {
+    let text: string;
+    try {
+      text = await readFile(path, 'utf8');
+    } catch (error) {
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        error.code === 'ENOENT'
       )
-    ),
-  ].sort((a, b) => b.length - a.length);
-  const redact = (message: string): string => {
-    for (const token of tokens)
-      message = message.replaceAll(token, '[redacted]');
-    return message;
-  };
-  return { name, endpoints, redact };
+        continue;
+      throw configurationError(`Cannot read agent configuration: ${path}.`);
+    }
+    const sections = parseConnectionConfiguration(text, path);
+    const endpoints = sections.get(name);
+    if (endpoints === undefined) continue;
+    if (endpoints.length === 0) {
+      throw configurationError(`Selected section is empty in ${path}.`);
+    }
+    // Match longer credentials first, so a shared prefix cannot expose a suffix.
+    const tokens = [
+      ...new Set(
+        [...sections.values()].flatMap((entries) =>
+          entries.flatMap(({ authToken }) =>
+            authToken === undefined ? [] : [authToken]
+          )
+        )
+      ),
+    ].sort((a, b) => b.length - a.length);
+    const redact = (message: string): string => {
+      for (const token of tokens)
+        message = message.replaceAll(token, '[redacted]');
+      return message;
+    };
+    return { name, endpoints, redact };
+  }
+  throw configurationError(
+    `Selected section ${JSON.stringify(name)} was not found. Searched: ${paths.join(', ')}.`
+  );
 };
 
 /**
- * Loads a section from the current user's .agent-rover file.
+ * Loads a section from .agent-rover in the working directory, then the user's home.
  * @param name Exact section name, normally default.
  * @returns A validated configuration snapshot.
+ * @remarks Both directories are captured when this call begins. The first
+ * matching section supplies all candidates; files are never merged.
  */
 export const loadConnectionSection = async (
   name: string
 ): Promise<ConnectionSection> =>
-  await readConnectionSection(join(homedir(), '.agent-rover'), name);
+  await readConnectionSection(
+    [
+      ...new Set([
+        join(process.cwd(), '.agent-rover'),
+        join(homedir(), '.agent-rover'),
+      ]),
+    ],
+    name
+  );

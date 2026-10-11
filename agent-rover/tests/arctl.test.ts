@@ -40,7 +40,11 @@ const runArctl = async (args: readonly string[], configuration: string) => {
         execFile(
           process.execPath,
           [executable, ...args],
-          { env: fixture.environment, timeout: 20000 },
+          {
+            cwd: fixture.workingDirectory,
+            env: fixture.environment,
+            timeout: 20000,
+          },
           (error, stdout, stderr) => {
             if (error !== null && typeof error.code !== 'number') reject(error);
             else resolve({ code: error?.code ?? 0, stdout, stderr });
@@ -834,6 +838,7 @@ describe('arctl', () => {
     );
     const connected = once(server, 'connection');
     const child = spawn(process.execPath, [executable, 'windows'], {
+      cwd: fixture.workingDirectory,
       env: fixture.environment,
       stdio: 'ignore',
     });

@@ -48,6 +48,7 @@ const arctl = async (args: readonly string[]) => {
       process.execPath,
       [join(root, 'agent-rover/dist/arctl.mjs'), ...args],
       {
+        cwd: fixture.workingDirectory,
         env: fixture.environment,
         timeout: 60000,
       }

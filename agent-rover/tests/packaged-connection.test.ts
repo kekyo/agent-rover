@@ -4,6 +4,8 @@
 // https://github.com/kekyo/agent-rover
 
 import { execFile } from 'node:child_process';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { expect, it } from 'vitest';
@@ -12,12 +14,17 @@ import { startFakeTcpAgent } from './helpers/fake-tcp-agent';
 
 const exec = promisify(execFile);
 
-it.each(['module', 'commonjs'])(
-  'loads the default section from the packaged %s entry',
-  async (format) => {
+it.each(
+  ['module', 'commonjs'].flatMap((format) =>
+    ['home', 'working'].map((source) => ({ format, source }))
+  )
+)(
+  'loads the $source default section from the packaged $format entry',
+  async ({ format, source }) => {
     const fake = await startFakeTcpAgent({ authToken: 'package-token' });
+    const configuration = `[default]\n${fake.host}:${fake.port}=package-token\n`;
     const fixture = await createConfigurationFixture(
-      `[default]\n${fake.host}:${fake.port}=package-token\n`
+      source === 'home' ? configuration : ''
     );
     const path = fileURLToPath(
       new URL(
@@ -31,6 +38,12 @@ it.each(['module', 'commonjs'])(
         : `import { createRequire } from 'node:module';
        const { connectRemoteAgent } = createRequire(import.meta.url)(${JSON.stringify(path)});`;
     try {
+      if (source === 'working') {
+        await writeFile(
+          join(fixture.workingDirectory, '.agent-rover'),
+          configuration
+        );
+      }
       const result = await exec(
         process.execPath,
         [
@@ -42,7 +55,11 @@ it.each(['module', 'commonjs'])(
       finally { agent.release(); }
     `,
         ],
-        { env: fixture.environment, timeout: 10000 }
+        {
+          cwd: fixture.workingDirectory,
+          env: fixture.environment,
+          timeout: 10000,
+        }
       );
       expect(result.stdout).toBe('windows\n');
       expect(result.stderr).toBe('');

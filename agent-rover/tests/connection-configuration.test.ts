@@ -72,26 +72,30 @@ it('reads only the selected candidates and reports missing/empty sections and fi
   const directory = await mkdtemp(join(tmpdir(), 'agent-rover-config-'));
   const path = join(directory, '.agent-rover');
   try {
-    await expect(readConnectionSection(path, 'default')).rejects.toMatchObject({
+    await expect(
+      readConnectionSection([path], 'default')
+    ).rejects.toMatchObject({
       code: 'INVALID_ARGUMENT',
     });
     await writeFile(path, '[default]\na=one\n[other]\nb:12=two\n[empty]\n');
-    expect(await readConnectionSection(path, 'other')).toMatchObject({
+    expect(await readConnectionSection([path], 'other')).toMatchObject({
       name: 'other',
       endpoints: [{ host: 'b', port: 12, authToken: 'two' }],
     });
-    const section = await readConnectionSection(path, 'default');
+    const section = await readConnectionSection([path], 'default');
     expect(section.redact('one and two')).toBe('[redacted] and [redacted]');
     for (const name of ['missing', 'empty', 'DEFAULT', '']) {
-      await expect(readConnectionSection(path, name)).rejects.toMatchObject({
+      await expect(readConnectionSection([path], name)).rejects.toMatchObject({
         code: 'INVALID_ARGUMENT',
       });
     }
     await writeFile(path, '[other]\nb=changed\n');
     expect(
-      (await readConnectionSection(path, 'other')).endpoints[0]!.authToken
+      (await readConnectionSection([path], 'other')).endpoints[0]!.authToken
     ).toBe('changed');
-    await expect(readConnectionSection(path, 'default')).rejects.toMatchObject({
+    await expect(
+      readConnectionSection([path], 'default')
+    ).rejects.toMatchObject({
       code: 'INVALID_ARGUMENT',
     });
   } finally {

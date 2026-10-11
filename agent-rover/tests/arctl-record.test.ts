@@ -33,6 +33,7 @@ const run = async (
           process.execPath,
           [executable, ...args],
           {
+            cwd: fixture.workingDirectory,
             env: {
               ...fixture.environment,
               ...(tempDirectory === undefined ? {} : { TMPDIR: tempDirectory }),
@@ -216,6 +217,7 @@ it('interrupts after receiving the recording request, without waiting for the du
     process.execPath,
     [executable, 'record', join(directory, 'output.mp4'), '--seconds', '600'],
     {
+      cwd: fixture.workingDirectory,
       env: {
         ...fixture.environment,
         TMPDIR: directory,
