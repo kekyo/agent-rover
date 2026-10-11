@@ -1,3 +1,7 @@
-// Select the best DPI awareness supported by Windows; legacy systems use dpiAware.
 #include <windows.h>
+#include "resource.h"
+
+IDI_AGENT_ROVER ICON "agent-rover.ico"
+
+// Select the best DPI awareness supported by Windows; legacy systems use dpiAware.
 1 RT_MANIFEST "agent.manifest"

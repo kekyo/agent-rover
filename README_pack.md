@@ -112,8 +112,9 @@ C:\> agent-amd64.exe
 ```
 
 Double-click the tray icon or choose “Show logs” to open the viewer.
-The version banner and copyable token field appear above the log list.
-Copy the token into the driver's `authToken` option.
+The version banner, token field and Copy button appear above the log list.
+Use Copy to copy the token into the driver's `authToken` option.
+When you supply a token with `--unsafe-token`, the token field and Copy button are hidden.
 Closing the viewer keeps the agent running; choose “Exit” from the tray to stop it.
 
 Logs include connection, authentication and process events, request IDs and

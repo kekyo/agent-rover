@@ -75,7 +75,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, wchar_t*, int) {
       parsed.options.auth_required,
       parsed.options.auth_token,
       parsed.options.max_transfer_bytes,
-      parsed.options.multiple_connections};
+      parsed.options.multiple_connections,
+      parsed.options.auth_token.empty()};
 
   if (options.auth_required && options.auth_token.empty()) {
     std::string error;

@@ -87,6 +87,7 @@ it.each(['amd64', 'i686'])(
     let holderPid: string | undefined;
     try {
       agent = await connect();
+      await run('private-token', String(port));
       const initial = (await run('metrics', String(port))).stdout.match(
         /pid=(\d+)/u
       )![1];
@@ -118,6 +119,7 @@ it.each(['amd64', 'i686'])(
         /pid=(\d+)/u
       )![1];
       expect(restarted).not.toBe(initial);
+      await run('private-token', String(port));
       await expect(agent.files.readFile(remoteOversized)).rejects.toMatchObject(
         { code: 'OPERATION_FAILED' }
       );
@@ -175,6 +177,7 @@ it.each(['amd64', 'i686'])(
       agent = undefined;
       await run('kill-server', String(port));
       agent = await connect();
+      await run('private-token', String(port));
       expect(
         (await run('metrics', String(port))).stdout.match(/pid=(\d+)/u)![1]
       ).not.toBe(restarted);
