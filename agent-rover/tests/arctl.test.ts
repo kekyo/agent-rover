@@ -28,6 +28,7 @@ import {
 } from '../src/index';
 
 import { defaultFakeWindow, startFakeTcpAgent } from './helpers/fake-tcp-agent';
+import { encodeTcpFrame, tcpFrameKindJson } from '../src/driver/tcp-frame';
 
 const executable = fileURLToPath(new URL('../dist/arctl.mjs', import.meta.url));
 
@@ -61,6 +62,73 @@ const runArctl = async (args: readonly string[], env: NodeJS.ProcessEnv) =>
   );
 
 describe('arctl', () => {
+  it.each([
+    { args: ['--no-retry'], attempts: 1 },
+    { args: ['--retry-count', '0'], attempts: 1 },
+    { args: ['--retry-count', '2', '--retry-interval', '0.001'], attempts: 3 },
+    {
+      args: ['--json', '--retry-count', '2', '--retry-interval', '0.001'],
+      attempts: 3,
+    },
+  ])(
+    'reports a busy agent after the requested attempts: $args',
+    async ({ args, attempts }) => {
+      let connections = 0;
+      const server = createServer((socket) => {
+        connections += 1;
+        socket.end(
+          encodeTcpFrame({
+            kind: tcpFrameKindJson,
+            payload: Buffer.from(
+              JSON.stringify({
+                kind: 'event',
+                name: 'agent.rejected',
+                data: {
+                  code: 'AGENT_BUSY',
+                  message: 'Another connection is using this agent.',
+                },
+              })
+            ),
+          })
+        );
+      });
+      server.listen(0, '127.0.0.1');
+      await once(server, 'listening');
+      try {
+        const address = server.address();
+        if (address === null || typeof address === 'string')
+          throw new Error('Expected TCP address.');
+        const result = await runArctl(['windows', ...args], {
+          AGENT_ROVER_HOST: '127.0.0.1',
+          AGENT_ROVER_PORT: String(address.port),
+        });
+        expect(result.code, result.stderr).toBe(1);
+        expect(result.stderr).toContain('AGENT_BUSY');
+        const notices = Array.from(
+          { length: attempts - 1 },
+          (_, index) =>
+            `[agent-rover] Agent at 127.0.0.1:${address.port} is busy (AGENT_BUSY). Retrying in 0.001s (${index + 1}/${attempts - 1}).\n`
+        ).join('');
+        if (args.includes('--json')) {
+          expect(result.stdout).toBe('');
+          expect(result.stderr).toBe(
+            `${notices}arctl: AGENT_BUSY: Another connection is using this agent.\n`
+          );
+        } else {
+          expect(result.stdout).toBe(notices);
+          expect(result.stderr).toBe(
+            'arctl: AGENT_BUSY: Another connection is using this agent.\n'
+          );
+        }
+        expect(connections).toBe(attempts);
+      } finally {
+        await new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve()))
+        );
+      }
+    }
+  );
+
   it.each([false, true])(
     'redacts a token echoed in a remote result (json=%s)',
     async (json) => {

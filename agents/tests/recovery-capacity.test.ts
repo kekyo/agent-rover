@@ -37,6 +37,8 @@ it('keeps control operations available at capture recovery capacity and recovers
       '--port',
       String(port),
       '--no-auth',
+      '--connection-mode',
+      'multiple',
     ],
     {
       env: environment,

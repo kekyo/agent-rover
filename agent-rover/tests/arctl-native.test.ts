@@ -246,6 +246,8 @@ beforeAll(async () => {
       '--port',
       String(port),
       '--no-auth',
+      '--connection-mode',
+      'multiple',
     ],
     { env: environment, stdio: 'ignore' }
   );

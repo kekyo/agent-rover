@@ -18,7 +18,7 @@ struct HostConfiguration {
   uint64_t max_transfer_bytes;
   HANDLE mapping, pulse;
   uint32_t generation, host_bytes, token_bytes;
-  uint16_t port, auth_required;
+  uint16_t port, auth_required, multiple_connections;
 };
 static HANDLE host_pulse = nullptr;
 static std::runtime_error Failure(const char* operation) {
@@ -39,14 +39,16 @@ int RunSupervisedServer() {
     std::memcpy(&config, command.payload.data(), sizeof(config));
     if (config.host_bytes > 32768 || config.token_bytes > 32768 ||
         command.payload.size() != sizeof(config) + config.host_bytes + config.token_bytes ||
-        !config.generation || !config.max_transfer_bytes || config.max_transfer_bytes % kBytesPerMiB) return 1;
+        !config.generation || !config.max_transfer_bytes || config.max_transfer_bytes % kBytesPerMiB ||
+        config.multiple_connections > 1) return 1;
     host_pulse = config.pulse;
     auto registry = AttachRecoveryRegistry(config.mapping, config.generation);
     SetHostRecoveryRegistry(registry);
     SetHelperBreakaway(true);
     const auto begin = command.payload.begin() + sizeof(config);
     ServerOptions options = {std::string(begin, begin + config.host_bytes), config.port,
-        config.auth_required != 0, std::string(begin + config.host_bytes, command.payload.end()), config.max_transfer_bytes};
+        config.auth_required != 0, std::string(begin + config.host_bytes, command.payload.end()),
+        config.max_transfer_bytes, config.multiple_connections != 0};
     std::string error;
     result = RunTcpServer(options, &error);
     SetHostRecoveryRegistry({});
@@ -117,6 +119,7 @@ static cardio::promise<void> Supervise(ServerOptions options, int* result, std::
         config.generation = generation;
         config.host_bytes = options.host.size(); config.token_bytes = options.auth_token.size();
         config.port = options.port; config.auth_required = options.auth_required;
+        config.multiple_connections = options.multiple_connections;
         config.max_transfer_bytes = options.max_transfer_bytes;
         if (!DuplicateHandle(GetCurrentProcess(), RecoveryMapping(registry), WorkerProcess(host),
             &config.mapping, 0, FALSE, DUPLICATE_SAME_ACCESS) ||

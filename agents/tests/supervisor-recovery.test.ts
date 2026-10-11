@@ -52,7 +52,7 @@ it('restarts the host when worker termination cannot complete after disconnect',
   const port = 39747;
   const server = spawn(
     'wine',
-    [executable, '--host', '127.0.0.1', '--port', String(port), '--no-auth'],
+    [executable, '--host', '127.0.0.1', '--port', String(port), '--no-auth', '--connection-mode', 'multiple'],
     { env: environment, stdio: 'ignore' }
   );
   const connect = async () =>

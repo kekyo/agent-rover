@@ -38,6 +38,8 @@ it.each(['worker', 'host', 'supervisor'])(
         '--port',
         String(port),
         '--no-auth',
+        '--connection-mode',
+        'multiple',
       ],
       {
         env: environment,

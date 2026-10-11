@@ -1286,6 +1286,14 @@ export interface RemoteAgent extends Releaseable {
   ) => Promise<void>;
 }
 
+/** Retry settings for connections rejected because the agent is already in use. */
+export interface RemoteConnectionRetryOptions {
+  /** Maximum retries after the initial attempt. Defaults to 360; zero disables retries. */
+  readonly maxRetries?: number;
+  /** Delay after each rejection in milliseconds. Defaults to 10000; must be an integer from 0 through 2147483647. */
+  readonly intervalMs?: number;
+}
+
 /** Options used to connect to a remote agent. */
 export interface ConnectRemoteAgentOptions {
   /** Agent host name, FQDN, or IP address. */
@@ -1294,14 +1302,28 @@ export interface ConnectRemoteAgentOptions {
   readonly port: number;
   /** Token printed by the agent process. Overrides AGENT_ROVER_AUTH_TOKEN. */
   readonly authToken?: string;
-  /** Connection and request timeout in milliseconds. */
+  /** Timeout for each connection attempt and each request, in milliseconds. */
   readonly timeoutMs?: number;
+  /**
+   * Retry connections rejected with AGENT_BUSY. Defaults to true.
+   * @remarks True uses 360 retries at 10000 ms intervals. False disables retries.
+   * Authentication, transport, and other handshake errors are never retried.
+   */
+  readonly retry?: boolean | RemoteConnectionRetryOptions;
+  /**
+   * Reports each busy-connection retry before its delay begins.
+   * @param message Human-readable notice with the target, retry count, and delay, without a trailing newline.
+   * @remarks Defaults to writing one line directly to standard error so test runners can display it while waiting.
+   * A supplied callback replaces that output. It is not called when no retry will occur.
+   */
+  readonly onRetry?: (message: string) => void;
 }
 
 /** Stable error codes raised by the remote agent driver. */
 export type RemoteAgentErrorCode =
   | 'OPERATION_FAILED'
   | 'AUTHENTICATION_FAILED'
+  | 'AGENT_BUSY'
   | 'CONNECTION_FAILED'
   | 'DESKTOP_CHANGED'
   | 'DISCONNECTED'

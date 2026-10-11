@@ -21,8 +21,9 @@ static void ShowUsage() {
   MessageBoxW(nullptr,
       L"agent-rover native windows agent\n\n"
       L"Usage:\n"
-      L"  agent-rover-agent.exe [--host <host>] [--port <port>] [--unsafe-token <token>] [-n|--no-auth] [--max-transfer-size <MiB>]\n"
+      L"  agent-rover-agent.exe [--host <host>] [--port <port>] [--unsafe-token <token>] [-n|--no-auth] [--connection-mode <single|multiple>] [--max-transfer-size <MiB>]\n"
       L"  agent-rover-agent.exe --help\n\n"
+      L"--connection-mode: single or multiple (default: single).\n"
       L"--max-transfer-size: positive integer in MiB (default: 64).\n", L"agent-rover", MB_OK);
 }
 
@@ -73,7 +74,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, wchar_t*, int) {
       parsed.options.port,
       parsed.options.auth_required,
       parsed.options.auth_token,
-      parsed.options.max_transfer_bytes};
+      parsed.options.max_transfer_bytes,
+      parsed.options.multiple_connections};
 
   if (options.auth_required && options.auth_token.empty()) {
     std::string error;

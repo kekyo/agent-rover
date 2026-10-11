@@ -26,6 +26,8 @@ struct AgentCommandLineOptions {
   std::string auth_token;
   /** Maximum whole-file read and retained incoming transfer size in bytes. */
   uint64_t max_transfer_bytes = kDefaultMaxTransferBytes;
+  /** Whether multiple independent driver sessions may connect at once. */
+  bool multiple_connections = false;
 };
 
 /** Result returned when parsing native Windows agent startup arguments. */

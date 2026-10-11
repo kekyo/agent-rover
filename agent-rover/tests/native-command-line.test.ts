@@ -57,6 +57,20 @@ static bool ExpectEqual(const std::wstring& actual, const std::wstring& expected
 }
 
 int main() {
+  const wchar_t* default_mode[] = {L"agent.exe"};
+  if (agent_rover::ParseAgentCommandLine(1, default_mode).options.multiple_connections) return 1;
+  for (const auto mode : {L"single", L"multiple"}) {
+    const wchar_t* arguments[] = {L"agent.exe", L"--connection-mode", mode};
+    const auto result = agent_rover::ParseAgentCommandLine(3, arguments);
+    if (!result.ok || result.options.multiple_connections != (std::wstring(mode) == L"multiple")) return 1;
+  }
+  for (const auto mode : {L"", L"all", L"Single", L"1", L"--no-auth"}) {
+    const wchar_t* arguments[] = {L"agent.exe", L"--connection-mode", mode};
+    const auto result = agent_rover::ParseAgentCommandLine(3, arguments);
+    if (result.ok || result.error.find(L"--connection-mode") == std::wstring::npos) return 1;
+  }
+  const wchar_t* missing_mode[] = {L"agent.exe", L"--connection-mode"};
+  if (agent_rover::ParseAgentCommandLine(2, missing_mode).ok) return 1;
   for (const auto value : {L"1", L"64", L"128", L"4096", L"17592186044415"}) {
     const wchar_t* arguments[] = {L"agent.exe", L"--max-transfer-size", value};
     const auto result = agent_rover::ParseAgentCommandLine(3, arguments);

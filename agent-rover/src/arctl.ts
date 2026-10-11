@@ -60,7 +60,13 @@ const main = async (): Promise<number> => {
       );
     };
     executing = true;
-    agent = await connectRemoteAgent(parsed.connection);
+    agent = await connectRemoteAgent({
+      ...parsed.connection,
+      onRetry: (message) => {
+        const output = parsed.json ? process.stderr : process.stdout;
+        output.write(redact(`${message}\n`));
+      },
+    });
     if (interrupted) return 130;
     if (parsed.command === 'record') {
       const result = await recordArctlVideo(

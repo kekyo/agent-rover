@@ -58,22 +58,25 @@ describe.concurrent('wait helpers', () => {
     });
   });
 
-  it('does not retry non-retryable remote agent errors', async () => {
-    let attempts = 0;
+  it.each(['PROTOCOL_ERROR', 'AGENT_BUSY'])(
+    'does not retry %s errors',
+    async (code) => {
+      let attempts = 0;
 
-    await expect(
-      waitForResult(
-        () => {
-          attempts += 1;
-          throw Object.assign(new Error('bad protocol'), {
-            code: 'PROTOCOL_ERROR',
-          });
-        },
-        { intervalMs: 1, timeoutMs: 1000 }
-      )
-    ).rejects.toMatchObject({
-      code: 'PROTOCOL_ERROR',
-    });
-    expect(attempts).toBe(1);
-  });
+      await expect(
+        waitForResult(
+          () => {
+            attempts += 1;
+            throw Object.assign(new Error('bad protocol'), {
+              code,
+            });
+          },
+          { intervalMs: 1, timeoutMs: 1000 }
+        )
+      ).rejects.toMatchObject({
+        code,
+      });
+      expect(attempts).toBe(1);
+    }
+  );
 });
