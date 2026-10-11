@@ -124,7 +124,7 @@ By default, the agent accepts one driver connection at a time.
 While a driver is connected, later connections receive `AGENT_BUSY` and are closed.
 The agent remains busy during authentication and while stopping the previous
 connection's operations and owned applications after disconnection.
-The driver advances to the next candidate in its section. After all candidates
+When using a section, the driver advances to its next candidate. After all candidates
 fail, it waits ten seconds and retries, up to 360 additional rounds by default.
 
 To retain the previous behavior of accepting multiple connections, start the
@@ -221,7 +221,7 @@ retries keep using that list. Connection failures do not switch to the home file
 
 The default port is 39397; explicit ports must be integers from 1 to 65535.
 Enclose IPv6 addresses in brackets, such as `[::1]`.
-An empty token selects unauthenticated access. Hosts and tokens are never
+An empty token selects unauthenticated access. Hosts and tokens in a section are never
 filled in from arguments or environment variables.
 
 Blank lines and whole-line comments beginning with `#` or `;`
@@ -243,6 +243,58 @@ Run the repository's Notepad sample from its root with
 `AGENT_ROVER_SAMPLE_SECTION=windows npm run sample:notepad`.
 This variable selects a configuration section. Without it, the sample is skipped
 when running the full test suite.
+
+### Explicit Host Connections (Optional)
+
+Use `.agent-rover` for normal connections. The SDK also supports the original
+`host`, `port`, and `authToken` options. Explicit connections never access
+`.agent-rover` in either the working directory or the home directory, including
+when settings are incomplete or a connection fails.
+
+```typescript
+const agent = await connectRemoteAgent({
+  host: 'test-agent.example.com',
+  port: 39397,
+  authToken: '<access-token>',
+});
+try {
+  console.log(await agent.windows());
+} finally {
+  agent.release();
+}
+```
+
+The SDK requires both `host` and `port`. When `authToken` is omitted, it uses
+`AGENT_ROVER_AUTH_TOKEN`; an unset or empty variable selects unauthenticated
+access. Setting `authToken: ''` disables authentication regardless of that variable.
+The SDK does not use `AGENT_ROVER_HOST` or `AGENT_ROVER_PORT`.
+Combining `section` with any of `host`, `port`, or `authToken` fails with
+`INVALID_ARGUMENT`.
+
+The CLI accepts these options before or after the command:
+
+```bash
+arctl --host test-agent.example.com --port 39397 --token '<access-token>' windows
+```
+
+| Option | Value when omitted |
+| :-- | :-- |
+| `--host <HOST>` | `AGENT_ROVER_HOST`; required for explicit connections. |
+| `--port <PORT>` | `AGENT_ROVER_PORT`, or `39397` when unset. |
+| `--token <TOKEN>` | `AGENT_ROVER_AUTH_TOKEN`; unset or empty means unauthenticated access. |
+
+Each option overrides its environment variable. `--token ''` is an error.
+Combining `--section` with any of `--host`, `--port`, or `--token` exits with status `2`.
+With connection options omitted, setting `AGENT_ROVER_HOST` selects an explicit
+connection. The port or token environment variable alone does not switch modes;
+the CLI uses the `default` section. When `--section` is supplied, none of these
+three variables is used for connection settings.
+
+Explicit connections retain the original retry behavior: only `AGENT_BUSY`
+is retried, by default up to 360 times at ten-second intervals.
+Use the SDK's `retry` or the CLI's `--retry-count` and `--retry-interval` to change
+these settings. Disable retries with `retry: false` or `--no-retry`.
+Authentication and transport failures return immediately.
 
 ### Network Path Notes
 
@@ -382,11 +434,12 @@ operate on the same machine.
 | `--json` | Prints success as `{"command":"...","result":...}`. |
 
 Common options can precede or follow the subcommand.
+For host and token arguments, see [Explicit Host Connections (Optional)](#explicit-host-connections-optional).
 The recording duration itself is separate from the request deadline.
 `--timeout` accepts 0.001 to 2147483.647 seconds, matching the
 [Node.js timer range](https://nodejs.org/docs/latest-v24.x/api/timers.html#settimeoutcallback-delay-args).
 
-Each round shuffles the candidates and tries them in sequence. Busy agents,
+When using a section, each round shuffles the candidates and tries them in sequence. Busy agents,
 authentication failures, and transport failures advance to the next candidate
 without a retry delay. Waiting occurs only after every candidate has failed.
 The default limit is 361 rounds, including the first.
@@ -434,7 +487,8 @@ to complete. Unsupported recording and encoding failures are reported as errors.
 
 Success results go to stdout and errors to stderr, including with `--json`.
 Before each retry wait, stdout shows the section, each endpoint failure,
-the delay in seconds, and the retry count. With `--json`, these notices go to stderr so stdout contains
+the delay in seconds, and the retry count. Explicit connections show the host and
+port instead of a section name. With `--json`, these notices go to stderr so stdout contains
 only the result JSON.
 Exit codes are `0` for success, `1` for connection or operation failure,
 `2` for invalid arguments or configuration, and `130` for Ctrl+C.
@@ -472,8 +526,10 @@ In code examples, an already connected `RemoteAgent` is referred to as `agent` w
 `connectRemoteAgent()` uses the `default` section. Set `section` to select another,
 and optionally supply `timeoutMs`, `retry`, or `onRetry`.
 Each call reads one configuration snapshot and keeps it throughout retries.
+The original `host`, `port`, and `authToken` options are also available; see
+[Explicit Host Connections (Optional)](#explicit-host-connections-optional).
 
-Each round shuffles complete host/token pairs and tries them in sequence.
+When using a section, each round shuffles complete host/token pairs and tries them in sequence.
 The first candidate to complete authentication and the protocol handshake wins.
 A failure, including a busy agent or authentication failure, advances immediately
 to the next candidate. After every candidate fails, the driver waits ten seconds,

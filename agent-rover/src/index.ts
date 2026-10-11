@@ -1288,9 +1288,9 @@ export interface RemoteAgent extends Releaseable {
 
 /** Retry settings for section rounds or explicit connections rejected as busy. */
 export interface RemoteConnectionRetryOptions {
-  /** Maximum additional rounds after the first pass through all candidates. Defaults to 360; zero disables retries. */
+  /** Maximum additional section rounds or explicit busy retries. Defaults to 360; zero disables retries. */
   readonly maxRetries?: number;
-  /** Delay between failed rounds in milliseconds. Defaults to 10000; must be an integer from 0 through 2147483647. */
+  /** Delay between section rounds or explicit busy retries in milliseconds. Defaults to 10000; must be an integer from 0 through 2147483647. */
   readonly intervalMs?: number;
 }
 
