@@ -32,7 +32,7 @@ it('prepares another connection while the first ready connection remains idle', 
   const port = 39741;
   const child = spawn(
     'wine',
-    [executable, '--host', '127.0.0.1', '--port', String(port), '--no-auth'],
+    [executable, '--host', '127.0.0.1', '--port', String(port), '--no-auth', '--connection-mode', 'multiple'],
     { env: { ...process.env, WINEDEBUG: '-all' }, stdio: 'ignore' }
   );
   const sockets = [];

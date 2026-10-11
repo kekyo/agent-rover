@@ -469,6 +469,21 @@ static cardio::promise<void> ReportProgress(std::shared_ptr<ServerState> server,
   }
 }
 
+static cardio::promise<void> RejectBusyConnection(SocketConnection socket, cardio::cancellation stop) {
+  try {
+    const auto encoded = EncodeFrame(JsonFrame(
+        R"({"kind":"event","name":"agent.rejected","data":{"code":"AGENT_BUSY","message":"Another connection is using this agent."}})"));
+    // A peer that does not read its rejection must not stall admission or shutdown.
+    auto timeout = cardio::cancellations::timeout(1000);
+    auto cancelled = cardio::cancellations::any(timeout.get_cancellation(), stop);
+    co_await WriteSocket(socket, encoded, cancelled.get_cancellation());
+  } catch (const std::exception& error) {
+    PrintAgentLogEvent(std::string("connection rejection send failed: ") + SanitizeAgentLogField(error.what()));
+  }
+  co_await DrainSocket(socket);
+  PrintAgentLogEvent("connection rejected: AGENT_BUSY");
+}
+
 static cardio::promise<void> Serve(std::shared_ptr<ServerState> server, int* result, std::string* error) {
   Worker probe;
   try {
@@ -505,6 +520,13 @@ static cardio::promise<void> Serve(std::shared_ptr<ServerState> server, int* res
     for (;;) {
       std::string endpoint;
       auto socket = co_await AcceptSocket(server->listener, &endpoint);
+      // Authentication and worker teardown both retain the single session slot.
+      // An unconfirmed worker exit must also prevent a new session from operating.
+      if (!server->options.multiple_connections &&
+          (!server->sessions.empty() || !server->quarantine.empty())) {
+        co_await RejectBusyConnection(socket, server->stop.get_cancellation());
+        continue;
+      }
       if (server->sessions.size() >= kMaxConnections) {
         co_await DrainSocket(socket);
         PrintAgentLogEvent("connection limit reached");

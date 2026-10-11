@@ -109,7 +109,16 @@ it.skipIf(!enabled)(
       );
       deployment = await launch(
         `${remote}\\agent.exe`,
-        ['--host', '0.0.0.0', '--port', String(port), '--unsafe-token', token],
+        [
+          '--host',
+          '0.0.0.0',
+          '--port',
+          String(port),
+          '--unsafe-token',
+          token,
+          '--connection-mode',
+          'multiple',
+        ],
         undefined
       );
       first = await waitForResult(
@@ -321,6 +330,25 @@ it.skipIf(!enabled)(
       expect((await first.capabilities()).platform).toBe('windows');
       await control('log-failure', String(port));
       await control('inspect', String(port));
+      // The default single mode also applies when logging is unavailable.
+      await expect(
+        connectRemoteAgent({
+          host: host!,
+          port,
+          authToken: token,
+          retry: false,
+        })
+      ).rejects.toMatchObject({ code: 'AGENT_BUSY' });
+      expect((await first.capabilities()).platform).toBe('windows');
+      first.release();
+      first = undefined;
+      second = await connectRemoteAgent({
+        host: host!,
+        port,
+        authToken: token,
+        retry: { maxRetries: 200, intervalMs: 25 },
+      });
+      expect(typeof (await second.clipboard.readText())).toBe('string');
       await control('exit', String(port));
     } finally {
       if (fixture) {

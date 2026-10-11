@@ -87,6 +87,8 @@ describe.skipIf(!enabled)('Windows arctl capture', () => {
         String(port),
         '--unsafe-token',
         token,
+        '--connection-mode',
+        'multiple',
       ],
       killTreeOnRelease: true,
       createNoWindow: true,

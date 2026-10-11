@@ -209,6 +209,19 @@ AgentCommandLineParseResult ParseAgentCommandLine(
       index += 2;
       continue;
     }
+    if (argument == L"--connection-mode") {
+      std::wstring value;
+      std::wstring error;
+      if (!ReadNext(argc, argv, index, L"--connection-mode", &value, &error)) {
+        return ParseFailure(options, error);
+      }
+      if (value != L"single" && value != L"multiple") {
+        return ParseFailure(options, L"--connection-mode requires single or multiple.");
+      }
+      options.multiple_connections = value == L"multiple";
+      index += 2;
+      continue;
+    }
     if (argument == L"--max-transfer-size") {
       std::wstring value;
       std::wstring error;

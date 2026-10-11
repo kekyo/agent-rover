@@ -36,6 +36,8 @@ it('recovers desktop execution after TCP disconnect while capture cleanup is loc
       '--port',
       String(port),
       '--no-auth',
+      '--connection-mode',
+      'multiple',
     ],
     {
       env: environment,

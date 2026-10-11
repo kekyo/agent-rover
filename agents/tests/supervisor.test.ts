@@ -52,6 +52,8 @@ it.each(['amd64', 'i686'])(
         authToken,
         '--max-transfer-size',
         '1',
+        '--connection-mode',
+        'multiple',
       ],
       {
         env: environment,
