@@ -7,7 +7,7 @@ import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   connectRemoteAgent,
@@ -15,6 +15,51 @@ import {
   withDiagnostics,
 } from '../src/index';
 import { defaultFakeWindow, startFakeTcpAgent } from './helpers/fake-tcp-agent';
+
+it('captures a wide window tree without emitting listener warnings', async () => {
+  const windows = Array.from({ length: 16 }, (_, index) => ({
+    ...defaultFakeWindow,
+    id: `wide-window-${index}`,
+  }));
+  const children = Array.from({ length: 16 }, (_, index) => ({
+    ...defaultFakeWindow,
+    id: `wide-child-${index}`,
+  }));
+  const fakeAgent = await startFakeTcpAgent({
+    windows,
+    childrenByWindowId: { 'wide-window-0': children },
+  });
+  const agent = await connectRemoteAgent({
+    host: fakeAgent.host,
+    port: fakeAgent.port,
+  });
+  const warning = vi.spyOn(process, 'emitWarning');
+  try {
+    const capture = await agent.diagnostics.capture({
+      includeDescendants: true,
+    });
+    expect(capture.windows.map((window) => window.id)).toEqual(
+      windows.map((window) => window.id)
+    );
+    expect(capture.windows[0]?.children?.map((window) => window.id)).toEqual(
+      children.map((window) => window.id)
+    );
+    expect(
+      warning.mock.calls
+        .flat()
+        .filter(
+          (value) =>
+            value instanceof Error &&
+            value.name === 'MaxListenersExceededWarning'
+        )
+        .map((value) => (value as Error).message)
+    ).toEqual([]);
+  } finally {
+    warning.mockRestore();
+    agent.release();
+    await fakeAgent.close();
+  }
+});
 
 describe.concurrent('diagnostics artifacts', () => {
   it('captures and saves remote diagnostics without sensitive protocol data', async () => {
