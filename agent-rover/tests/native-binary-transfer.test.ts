@@ -113,17 +113,21 @@ int main() {
   bounded = {};
   part.transfer_id = "byte-limit";
   part.data.assign(4 * 1024 * 1024, 0);
-  for (unsigned int i = 0; i < 16; ++i) {
+  for (unsigned int i = 0; i < 128; ++i) {
     part.sequence = i;
-    if (!agent_rover::AcceptBinaryTransferChunk(&bounded, part, &error)) return 4;
+    if (!agent_rover::AcceptBinaryTransferChunk(&bounded, part, &error)) {
+      std::fputs("Default budget rejected a transfer within 512 MiB.\n", stderr);
+      return 4;
+    }
   }
-  part.sequence = 16;
+  part.sequence = 128;
+  part.data = {0};
   if (agent_rover::AcceptBinaryTransferChunk(&bounded, part, &error) ||
-      bounded.pending.begin()->second.data.size() != 64 * 1024 * 1024) {
+      bounded.pending.begin()->second.data.size() != 512 * 1024 * 1024) {
     std::fputs("Binary bytes grew beyond the session limit.\n", stderr);
     return 5;
   }
-  bounded.max_transfer_bytes = 65ull * 1024 * 1024;
+  bounded.max_transfer_bytes = 513ull * 1024 * 1024;
   part.data.assign(1024 * 1024, 0);
   if (!agent_rover::AcceptBinaryTransferChunk(&bounded, part, &error)) return 6;
   part.sequence += 1;

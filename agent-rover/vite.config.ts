@@ -52,6 +52,8 @@ export default defineConfig(({ mode }) => ({
       formats: mode === 'cli' ? ['es'] : ['es', 'cjs'],
     },
     rolldownOptions: {
+      // Formatting, type checking and declaration generation intentionally run during builds.
+      checks: { bundlerTimings: false },
       external: [
         ...nodeBuiltins,
         'commander',

@@ -10,6 +10,7 @@ I686_OUTPUT ?= $(TARGET_ROOT)/agent-i686.exe
 LEGACY_OUTPUTS := $(TARGET_ROOT)/agent-rover-agent-amd64.exe $(TARGET_ROOT)/agent-rover-agent-i686.exe
 SRC_DIR := windows
 SOURCES := $(sort $(wildcard $(SRC_DIR)/*.cpp))
+RESOURCES := $(SRC_DIR)/agent.rc $(SRC_DIR)/agent.manifest $(SRC_DIR)/resource.h ../images/agent-rover.ico
 GENERATED_DIR ?= .build/generated
 OBJ_ROOT ?= .build/obj
 AMD64_OBJ_DIR := $(OBJ_ROOT)/amd64
@@ -52,13 +53,13 @@ $(I686_OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp $(TOOLCHAIN_DEPENDENCIES) | version-header
 	@mkdir -p $(dir $@)
 	$(I686_CXX) $(CXXFLAGS) $(CPPFLAGS) $(CPPFLAGS_I686) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
 
-$(AMD64_OBJ_DIR)/agent.res.o: $(SRC_DIR)/agent.rc $(SRC_DIR)/agent.manifest $(TOOLCHAIN_DEPENDENCIES)
+$(AMD64_OBJ_DIR)/agent.res.o: $(RESOURCES) $(TOOLCHAIN_DEPENDENCIES)
 	@mkdir -p $(dir $@)
-	$(AMD64_RC) -I$(SRC_DIR) $< $@
+	$(AMD64_RC) -I$(SRC_DIR) -I../images $< $@
 
-$(I686_OBJ_DIR)/agent.res.o: $(SRC_DIR)/agent.rc $(SRC_DIR)/agent.manifest $(TOOLCHAIN_DEPENDENCIES)
+$(I686_OBJ_DIR)/agent.res.o: $(RESOURCES) $(TOOLCHAIN_DEPENDENCIES)
 	@mkdir -p $(dir $@)
-	$(I686_RC) -I$(SRC_DIR) $< $@
+	$(I686_RC) -I$(SRC_DIR) -I../images $< $@
 
 $(AMD64_OUTPUT): $(AMD64_OBJECTS)
 	@mkdir -p $(dir $@)

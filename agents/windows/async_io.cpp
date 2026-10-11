@@ -52,7 +52,11 @@ static void CloseSocketState(AsyncSocket* connection);
 static cardio::promise<void> DispatchSocketEvents(AsyncSocket* connection) {
   try {
     while (!connection->closed) {
-      co_await cardio::from_win32_handle(connection->event, connection->stop.get_cancellation());
+      // CloseSocketState signals this event instead of cancelling the wait.
+      // A cancelled promise can finish while the Win32 auto dispatcher's wait
+      // thread still holds its native HANDLE snapshot. Let that wait complete
+      // before DrainSocket permits WSACloseEvent to release the handle.
+      co_await cardio::from_win32_handle(connection->event);
       if (connection->closed) break;
       WSANETWORKEVENTS events = {};
       if (WSAEnumNetworkEvents(connection->socket, connection->event, &events) != 0)
@@ -66,7 +70,6 @@ static cardio::promise<void> DispatchSocketEvents(AsyncSocket* connection) {
       if (events.lNetworkEvents & (FD_READ | FD_ACCEPT)) connection->readable.Notify();
       if (events.lNetworkEvents & FD_WRITE) connection->writable.Notify();
     }
-  } catch (const cardio::canceled_exception&) {
   } catch (...) {
     connection->error = WSAECONNABORTED;
     CloseSocketState(connection);
@@ -96,6 +99,8 @@ static void CloseSocketState(AsyncSocket* connection) {
   connection->stop.cancel();
   const auto socket = std::exchange(connection->socket, INVALID_SOCKET);
   if (socket != INVALID_SOCKET) closesocket(socket);
+  if (connection->event != WSA_INVALID_EVENT && !WSASetEvent(connection->event))
+    throw SocketError("WSASetEvent(close)", WSAGetLastError());
   connection->readable.Notify();
   connection->writable.Notify();
 }

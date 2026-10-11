@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <utility>
 #include "agent_log.h"
+#include "resource.h"
 #include "version_banner.h"
 #include "win32_util.h"
 
@@ -18,9 +19,11 @@ namespace agent_rover {
 static constexpr UINT kTrayMessage = WM_APP + 41;
 static constexpr UINT kLogTimer = 1;
 static constexpr UINT kShowLogs = 1, kOpenLogs = 2, kExit = 3;
+static constexpr UINT kCopyToken = 104;
+static const std::wstring kTokenPrefix = L"Token: ";
 
 struct AgentGui {
-  HWND window = nullptr, banner = nullptr, token = nullptr, list = nullptr, status = nullptr;
+  HWND window = nullptr, banner = nullptr, token = nullptr, copy_token = nullptr, list = nullptr, status = nullptr;
   NOTIFYICONDATAW tray = {};
   UINT taskbar_created = 0;
   bool refresh_pending = false;
@@ -38,9 +41,13 @@ static void Layout(AgentGui* gui) {
   GetClientRect(gui->window, &bounds);
   const int width = std::max(0L, bounds.right - 20);
   MoveWindow(gui->banner, 10, 10, width, 72, TRUE);
-  MoveWindow(gui->token, 10, 88, width, 24, TRUE);
-  MoveWindow(gui->list, 10, 122, width, std::max(0L, bounds.bottom - 195), TRUE);
-  MoveWindow(gui->status, 10, std::max(124L, bounds.bottom - 63), width, 58, TRUE);
+  if (gui->token) {
+    MoveWindow(gui->token, 10, 88, std::max(0, width - (gui->copy_token ? 90 : 0)), 24, TRUE);
+    if (gui->copy_token) MoveWindow(gui->copy_token, width - 70, 88, 80, 24, TRUE);
+  }
+  const LONG list_top = gui->token ? 122 : 88;
+  MoveWindow(gui->list, 10, list_top, width, std::max(0L, bounds.bottom - list_top - 73), TRUE);
+  MoveWindow(gui->status, 10, std::max(list_top + 2, bounds.bottom - 63), width, 58, TRUE);
   ListView_SetColumnWidth(gui->list, 2, std::max(160, width - 280));
 }
 
@@ -108,6 +115,14 @@ static LRESULT CALLBACK ViewerWindowProc(HWND window, UINT message, WPARAM wpara
       if (LOWORD(wparam) == kShowLogs) ShowLogs(gui);
       else if (LOWORD(wparam) == kOpenLogs && gui->open_logs) gui->open_logs();
       else if (LOWORD(wparam) == kExit && gui->exit) gui->exit();
+      else if (LOWORD(wparam) == kCopyToken && HIWORD(wparam) == BN_CLICKED && gui->copy_token) {
+        DWORD start = 0, end = 0;
+        SendMessageW(gui->token, EM_GETSEL, reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
+        // Copy the credential without its label, then preserve the user's selection.
+        SendMessageW(gui->token, EM_SETSEL, kTokenPrefix.size(), -1);
+        SendMessageW(gui->token, WM_COPY, 0, 0);
+        SendMessageW(gui->token, EM_SETSEL, start, end);
+      }
       return 0;
     case kTrayMessage:
       if (lparam == WM_LBUTTONDBLCLK) ShowLogs(gui);
@@ -147,7 +162,9 @@ AgentGuiHandle CreateAgentGui(const ServerOptions& options, std::function<void()
   type.lpfnWndProc = ViewerWindowProc;
   type.lpszClassName = L"AgentRoverLogViewer";
   type.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
-  type.hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
+  type.hIcon = static_cast<HICON>(LoadImageW(type.hInstance, MAKEINTRESOURCEW(IDI_AGENT_ROVER),
+      IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED));
+  if (!type.hIcon) throw std::runtime_error("LoadImageW(agent icon) failed.");
   type.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
   if (!RegisterClassW(&type) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
     throw std::runtime_error("RegisterClassW(log viewer) failed.");
@@ -163,8 +180,11 @@ AgentGuiHandle CreateAgentGui(const ServerOptions& options, std::function<void()
     return control;
   };
   gui->banner = create(L"STATIC", Utf8ToWide(BuildAgentVersionBanner()), SS_LEFT, 100);
-  gui->token = create(L"EDIT", options.auth_required ? L"Token: " + Utf8ToWide(options.auth_token) :
-      L"Authentication disabled", ES_READONLY | ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 101);
+  if (options.show_auth_token) {
+    gui->token = create(L"EDIT", options.auth_required ? kTokenPrefix + Utf8ToWide(options.auth_token) :
+        L"Authentication disabled", ES_READONLY | ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 101);
+    if (options.auth_required) gui->copy_token = create(L"BUTTON", L"Copy", BS_PUSHBUTTON | WS_TABSTOP, kCopyToken);
+  }
   gui->list = create(WC_LISTVIEWW, L"", LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 102);
   SendMessageW(gui->list, LVM_SETUNICODEFORMAT, TRUE, 0);
   ListView_SetExtendedListViewStyle(gui->list, LVS_EX_FULLROWSELECT);

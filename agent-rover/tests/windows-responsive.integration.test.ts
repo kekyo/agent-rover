@@ -148,6 +148,7 @@ it.skipIf(!enabled)(
       });
       expect((await second.capabilities()).platform).toBe('windows');
       await control('inspect', String(port));
+      await control('private-token', String(port));
       await control('logger-held', String(port));
       await control('resume-logger', String(port));
       // Keep unauthenticated sockets and an incomplete authentication frame

@@ -131,8 +131,9 @@ C:\> agent-amd64.exe --connection-mode multiple
 ```
 
 Double-click the tray icon or choose “Show logs” to open the viewer.
-The version banner and copyable token field appear above the log list.
-Copy the token into the driver's `authToken` option.
+The version banner, token field and Copy button appear above the log list.
+Use Copy to copy the token into the driver's `authToken` option.
+When you supply a token with `--unsafe-token`, the token field and Copy button are hidden.
 Closing the viewer keeps the agent running; choose “Exit” from the tray to stop it.
 
 Logs include connection, authentication and process events, request IDs and
@@ -218,7 +219,7 @@ At capacity, new captures and recordings cannot start; operations that do not
 require captured output remain available.
 
 Whole-file reads and the combined incoming transfer data retained per connection
-are limited to 64 MiB by default.
+are limited to 512 MiB by default.
 Set `--max-transfer-size 128` at agent startup to change the limit to a positive
 integer number of MiB. The same limit applies when retrieving captured stdout
 or stderr.

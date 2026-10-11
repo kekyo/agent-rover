@@ -4060,12 +4060,12 @@ const connectRemoteAgentOnce = async (
     if (!includeDescendants || remainingDepth <= 0) {
       return snapshot;
     }
-    const children = await Promise.all(
-      (await window.children()).map(
-        async (child): Promise<RemoteDiagnosticsWindow> =>
-          await captureDiagnosticsWindow(child, true, remainingDepth - 1)
-      )
-    );
+    const children: RemoteDiagnosticsWindow[] = [];
+    for (const child of await window.children()) {
+      children.push(
+        await captureDiagnosticsWindow(child, true, remainingDepth - 1)
+      );
+    }
     if (children.length === 0) {
       return snapshot;
     }
@@ -4126,16 +4126,18 @@ const connectRemoteAgentOnce = async (
       readBinaryTransfer
     );
     const topLevelWindows = await listTopLevelWindows();
-    const windows = await Promise.all(
-      topLevelWindows.map(
-        async (window): Promise<RemoteDiagnosticsWindow> =>
-          await captureDiagnosticsWindow(
-            window,
-            includeDescendants,
-            maxDescendantDepth
-          )
-      )
-    );
+    // Native requests are serialized. Walk the tree in order so a wide desktop
+    // does not create an unbounded set of pending socket writes and listeners.
+    const windows: RemoteDiagnosticsWindow[] = [];
+    for (const window of topLevelWindows) {
+      windows.push(
+        await captureDiagnosticsWindow(
+          window,
+          includeDescendants,
+          maxDescendantDepth
+        )
+      );
+    }
     const cursor = parseCursor(await requestJson('agent.cursor', undefined));
     const monitors = desktop.monitors;
     const eventLogs = parseEventLogArray(

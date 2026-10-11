@@ -51,7 +51,7 @@ cardio::promise<void> WriteSocket(SocketConnection socket, std::span<const unsig
 /** Closes the socket and wakes all waiters. Safe to call repeatedly.
  * @param socket Connection to close. */
 void CloseSocket(const SocketConnection& socket);
-/** Finishes event-wait cancellation before releasing the native event handle.
+/** Completes the signaled event wait before releasing the native event handle.
  * @param socket Closed connection retained until completion. @return Completion promise. */
 cardio::promise<void> DrainSocket(SocketConnection socket);
 

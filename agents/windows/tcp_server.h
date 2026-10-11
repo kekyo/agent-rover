@@ -27,6 +27,8 @@ struct ServerOptions {
   uint64_t max_transfer_bytes = kDefaultMaxTransferBytes;
   /** Whether multiple independent driver sessions may connect at once. */
   bool multiple_connections = false;
+  /** Whether the log viewer may display and copy the authentication token. */
+  bool show_auth_token = true;
 };
 
 /**

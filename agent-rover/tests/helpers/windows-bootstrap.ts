@@ -4,6 +4,7 @@
 // https://github.com/kekyo/agent-rover
 
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { waitForResult } from '../../src/wait';
 import { createTcpFrameTransport } from '../../src/driver/transport';
 import {
@@ -35,6 +36,35 @@ export const connectWindowsBootstrap = async (): Promise<WindowsBootstrap> => {
     throw new Error(
       'AGENT_ROVER_WIN11_HOST and AGENT_ROVER_WIN11_TOKEN are required.'
     );
+  const port = Number(process.env.AGENT_ROVER_WIN11_PORT ?? '39397');
+  if (!Number.isInteger(port) || port < 1 || port > 65535)
+    throw new Error(
+      'AGENT_ROVER_WIN11_PORT must be an integer from 1 to 65535.'
+    );
+  for (let retries = 0; ; ++retries) {
+    try {
+      return await connectWindowsBootstrapOnce(host, port, authToken);
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !('code' in error) ||
+        error.code !== 'AGENT_BUSY' ||
+        retries >= 360
+      )
+        throw error;
+      console.info(
+        `[agent-rover] Windows bootstrap at ${host}:${port} is busy. Retrying in 10s (${retries + 1}/360).`
+      );
+      await delay(10000);
+    }
+  }
+};
+
+const connectWindowsBootstrapOnce = async (
+  host: string,
+  port: number,
+  authToken: string
+): Promise<WindowsBootstrap> => {
   const pending = createPendingRequestTable({ requestTimeoutMs: 30000 });
   let readyResolve: () => void = () => {};
   let readyReject: (error: Error) => void = () => {};
@@ -49,7 +79,7 @@ export const connectWindowsBootstrap = async (): Promise<WindowsBootstrap> => {
   const transport = createTcpFrameTransport({
     host,
     authToken,
-    port: 39397,
+    port,
     timeoutMs: 30000,
     callbacks: {
       onOpen: () => {},
@@ -57,6 +87,19 @@ export const connectWindowsBootstrap = async (): Promise<WindowsBootstrap> => {
       onMessage: (message) => {
         if (message.kind === 'event' && message.name === 'agent.ready')
           readyResolve();
+        else if (
+          message.kind === 'event' &&
+          message.name === 'agent.rejected' &&
+          typeof message.data === 'object' &&
+          message.data !== null &&
+          !Array.isArray(message.data) &&
+          message.data.code === 'AGENT_BUSY'
+        )
+          readyReject(
+            Object.assign(new Error('Windows bootstrap agent is busy.'), {
+              code: 'AGENT_BUSY',
+            })
+          );
         else if (message.kind === 'response') pending.acceptResponse(message);
       },
       onError: (error) => {

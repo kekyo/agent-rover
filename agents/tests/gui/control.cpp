@@ -269,7 +269,7 @@ int wmain(int argc, wchar_t** argv) {
     DWORD_PTR ignored = 0;
     if (!SendMessageTimeoutW(window, WM_COMMAND, 1, 0, SMTO_ABORTIFHUNG, 5000, &ignored)) return 9;
     if (!IsWindowVisible(window)) return 10;
-    for (int id = 100; id <= 103; ++id) if (!GetDlgItem(window, id)) return 11;
+    if (!GetDlgItem(window, 100) || !GetDlgItem(window, 102) || !GetDlgItem(window, 103)) return 11;
     const auto list = GetDlgItem(window, 102);
     const auto count = SendMessageW(list, LVM_GETITEMCOUNT, 0, 0);
     if (count < 1 || count > 1000) return 12;
@@ -285,6 +285,11 @@ int wmain(int argc, wchar_t** argv) {
     SendMessageW(window, WM_COMMAND, 1, 0);
     if (!IsWindowVisible(window)) return 15;
     std::puts("GUI controls, bounded ListView, resizing, hide and reopen passed");
+    return 0;
+  }
+  if (mode == L"private-token") {
+    if (GetDlgItem(window, 101) || GetDlgItem(window, 104)) return 52;
+    std::puts("explicit token and Copy button are hidden");
     return 0;
   }
   return 16;
