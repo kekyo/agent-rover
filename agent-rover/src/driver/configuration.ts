@@ -8,6 +8,7 @@ import { isIP } from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { RemoteAgentError } from '../index';
+import { createCredentialRedactor } from '../auth';
 
 /** One configured address and its authentication credential. */
 export interface ConnectionEndpoint {
@@ -134,21 +135,11 @@ export const readConnectionSection = async (
     if (endpoints.length === 0) {
       throw configurationError(`Selected section is empty in ${path}.`);
     }
-    // Match longer credentials first, so a shared prefix cannot expose a suffix.
-    const tokens = [
-      ...new Set(
-        [...sections.values()].flatMap((entries) =>
-          entries.flatMap(({ authToken }) =>
-            authToken === undefined ? [] : [authToken]
-          )
-        )
-      ),
-    ].sort((a, b) => b.length - a.length);
-    const redact = (message: string): string => {
-      for (const token of tokens)
-        message = message.replaceAll(token, '[redacted]');
-      return message;
-    };
+    const redact = createCredentialRedactor(
+      [...sections.values()].flatMap((entries) =>
+        entries.map(({ authToken }) => authToken)
+      )
+    );
     return { name, endpoints, redact };
   }
   throw configurationError(

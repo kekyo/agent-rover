@@ -24,10 +24,12 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   await rm(home.directory, { recursive: true, force: true });
 });
 
 it('uses the home default and prefers a literal named section in the working directory', async () => {
+  vi.stubEnv('AGENT_ROVER_AUTH_TOKEN', 'ignored-token');
   const first = await startFakeTcpAgent({ authToken: 'one=;#,' });
   const second = await startFakeTcpAgent({
     authToken: 'two',

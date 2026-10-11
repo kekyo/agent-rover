@@ -93,7 +93,8 @@ import {
   type ConnectionEndpoint,
   type ConnectionSection,
 } from './configuration';
-import { selectConnection } from './selection';
+import { selectConnection, selectExplicitConnection } from './selection';
+import { createCredentialRedactor, resolveAuthToken } from '../auth';
 import { waitForResult } from '../wait';
 import {
   type ResourceDeadline,
@@ -1589,12 +1590,21 @@ const validateConnectionOptions = (
     typeof options !== 'object' ||
     Array.isArray(options) ||
     Object.keys(options).some(
-      (key) => !['section', 'timeoutMs', 'retry', 'onRetry'].includes(key)
+      (key) =>
+        ![
+          'section',
+          'host',
+          'port',
+          'authToken',
+          'timeoutMs',
+          'retry',
+          'onRetry',
+        ].includes(key)
     )
   ) {
     throw createRemoteAgentError(
       'INVALID_ARGUMENT',
-      'Unknown connection option. Specify a section from .agent-rover.'
+      'Unknown connection option.'
     );
   }
   if (
@@ -1610,21 +1620,117 @@ const validateConnectionOptions = (
   }
 };
 
+/** A validated direct endpoint or a loaded configuration section. */
+export type ResolvedConnectionTarget = {
+  /** Filters credentials from user-visible text. */
+  readonly redact: (text: string) => string;
+} & (
+  | {
+      /** Direct connection without configuration access. */ readonly kind: 'explicit';
+      /** Validated address and credential. */ readonly endpoint: ConnectionEndpoint;
+    }
+  | {
+      /** Connection through a configured section. */ readonly kind: 'section';
+      /** Snapshot retained throughout retries. */ readonly section: ConnectionSection;
+    }
+);
+
 /**
- * Connects using a section of .agent-rover in the working directory or user's home.
- * @param options Section name, per-attempt timeout, and retry settings.
+ * Resolves mutually exclusive connection options before opening a socket.
+ * @param options Section or explicit address, authentication, and retry controls.
+ * @returns The selected connection target and its credential filter.
+ * @remarks Explicit options never inspect .agent-rover, including on validation errors.
+ */
+export const resolveConnectionTarget = async (
+  options: ConnectRemoteAgentOptions
+): Promise<ResolvedConnectionTarget> => {
+  validateConnectionOptions(options);
+  if (
+    options.host !== undefined ||
+    options.port !== undefined ||
+    options.authToken !== undefined
+  ) {
+    if (options.section !== undefined)
+      throw createRemoteAgentError(
+        'INVALID_ARGUMENT',
+        'section cannot be combined with host, port, or authToken.'
+      );
+    if (
+      typeof options.host !== 'string' ||
+      options.host.trim() === '' ||
+      typeof options.port !== 'number' ||
+      !Number.isInteger(options.port) ||
+      options.port < 1 ||
+      options.port > 65535
+    ) {
+      throw createRemoteAgentError(
+        'INVALID_ARGUMENT',
+        'Explicit connections require a nonempty host and an integer port from 1 through 65535.'
+      );
+    }
+    if (
+      options.authToken !== undefined &&
+      typeof options.authToken !== 'string'
+    )
+      throw createRemoteAgentError(
+        'INVALID_ARGUMENT',
+        'authToken must be a string.'
+      );
+    const endpoint = {
+      host: options.host,
+      port: options.port,
+      authToken: resolveAuthToken(options.authToken),
+    };
+    return {
+      kind: 'explicit',
+      endpoint,
+      redact: createCredentialRedactor([endpoint.authToken]),
+    };
+  }
+  const section = await loadConnectionSection(options.section ?? 'default');
+  return { kind: 'section', section, redact: section.redact };
+};
+
+/**
+ * Connects using .agent-rover or an explicitly specified host and port.
+ * @param options Mutually exclusive section or explicit address, authentication, and retry settings.
  * @returns The first authenticated, protocol-compatible session.
  * @remarks The default section is default. The working directory takes priority;
  * only a missing file or section falls back to the user's home. The selected
  * snapshot is retained throughout retries. Failed candidates are closed before
  * trying the next; delays occur only between complete shuffled rounds.
+ * Explicit connections bypass configuration and retry only AGENT_BUSY failures.
  */
 export const connectRemoteAgent = async (
   options: ConnectRemoteAgentOptions = {}
 ): Promise<RemoteAgent> => {
-  validateConnectionOptions(options);
-  const section = await loadConnectionSection(options.section ?? 'default');
-  return await connectRemoteAgentInSection(section, options);
+  return await connectRemoteAgentToTarget(
+    await resolveConnectionTarget(options),
+    options
+  );
+};
+
+/**
+ * Connects using a target already resolved by the SDK or CLI.
+ * @param target Validated endpoint or configuration snapshot.
+ * @param options Per-attempt timeout and retry controls.
+ * @returns The accepted session.
+ */
+export const connectRemoteAgentToTarget = async (
+  target: ResolvedConnectionTarget,
+  options: ConnectRemoteAgentOptions
+): Promise<RemoteAgent> => {
+  if (target.kind === 'section')
+    return await connectRemoteAgentInSection(target.section, options);
+  return await selectExplicitConnection(
+    target.endpoint,
+    options,
+    async (endpoint) =>
+      await connectRemoteAgentOnce({
+        ...endpoint,
+        timeoutMs: options.timeoutMs ?? defaultTimeoutMs,
+      })
+  );
 };
 
 /**
