@@ -15,4 +15,15 @@ RUN rm /etc/apt/sources.list.d/debian.sources \
         mingw-w64-common=10.0.0-3 \
         mingw-w64-x86-64-dev=10.0.0-3 \
         mingw-w64-i686-dev=10.0.0-3 \
+        g++ scons zlib1g-dev curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Build the fixed NSIS release with this same MinGW toolchain. Preparing the
+# image is the only networked step; normal packaging uses --network=none.
+# https://github.com/NSIS-Dev/nsis/blob/v313/INSTALL
+RUN curl -fsSL https://codeload.github.com/NSIS-Dev/nsis/tar.gz/refs/tags/v313 -o /tmp/nsis.tar.gz \
+    && echo 'fa78402fb4c8f83f203f527fee5f798a3891830ab62bea6ad2bf74b400bc95f1  /tmp/nsis.tar.gz' | sha256sum -c - \
+    && tar -xzf /tmp/nsis.tar.gz -C /tmp \
+    && cd /tmp/nsis-313 \
+    && scons -j4 VERSION=3.13 VER_MAJOR=3 VER_MINOR=13 SKIPUTILS='NSIS Menu,Makensisw,zip2exe' SKIPDOC=all DOCTYPES=none PREFIX=/usr/local install \
+    && rm -rf /tmp/nsis-313 /tmp/nsis.tar.gz
