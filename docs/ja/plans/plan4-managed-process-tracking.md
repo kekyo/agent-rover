@@ -292,3 +292,8 @@ muon-uiの製品コードと試験の期待値は変更していない。
 全体試験は`npm-test.log`、Windows実機試験は`stage2-win11-green.log`、muon-uiは`muon-paths-builder.log`と`muon-notifications-services-{i686,amd64}.log`で確認できる。
 これらのログはGitの管理対象外である。
 Windows XPでの実行は利用者の指示に従って保留している。
+
+plan5実装後の全体`npm test`も終了コード0で完了し、native44件、SDK358件の計402件が成功した。
+Windows向け18件とサンプル1件は全体実行ではスキップし、利用可能なWin11実機試験は別に実行した。
+plan5のAPI追加に伴い、最終の通信バージョンは`2026-11-17.2`になっている。
+muon-uiの通知・サービスUI試験の通信経路は引き続き確認待ちであり、上記の未達条件は変更していない。
