@@ -111,8 +111,22 @@ As shown in the example above, you can send and receive files and launch applica
 ## Preparation
 
 Download the agent for the target platform from the [releases page](https://github.com/kekyo/agent-rover/releases/).
-The agent is very small and avoids runtime dependencies on other libraries as much as possible.
-After extracting the archive, you can run it as-is. No installation is required.
+Windows distributions are available as a ZIP and an installer. Both contain the same agent and require no Node.js runtime.
+
+| Distribution | Usage |
+| --- | --- |
+| `agent-rover-agent-win32-{version}.zip` | Extract to a folder of your choice. Run `agent-amd64.exe` on 64-bit Windows or `agent-i686.exe` on 32-bit Windows. |
+| `agent-rover-agent-win32-{version}-setup.exe` | Installs for the current user, by default in `%LOCALAPPDATA%\Programs\agent-rover`. Launch `agent-rover` from the Programs menu. |
+
+The installer selects the executable for your OS and installs it as `agent-rover-agent.exe`.
+Normal installation requires no administrator privileges and neither launches the agent nor registers startup at sign-in on first installation.
+Before updating, choose `Exit` from the tray and install into the same folder.
+If a file is in use, the update stops and preserves the existing files.
+Use `/S` for silent installation. Failures return a nonzero exit code.
+
+Uninstall through the Windows installed-apps list or the Programs menu's `Uninstall` shortcut.
+Uninstallation preserves the INI file, logs, test data, and Defender settings.
+Startup entries and shortcuts are removed only when they point to the installation being removed; entries for another copy are preserved.
 
 Start the Windows agent from your interactive desktop. It runs in the system tray.
 
@@ -138,7 +152,7 @@ C:\> agent-amd64.exe --connection-mode multiple
 Double-click the tray icon or choose “Show logs” to open the viewer.
 The version banner, token field and Copy button appear above the log list.
 Use Copy to register the token in `$HOME/.agent-rover` on the driver machine.
-When you supply a token with `--unsafe-token`, the token field and Copy button are hidden.
+When you supply a token with `--unsafe-token` or the agent INI, the token field and Copy button are hidden.
 Closing the viewer keeps the agent running; choose “Exit” from the tray to stop it.
 
 Logs include connection, authentication and process events, request IDs and
@@ -184,6 +198,61 @@ describe('remote agent smoke test', () => {
   });
 });
 ```
+
+### Windows Agent Configuration And Startup
+
+Save agent startup settings in `$HOME/.agent-rover-agent.ini`.
+If `HOME` is empty or unset, the agent uses the current user's Windows profile, normally `C:\Users\username\.agent-rover-agent.ini`.
+An explicit `HOME` must be an absolute path to an existing directory. The log viewer shows the actual INI path.
+This file is separate from `.agent-rover`, which the SDK and `arctl` use to choose connection endpoints.
+
+Choose `Open config file` from the tray to edit the INI.
+If it does not exist, the agent creates a commented template and opens it in the associated application.
+The template does not copy current command-line values or authentication tokens.
+If no application is associated, open the reported path in Notepad.
+After saving, choose `Exit` from the tray and start the agent again to apply changes. Existing connections and automatic recovery retain the startup configuration.
+
+```ini
+[agent]
+host=0.0.0.0
+port=39397
+connection-mode=single
+max-transfer-size=512
+no-auth=false
+; unsafe-token=replace-with-your-own-token
+; safe-base-dir=C:\RoverWork
+```
+
+`safe-base-dir` is the suggested directory for test files. Create the folder before configuring it.
+The SDK exposes it through `agent.files.safeBaseDir()`, and `agent.files.mkdtemp('case-')` creates a new workspace underneath it.
+
+| INI key | Startup option | Default |
+| --- | --- | --- |
+| `host` | `--host` | `0.0.0.0` |
+| `port` | `--port` | `39397` |
+| `connection-mode` | `--connection-mode` | `single`; `multiple` is also supported. |
+| `max-transfer-size` | `--max-transfer-size` | 512 MiB per transfer |
+| `no-auth` | `--no-auth`, `-n` | `false`, enabling authentication. |
+| `unsafe-token` | `--unsafe-token` | Generated at startup when authentication is enabled. |
+| `safe-base-dir` | `--safe-base-dir` | The remote OS's standard temporary directory |
+
+Ordinary settings use command-line values first, then INI values, then defaults.
+An explicit authentication option replaces both `no-auth` and `unsafe-token` from the INI.
+Combining `--no-auth` with `--unsafe-token`, or combining INI `no-auth=true` with a nonempty `unsafe-token`, is an error.
+With `no-auth=false` and an absent or empty token, the agent generates a new token without writing it to the INI.
+
+Save the INI as UTF-8 or UTF-16LE with a BOM; new templates use the latter.
+Use the lowercase section and key names above. Duplicate or unknown names are errors.
+Blank lines and comment lines beginning with `;` or `#` are accepted. Surrounding whitespace and a pair of enclosing double quotes are removed from values.
+There are no inline comments, backslash escapes, or expansions of `%TEMP%`, `~`, or similar strings. Write actual absolute paths.
+A missing INI is allowed; read or syntax errors produce a diagnostic and prevent startup. `--help` remains available with an invalid INI.
+
+`Start at sign-in` in the tray toggles startup for the current user.
+A checkmark means the current executable is registered. If another copy is registered, its path is shown; enabling startup replaces it with the current copy.
+The registration contains only the quoted absolute executable path, without arguments or tokens.
+Store settings needed at the next launch in the INI. Without a fixed token, a new token is generated on each launch.
+After moving a ZIP installation, enable startup again from its new location. Paths producing a command longer than 260 characters cannot be registered.
+Windows startup settings or policies may disable or delay execution. See [Windows Run key behavior](https://learn.microsoft.com/en-us/windows/win32/setupapi/run-and-runonce-registry-keys).
 
 ### Connection Configuration
 
