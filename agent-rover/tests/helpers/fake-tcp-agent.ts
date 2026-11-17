@@ -95,6 +95,11 @@ export interface FakeTcpAgent {
   readonly port: number;
   readonly requestUsedBase64: () => boolean;
   readonly setProcesses: (processes: readonly RemoteProcessSnapshot[]) => void;
+  /** Sets Job descendants independently of the system-wide process list. */
+  readonly setManagedDescendants: (
+    rootProcessId: number,
+    processes: readonly RemoteProcessSnapshot[]
+  ) => void;
   readonly setMonitors: (monitors: readonly RemoteMonitor[]) => void;
   readonly setWindows: (windows: readonly AppWindowSnapshot[]) => void;
 }
@@ -459,6 +464,10 @@ export const startFakeTcpAgent = async (
   const files = new Map<string, Buffer>();
   const processes = new Map<number, RemoteProcessSnapshot>();
   const managedProcesses = new Map<number, number>();
+  const managedDescendants = new Map<
+    number,
+    readonly RemoteProcessSnapshot[]
+  >();
   const responsesToDrop = new Map(Object.entries(options.dropResponses ?? {}));
   const videoRecordings = new Map<
     string,
@@ -934,7 +943,10 @@ export const startFakeTcpAgent = async (
           sendSuccess(
             id,
             processId !== undefined &&
-              processes.get(processId)?.running === true
+              (processes.get(processId)?.running === true ||
+                (managedDescendants.get(processId) ?? []).some(
+                  (process) => process.running
+                ))
           );
           return;
         }
@@ -1026,6 +1038,7 @@ export const startFakeTcpAgent = async (
             });
           }
           managedProcesses.delete(managedProcessId);
+          managedDescendants.delete(processId);
           managedProcessOptions.delete(managedProcessId);
           const dropped = responsesToDrop.get(method) ?? 0;
           if (dropped > 0) {
@@ -1597,6 +1610,9 @@ export const startFakeTcpAgent = async (
     host: '127.0.0.1',
     port: address.port,
     requestUsedBase64: (): boolean => sawBase64Write,
+    setManagedDescendants: (rootProcessId, descendants): void => {
+      managedDescendants.set(rootProcessId, [...descendants]);
+    },
     setProcesses: (nextProcesses): void => {
       processes.clear();
       for (const process of nextProcesses) {

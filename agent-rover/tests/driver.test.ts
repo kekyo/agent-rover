@@ -1348,6 +1348,7 @@ describe.concurrent('remote agent connection api', () => {
         childProcess,
       ]);
       fakeAgent.setWindows([childWindow]);
+      fakeAgent.setManagedDescendants(process.id, [childProcess]);
 
       await expect(
         process.waitForWindow(
@@ -1403,6 +1404,7 @@ describe.concurrent('remote agent connection api', () => {
         path: 'C:/agent-rover/fake-child.exe',
       });
       fakeAgent.setProcesses([exitedRoot, childProcess]);
+      fakeAgent.setManagedDescendants(process.id, [childProcess]);
 
       await expect(process.rootSnapshot()).resolves.toMatchObject({
         id: process.id,
@@ -1430,6 +1432,7 @@ describe.concurrent('remote agent connection api', () => {
           running: false,
         },
       ]);
+      fakeAgent.setManagedDescendants(process.id, []);
       await expect(
         process.waitForExit({
           intervalMs: 1,
@@ -1438,6 +1441,71 @@ describe.concurrent('remote agent connection api', () => {
       ).resolves.toMatchObject({
         running: false,
       });
+    } finally {
+      agent.release();
+      await fakeAgent.close();
+    }
+  });
+
+  it.each(['2026-06-24T00:00:00.000Z', '2026-06-26T00:00:00.000Z', null])(
+    'finishes an empty native Job despite unrelated process time %s',
+    async (createdAt) => {
+      const fakeAgent = await startFakeTcpAgent({});
+      const agent = await connectTestAgent({
+        host: fakeAgent.host,
+        port: fakeAgent.port,
+      });
+      try {
+        const process = await agent.processes.launchManaged({
+          path: 'launcher.exe',
+        });
+        fakeAgent.setProcesses([
+          fakeProcessSnapshot({ id: process.id, running: false, exitCode: 0 }),
+          fakeProcessSnapshot({
+            id: 6789,
+            parentProcessId: process.id,
+            createdAt,
+          }),
+        ]);
+        await expect(process.snapshot()).resolves.toMatchObject({
+          running: false,
+        });
+        await expect(process.waitForExit()).resolves.toMatchObject({
+          root: { exitCode: 0 },
+          running: false,
+        });
+        await process.releaseAsync();
+      } finally {
+        agent.release();
+        await fakeAgent.close();
+      }
+    }
+  );
+
+  it('waits for native Job descendants absent from the system process list', async () => {
+    const fakeAgent = await startFakeTcpAgent({});
+    const agent = await connectTestAgent({
+      host: fakeAgent.host,
+      port: fakeAgent.port,
+    });
+    try {
+      const process = await agent.processes.launchManaged({
+        path: 'launcher.exe',
+      });
+      fakeAgent.setProcesses([
+        fakeProcessSnapshot({ id: process.id, running: false, exitCode: 0 }),
+      ]);
+      fakeAgent.setManagedDescendants(process.id, [
+        fakeProcessSnapshot({ id: 6789 }),
+      ]);
+      await expect(process.snapshot()).resolves.toMatchObject({
+        running: true,
+      });
+      fakeAgent.setManagedDescendants(process.id, []);
+      await expect(process.waitForExit()).resolves.toMatchObject({
+        running: false,
+      });
+      await process.releaseAsync();
     } finally {
       agent.release();
       await fakeAgent.close();

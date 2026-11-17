@@ -3747,9 +3747,10 @@ const connectRemoteAgentOnce = async (
         processes: trackedProcesses,
         root,
         running:
-          nativeRunning ||
           root.running ||
-          trackedProcesses.some((process) => process.running),
+          (options.nativeManaged
+            ? nativeRunning
+            : trackedProcesses.some((process) => process.running)),
       };
     };
 
