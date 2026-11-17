@@ -4,6 +4,7 @@
 // https://github.com/kekyo/agent-rover
 
 #include "agent_gui.h"
+#include "auto_start.h"
 #include <commctrl.h>
 #include <shellapi.h>
 #include <algorithm>
@@ -20,6 +21,7 @@ static constexpr UINT kTrayMessage = WM_APP + 41;
 static constexpr UINT kLogTimer = 1;
 static constexpr UINT kShowLogs = 1, kOpenLogs = 2, kExit = 3;
 static constexpr UINT kOpenConfig = 4;
+static constexpr UINT kAutoStart = 5;
 static constexpr UINT kCopyToken = 104;
 static const std::wstring kTokenPrefix = L"Token: ";
 
@@ -31,6 +33,7 @@ struct AgentGui {
   uint64_t first_sequence = 0;
   std::wstring cell;
   std::function<void()> exit, open_logs, open_config;
+  std::wstring executable, executable_error;
   ~AgentGui() {
     Shell_NotifyIconW(NIM_DELETE, &tray);
     if (window) DestroyWindow(window);
@@ -80,6 +83,18 @@ static void ShowTrayMenu(AgentGui* gui) {
   AppendMenuW(menu, MF_STRING, kShowLogs, L"Show logs");
   AppendMenuW(menu, MF_STRING | (gui->open_logs ? 0 : MF_GRAYED), kOpenLogs, L"Open log folder");
   AppendMenuW(menu, MF_STRING | (gui->open_config ? 0 : MF_GRAYED), kOpenConfig, L"Open config file");
+  AutoStartState startup;
+  std::wstring error;
+  const bool readable = !gui->executable.empty() && ReadAutoStartRegistration(gui->executable, &startup, &error);
+  AppendMenuW(menu, MF_STRING | (readable ? 0 : MF_GRAYED) | (startup.current_copy ? MF_CHECKED : 0), kAutoStart, L"Start at sign-in");
+  if (readable && startup.registered && !startup.current_copy) {
+    const auto path = startup.registered_path.empty() ? L"Unrecognized registration" : startup.registered_path;
+    std::wstring label = L"Registered copy: ";
+    for (const auto ch : path) { label += ch; if (ch == L'&') label += ch; }
+    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, label.c_str());
+  }
+  if (!readable) AppendMenuW(menu, MF_STRING | MF_GRAYED, 0,
+      (gui->executable.empty() ? gui->executable_error : error).c_str());
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, kExit, L"Exit");
   POINT point = {};
@@ -90,6 +105,26 @@ static void ShowTrayMenu(AgentGui* gui) {
   DestroyMenu(menu);
   PostMessageW(gui->window, WM_NULL, 0, 0);
   if (command) PostMessageW(gui->window, WM_COMMAND, command, 0);
+}
+
+static void ToggleAutoStart(AgentGui* gui) {
+  AutoStartState state;
+  std::wstring error = gui->executable_error;
+  if (gui->executable.empty() || !ReadAutoStartRegistration(gui->executable, &state, &error)) {
+    MessageBoxW(gui->window, error.c_str(), L"agent-rover", MB_OK | MB_ICONERROR);
+    return;
+  }
+  const bool enabled = !state.current_copy;
+  if (!WriteAutoStartRegistration(gui->executable, enabled, &state, &error)) {
+    MessageBoxW(gui->window, error.c_str(), L"agent-rover", MB_OK | MB_ICONERROR);
+    return;
+  }
+  const auto message = enabled ? L"Start at sign-in is registered for this copy:\n" + gui->executable +
+      L"\n\nNext sign-in uses the agent INI and default settings. Current command-line options are not saved."
+      L"\nUse unsafe-token in the INI if you need a fixed token; generated tokens change at each start."
+      L"\n\nThe check mark shows registration only. Windows startup settings or policy can disable or delay execution." :
+      std::wstring(L"Start at sign-in registration for this copy has been removed.");
+  MessageBoxW(gui->window, message.c_str(), L"agent-rover", MB_OK | MB_ICONINFORMATION);
 }
 
 static LRESULT CALLBACK ViewerWindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -117,6 +152,7 @@ static LRESULT CALLBACK ViewerWindowProc(HWND window, UINT message, WPARAM wpara
       if (LOWORD(wparam) == kShowLogs) ShowLogs(gui);
       else if (LOWORD(wparam) == kOpenLogs && gui->open_logs) gui->open_logs();
       else if (LOWORD(wparam) == kOpenConfig && gui->open_config) gui->open_config();
+      else if (LOWORD(wparam) == kAutoStart) ToggleAutoStart(gui);
       else if (LOWORD(wparam) == kExit && gui->exit) gui->exit();
       else if (LOWORD(wparam) == kCopyToken && HIWORD(wparam) == BN_CLICKED && gui->copy_token) {
         DWORD start = 0, end = 0;
@@ -160,6 +196,7 @@ AgentGuiHandle CreateAgentGui(const ServerOptions& options, std::function<void()
   if (!InitCommonControlsEx(&controls)) throw std::runtime_error("InitCommonControlsEx failed.");
   auto gui = std::make_shared<AgentGui>();
   gui->exit = std::move(exit);
+  GetAutoStartExecutablePath(&gui->executable, &gui->executable_error);
   WNDCLASSW type = {};
   type.hInstance = GetModuleHandleW(nullptr);
   type.lpfnWndProc = ViewerWindowProc;
