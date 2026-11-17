@@ -9,6 +9,7 @@
     "scripts/**/*.ts",
     "vite.config.ts",
     "tests/distribution.test.ts",
+    "tests/native-version.test.ts",
     "../agent-rover/src/**/*.d.ts"
   ],
   "exclude": ["node_modules", "dist", ".build"]
