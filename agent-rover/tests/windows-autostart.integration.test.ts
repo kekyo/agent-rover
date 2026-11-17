@@ -1,6 +1,9 @@
-// agent-rover - Current-user startup registration on Windows
+// agent-rover - A multi-platform TypeScript test driver for GUI applications
 // Copyright (c) Kouji Matsui. (@kekyo@mi.kekyo.net)
 // Under MIT.
+// https://github.com/kekyo/agent-rover
+
+// Current-user startup registration on Windows.
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
