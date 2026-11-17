@@ -304,6 +304,35 @@ Windows側は既定で1接続です。`--connection-mode multiple`では最大16
 
 managed processは1接続64件までです。大量の処理は分割してください。
 
+### Microsoft Defenderの除外設定
+
+agent-roverはDefenderの除外設定を変更しません。トレイから除外を追加する機能も提供していません。
+除外が必要な場合は、テスト専用のフォルダを作り、エージェント用INIの`safe-base-dir`にその絶対パスを指定してください。
+除外するとフォルダ配下のスキャン範囲が変わるため、標準一時ディレクトリ全体やドライブ全体は指定しないでください。
+
+Windows 11では「Windows セキュリティ」→「ウイルスと脅威の防止」→「設定の管理」→「除外の追加または削除」からフォルダを選べます。
+PowerShellで設定する場合は、管理者として起動し、次の例のパスを作成済みの専用フォルダに置き換えて実行します。
+追加用の`Add-MpPreference`を使えば、既存の除外一覧を保持できます。
+[Microsoftの設定手順](https://learn.microsoft.com/en-us/defender-endpoint/microsoft-defender-antivirus-exclusions-configure)
+
+```powershell
+Add-MpPreference -ExclusionPath 'C:\RoverWork'
+```
+
+使わなくなったフォルダは、同じ設定画面で選んで削除するか、管理者のPowerShellで次のように解除します。
+INIの変更やエージェントのアンインストールでは除外を解除しません。
+[Remove-MpPreference](https://learn.microsoft.com/en-us/powershell/module/defender/remove-mppreference)
+
+```powershell
+Remove-MpPreference -ExclusionPath 'C:\RoverWork'
+```
+
+公開のWMI APIでは`MSFT_MpPreference.Add`の`ExclusionPath`でも追加できますが、対応するクライアントOSはWindows 8.1以降です。XPには対応していません。
+[WMI APIの対象OSと引数](https://learn.microsoft.com/en-us/previous-versions/windows/desktop/defender/add-msft-mppreference)
+組織の管理方針によって設定の変更や表示が制限される場合は、管理者に構成を依頼してください。
+除外が表示されないことだけで、未設定とは判断できません。
+[管理端末の制約](https://learn.microsoft.com/en-us/defender-endpoint/microsoft-defender-antivirus-exclusions-configure)、[除外の改ざん防止](https://learn.microsoft.com/en-us/defender-endpoint/tamper-protection-antivirus-exclusions)
+
 ### プロセスの監視と管理 (Advanced topic)
 
 起動時には、本体を監視する独立したプロセスも動作します。

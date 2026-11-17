@@ -339,6 +339,35 @@ or stderr.
 
 Each Windows connection can own up to 64 managed processes. Split larger workloads.
 
+### Microsoft Defender Exclusions
+
+agent-rover does not change Defender exclusions or provide a tray command to add them.
+If an exclusion is necessary, create a dedicated test folder and set its absolute path in the agent INI's `safe-base-dir`.
+An exclusion changes scanning for files beneath the folder; do not select the entire system temporary directory or an entire drive.
+
+On Windows 11, open Windows Security → Virus & threat protection → Manage settings → Add or remove exclusions, then select the folder.
+For PowerShell, open an elevated session and replace the example path with your existing dedicated folder.
+Use `Add-MpPreference` to preserve existing exclusions.
+[Microsoft's configuration instructions](https://learn.microsoft.com/en-us/defender-endpoint/microsoft-defender-antivirus-exclusions-configure)
+
+```powershell
+Add-MpPreference -ExclusionPath 'C:\RoverWork'
+```
+
+When a folder is no longer needed, select and remove it in the same settings screen or run the following in elevated PowerShell.
+Changing the INI or uninstalling the agent does not remove exclusions.
+[Remove-MpPreference](https://learn.microsoft.com/en-us/powershell/module/defender/remove-mppreference)
+
+```powershell
+Remove-MpPreference -ExclusionPath 'C:\RoverWork'
+```
+
+The public WMI API also accepts `ExclusionPath` through `MSFT_MpPreference.Add`, with a minimum client OS of Windows 8.1. It does not support XP.
+[WMI API requirements and parameters](https://learn.microsoft.com/en-us/previous-versions/windows/desktop/defender/add-msft-mppreference)
+If organizational policy restricts changing or viewing exclusions, ask your administrator to configure them.
+An exclusion missing from a displayed list does not establish that it is absent.
+[Managed-device restrictions](https://learn.microsoft.com/en-us/defender-endpoint/microsoft-defender-antivirus-exclusions-configure), [exclusion tamper protection](https://learn.microsoft.com/en-us/defender-endpoint/tamper-protection-antivirus-exclusions)
+
 ### Process Supervision And Management (Advanced topic)
 
 An independent supervisor starts with the agent. If the host stops making progress
