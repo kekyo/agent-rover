@@ -26,6 +26,12 @@ VIAddVersionKey "LegalCopyright" "Copyright (c) Kouji Matsui"
 !insertmacro MUI_LANGUAGE "English"
 !define UninstallKey "Software\Microsoft\Windows\CurrentVersion\Uninstall\AgentRover"
 !define RunKey "Software\Microsoft\Windows\CurrentVersion\Run"
+Var Stage
+Var KeepBackups
+{{for entry entries}}
+Var Had{{entry.index}}
+Var Placed{{entry.index}}
+{{end}}
 
 !macro UserContext
   SetShellVarContext current
@@ -42,19 +48,83 @@ Function un.onInit
   !insertmacro UserContext
 FunctionEnd
 
+Function CleanStage
+  ${If} $Stage != ""
+  ${AndIf} $KeepBackups != 1
+    ; This unique directory contains only this install attempt's staged files.
+    ; Windows cannot remove the installer's current working directory.
+    SetOutPath "$INSTDIR"
+    RMDir /r "$Stage"
+    StrCpy $Stage ""
+  ${EndIf}
+FunctionEnd
+
+Function .onInstFailed
+  Call CleanStage
+FunctionEnd
+
 Section "Agent"
-  SetOutPath "$INSTDIR"
+begin:
+  StrCpy $KeepBackups 0
+{{for entry entries}}
+  StrCpy $Had{{entry.index}} 0
+  StrCpy $Placed{{entry.index}} 0
+{{end}}
+  ClearErrors
+  CreateDirectory "$INSTDIR"
+  GetTempFileName $Stage "$INSTDIR"
+  IfErrors staging_failed
+  Delete "$Stage"
+  CreateDirectory "$Stage\new"
+  CreateDirectory "$Stage\old"
+  IfErrors staging_failed
+  SetOutPath "$Stage\new"
   ${If} ${RunningX64}
     File /oname=agent-rover-agent.exe "{{nsis amd64}}"
   ${Else}
     File /oname=agent-rover-agent.exe "{{nsis i686}}"
   ${EndIf}
 {{for doc documents}}
-  SetOutPath "$INSTDIR\{{doc.directory}}"
+  SetOutPath "{{winpath '$Stage' 'new' doc.directory}}"
   File /oname={{doc.filename}} "{{nsis doc.path}}"
 {{end}}
+  WriteUninstaller "$Stage\new\uninstall.exe"
+  IfErrors staging_failed
+  CreateDirectory "$INSTDIR\images"
+  CreateDirectory "$Stage\old\images"
+  IfErrors staging_failed
+
+  ; Check every destination before changing any existing file. In particular,
+  ; opening an executable for writing fails while its image is running.
+{{for entry entries}}
+  IfFileExists "{{winpath '$INSTDIR' entry.name}}" 0 checked{{entry.index}}
+  System::Call 'kernel32::CreateFileW(w "{{winpath '$INSTDIR' entry.name}}", i 0x40000000, i 0, p 0, i 3, i 0, p 0) p .r0'
+  ${If} $0 = -1
+    Goto staging_failed
+  ${EndIf}
+  System::Call 'kernel32::CloseHandle(p r0)'
+checked{{entry.index}}:
+{{end}}
+
+  ; Keep originals until all replacements succeed; a later rename failure
+  ; restores every original, rather than leaving a partially updated directory.
+{{for entry entries}}
+  IfFileExists "{{winpath '$INSTDIR' entry.name}}" 0 saved{{entry.index}}
+  ClearErrors
+  Rename "{{winpath '$INSTDIR' entry.name}}" "{{winpath '$Stage' 'old' entry.name}}"
+  IfErrors rollback
+  StrCpy $Had{{entry.index}} 1
+saved{{entry.index}}:
+{{end}}
+{{for entry entries}}
+  ClearErrors
+  Rename "{{winpath '$Stage' 'new' entry.name}}" "{{winpath '$INSTDIR' entry.name}}"
+  IfErrors rollback
+  StrCpy $Placed{{entry.index}} 1
+{{end}}
+
+  ClearErrors
   SetOutPath "$INSTDIR"
-  WriteUninstaller "$INSTDIR\uninstall.exe"
   CreateDirectory "$SMPROGRAMS\agent-rover"
   CreateShortcut "$SMPROGRAMS\agent-rover\agent-rover.lnk" "$INSTDIR\agent-rover-agent.exe" "" "$INSTDIR\agent-rover-agent.exe"
   CreateShortcut "$SMPROGRAMS\agent-rover\Uninstall.lnk" "$INSTDIR\uninstall.exe" "" "$INSTDIR\uninstall.exe"
@@ -66,9 +136,42 @@ Section "Agent"
   WriteRegStr HKCU "${UninstallKey}" "QuietUninstallString" '$\"$INSTDIR\uninstall.exe$\" /S'
   WriteRegDWORD HKCU "${UninstallKey}" "NoModify" 1
   WriteRegDWORD HKCU "${UninstallKey}" "NoRepair" 1
-  IfErrors 0 +3
-    SetErrorLevel 1
-    Abort "Installation failed."
+  IfErrors registration_failed
+  Call CleanStage
+  ClearErrors
+  SetErrorLevel 0
+  Goto done
+
+rollback:
+{{for entry reversedEntries}}
+  ${If} $Placed{{entry.index}} == 1
+    ClearErrors
+    Delete "{{winpath '$INSTDIR' entry.name}}"
+    ${If} ${Errors}
+      StrCpy $KeepBackups 1
+    ${EndIf}
+  ${EndIf}
+  ${If} $Had{{entry.index}} == 1
+    ClearErrors
+    Rename "{{winpath '$Stage' 'old' entry.name}}" "{{winpath '$INSTDIR' entry.name}}"
+    ${If} ${Errors}
+      StrCpy $KeepBackups 1
+    ${EndIf}
+  ${EndIf}
+{{end}}
+  ${If} $KeepBackups == 1
+    SetErrorLevel 3
+    Abort "Could not restore all previous files. Backups are retained in $Stage\old."
+  ${EndIf}
+staging_failed:
+  Call CleanStage
+  SetErrorLevel 2
+  MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "Cannot replace the installed files. Choose Exit from the agent tray menu, close programs using these files, and check folder permissions." /SD IDCANCEL IDRETRY begin
+  Abort "Installation cancelled; previous files were preserved."
+registration_failed:
+  SetErrorLevel 4
+  Abort "Files were installed, but menu or application registration failed. Run the installer again to retry registration."
+done:
 SectionEnd
 
 ; $0 is a shortcut path, $1 its expected target. Failure to inspect preserves it.
@@ -81,7 +184,7 @@ Function un.RemoveOwnedShortcut
     ${If} $3 == 0
       System::Call '$4->5(w r0, i 0) i .r3'
       ${If} $3 == 0
-        System::Call '$2->3(w .r5, i ${NSIS_MAX_STRLEN}, p 0, i 0) i .r3'
+        System::Call '$2->3(w .r5, i ${NSIS_MAX_STRLEN}, p 0, i 4) i .r3'
         ${If} $3 == 0
         ${AndIf} $5 == $1
           Delete "$0"
@@ -97,6 +200,22 @@ Function un.RemoveOwnedShortcut
 FunctionEnd
 
 Section "Uninstall"
+unbegin:
+  ; Do not remove registrations or any payload while an installed file is busy.
+{{for entry entries}}
+  IfFileExists "{{winpath '$INSTDIR' entry.name}}" 0 unchecked{{entry.index}}
+  System::Call 'kernel32::CreateFileW(w "{{winpath '$INSTDIR' entry.name}}", i 0x40000000, i 0, p 0, i 3, i 0, p 0) p .r0'
+  ${If} $0 = -1
+    Goto unbusy
+  ${EndIf}
+  System::Call 'kernel32::CloseHandle(p r0)'
+unchecked{{entry.index}}:
+{{end}}
+  ClearErrors
+{{for entry entries}}
+  Delete "{{winpath '$INSTDIR' entry.name}}"
+  IfErrors unbusy
+{{end}}
   ReadRegStr $0 HKCU "${RunKey}" "AgentRover"
   ${If} $0 == '$\"$INSTDIR\agent-rover-agent.exe$\"'
     DeleteRegValue HKCU "${RunKey}" "AgentRover"
@@ -112,11 +231,14 @@ Section "Uninstall"
   ${If} $0 == "$INSTDIR"
     DeleteRegKey HKCU "${UninstallKey}"
   ${EndIf}
-  Delete "$INSTDIR\agent-rover-agent.exe"
-{{for doc documents}}
-  Delete "$INSTDIR\{{doc.name}}"
-{{end}}
-  Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR\images"
   RMDir "$INSTDIR"
+  ClearErrors
+  SetErrorLevel 0
+  Goto undone
+unbusy:
+  SetErrorLevel 2
+  MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "Cannot remove the installed files. Choose Exit from the agent tray menu, close programs using these files, and check folder permissions." /SD IDCANCEL IDRETRY unbegin
+  Abort "Uninstallation cancelled."
+undone:
 SectionEnd

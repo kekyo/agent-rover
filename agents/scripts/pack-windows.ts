@@ -57,6 +57,11 @@ const binaries = ['amd64', 'i686'].map((arch) => ({
   name: `agent-${arch}.exe`,
   path: resolve(agents, `dist/agent-${arch}.exe`),
 }));
+const entries = [
+  'agent-rover-agent.exe',
+  ...documents.map((document) => document.name),
+  'uninstall.exe',
+].map((name, index) => ({ name, index }));
 const artifacts = resolve(repo, 'artifacts');
 await mkdir(artifacts, { recursive: true });
 const stage = await mkdtemp(join(artifacts, '.windows-'));
@@ -75,6 +80,9 @@ try {
       amd64: binaries[0]!.path,
       i686: binaries[1]!.path,
       documents,
+      entries,
+      reversedEntries: [...entries].reverse(),
+      winpath: (...parts: unknown[]) => win32.join(...parts.map(String)),
       // NSIS literals must not expand dollars from a checkout path.
       nsis: (value: unknown) =>
         String(value).replaceAll('$', '$$').replaceAll('"', '$\\"'),

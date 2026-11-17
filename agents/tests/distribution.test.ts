@@ -3,6 +3,7 @@
 // Under MIT.
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { createHash } from 'node:crypto';
 import {
   access,
   copyFile,
@@ -90,6 +91,13 @@ it('packs the same native build into a ZIP and a per-user installer', async () =
       await readFile(resolve(directory, 'installed/agent-rover-agent.exe'))
     ).toEqual(await readFile(resolve(root, 'agents/dist/agent-amd64.exe')));
     await run([command, 'installed', installed, version]);
+    for (const name of [
+      'LICENSE',
+      'README_pack.md',
+      'images/README.md',
+      'images/agent-rover-120.png',
+    ])
+      await access(resolve(directory, 'installed', name));
     await expect(
       run([
         'reg',
@@ -144,6 +152,15 @@ it('packs the same native build into a ZIP and a per-user installer', async () =
       { timeoutMs: 30000 }
     );
     expect(await connected.files.safeBaseDir()).toBe(home);
+    await copyFile(
+      resolve(directory, 'installed/uninstall.exe'),
+      resolve(directory, 'remove.exe')
+    );
+    await expect(
+      run([command, 'run', `${home}\\remove.exe`, `/S _?=${installed}`])
+    ).rejects.toThrow();
+    await run([command, 'installed', installed, version]);
+    expect(await connected.files.safeBaseDir()).toBe(home);
     const control = resolve(root, 'agents/.build/gui/control-amd64.exe');
     const supervisor = (
       await run([control, 'parent', String(port)])
@@ -156,6 +173,46 @@ it('packs the same native build into a ZIP and a per-user installer', async () =
       String(port),
     ]);
     await run([control, 'wait-exit', supervisor]);
+    await writeFile(resolve(directory, 'installed/keep.txt'), 'user data');
+    const previous = Buffer.from('previous installed executable');
+    await writeFile(
+      resolve(directory, 'installed/agent-rover-agent.exe'),
+      previous
+    );
+    const holder = spawn(
+      'wine',
+      [control, 'hold-update-file', `${installed}\\LICENSE`],
+      { env, stdio: ['ignore', 'pipe', 'ignore'] }
+    );
+    const heldExit = once(holder, 'exit');
+    const [held] = await Promise.race([
+      once(holder.stdout!, 'data'),
+      (async () => {
+        const [code] = await heldExit;
+        throw new Error(`File holder exited before readiness (${code})`);
+      })(),
+    ]);
+    const heldPid = String(held).match(/held (\d+)/u)![1]!;
+    try {
+      await expect(
+        run([command, 'run', setup, `/S /D=${installed}`])
+      ).rejects.toThrow();
+      expect(
+        createHash('sha256')
+          .update(
+            await readFile(
+              resolve(directory, 'installed/agent-rover-agent.exe')
+            )
+          )
+          .digest('hex')
+      ).toBe(createHash('sha256').update(previous).digest('hex'));
+    } finally {
+      await run([control, 'release-file', heldPid]);
+      expect((await heldExit)[0]).toBe(0);
+      holder.stdout!.destroy();
+    }
+    await run([command, 'run', setup, `/S /D=${installed}`]);
+    await run([command, 'installed', installed, version]);
     await copyFile(
       resolve(directory, 'installed/uninstall.exe'),
       resolve(directory, 'remove.exe')
@@ -165,8 +222,57 @@ it('packs the same native build into a ZIP and a per-user installer', async () =
       access(resolve(directory, 'installed/agent-rover-agent.exe'))
     ).rejects.toMatchObject({ code: 'ENOENT' });
     expect(
+      await readFile(resolve(directory, 'installed/keep.txt'), 'utf8')
+    ).toBe('user data');
+    expect(
       await readFile(resolve(directory, '.agent-rover-agent.ini'), 'utf8')
     ).toContain(`port=${port}`);
+    await exec('unzip', ['-q', archive, '-d', resolve(directory, 'zip')]);
+    for (const arch of ['amd64', 'i686']) {
+      const portable = spawn(
+        'wine',
+        [
+          resolve(root, 'agents/.build/configuration/loader-amd64.exe'),
+          'launch',
+          home,
+          `${home}\\zip\\agent-${arch}.exe`,
+        ],
+        { env, stdio: 'ignore' }
+      );
+      expect((await once(portable, 'exit'))[0]).toBe(0);
+      connected = await waitForResult(
+        async () => {
+          try {
+            return await connectTestAgent({
+              host: '127.0.0.1',
+              port,
+              authToken: token,
+              timeoutMs: 1000,
+              retry: false,
+            });
+          } catch (error) {
+            throw new Error('Extracted ZIP agent is starting', {
+              cause: error,
+            });
+          }
+        },
+        { timeoutMs: 30000 }
+      );
+      expect(await connected.files.safeBaseDir()).toBe(home);
+      const work = await connected.files.mkdtemp('zip-');
+      await connected.files.writeFile(`${work}\\probe.txt`, Buffer.from(arch));
+      expect(
+        (await connected.files.readFile(`${work}\\probe.txt`)).toString()
+      ).toBe(arch);
+      await connected.files.remove(work, { recursive: true });
+      const parent = (
+        await run([control, 'parent', String(port)])
+      ).stdout.trim();
+      connected.release();
+      connected = undefined;
+      await run([control, 'exit', String(port)]);
+      await run([control, 'wait-exit', parent]);
+    }
   } finally {
     connected?.release();
     try {
@@ -180,4 +286,4 @@ it('packs the same native build into a ZIP and a per-user installer', async () =
       await rm(directory, { recursive: true, force: true });
     }
   }
-}, 180000);
+}, 240000);

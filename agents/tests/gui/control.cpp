@@ -126,11 +126,12 @@ int wmain(int argc, wchar_t** argv) {
     if (!WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, sizeof(utf8), nullptr, nullptr)) return 41;
     std::puts(utf8); return 0;
   }
-  if (mode == L"hold-file") {
+  if (mode == L"hold-file" || mode == L"hold-update-file") {
     // Fault injection: keep a capture file open without delete sharing until
     // the test explicitly releases it. The event removes any timing race.
+    // The update fixture also denies writes so installer replacement must fail.
     const auto file = CreateFileW(name.c_str(), GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        FILE_SHARE_READ | (mode == L"hold-file" ? FILE_SHARE_WRITE : 0), nullptr, OPEN_EXISTING, 0, nullptr);
     if (file == INVALID_HANDLE_VALUE) return 45;
     const auto event_name = L"Local\\AgentRoverFileHold-" + std::to_wstring(GetCurrentProcessId());
     const auto event = CreateEventW(nullptr, TRUE, FALSE, event_name.c_str());
