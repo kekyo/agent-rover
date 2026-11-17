@@ -585,6 +585,7 @@ int RunTcpServer(const ServerOptions& options, std::string* error) {
     SetAgentLogSink([weak](const AgentLogRecord& record) {
       if (auto state = weak.lock()) { NotifyAgentGuiLog(state->gui); EnqueueFileLog(state->logger, record); }
     });
+    PrintAgentLogEvent("phase=configuration path=" + SanitizeAgentLogField(options.config_path));
     auto reaping = ReapSessions(server);
     server->recovery = RecoverFiles(server.get());
     auto progress = ReportProgress(server, server->stop.get_cancellation());
