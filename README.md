@@ -128,6 +128,12 @@ Uninstall through the Windows installed-apps list or the Programs menu's `Uninst
 Uninstallation preserves the INI file, logs, test data, and Defender settings.
 Startup entries and shortcuts are removed only when they point to the installation being removed; entries for another copy are preserved.
 
+For automated uninstallation, account for NSIS's launch behavior.
+An ordinary `uninstall.exe /S` launches a temporary copy and exits first, so its exit code does not report whether removal succeeded.
+To wait for completion and obtain the removal exit code, copy the installed `uninstall.exe` into a temporary folder you own and run that copy with `/S _?=<absolute installation path>`.
+Place `_?=` last in the command line, without quoting its path even when it contains spaces. Wait for the copied process, read its exit code, and then remove the temporary copy.
+This invocation returns a nonzero code when removal fails. See [NSIS exit codes and temporary copies](https://nsis.sourceforge.io/Docs/AppendixD.html#D.1).
+
 Start the Windows agent from your interactive desktop. It runs in the system tray.
 
 ```cmd
