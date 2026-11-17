@@ -1,0 +1,122 @@
+; agent-rover - Current-user Windows installer
+; Copyright (c) Kouji Matsui. (@kekyo@mi.kekyo.net)
+; Under MIT.
+Unicode true
+RequestExecutionLevel user
+Name "agent-rover"
+OutFile "{{nsis output}}"
+InstallDir "$LOCALAPPDATA\Programs\agent-rover"
+SetCompressor /SOLID lzma
+VIProductVersion "{{windowsVersion}}"
+VIAddVersionKey "ProductName" "agent-rover"
+VIAddVersionKey "ProductVersion" "{{version}}"
+VIAddVersionKey "FileVersion" "{{version}}"
+VIAddVersionKey "FileDescription" "agent-rover per-user installer"
+VIAddVersionKey "LegalCopyright" "Copyright (c) Kouji Matsui"
+!include "MUI2.nsh"
+!include "x64.nsh"
+!define MUI_ICON "{{nsis icon}}"
+!define MUI_UNICON "{{nsis icon}}"
+!insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_DIRECTORY
+!insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_PAGE_FINISH
+!insertmacro MUI_UNPAGE_CONFIRM
+!insertmacro MUI_UNPAGE_INSTFILES
+!insertmacro MUI_LANGUAGE "English"
+!define UninstallKey "Software\Microsoft\Windows\CurrentVersion\Uninstall\AgentRover"
+!define RunKey "Software\Microsoft\Windows\CurrentVersion\Run"
+
+!macro UserContext
+  SetShellVarContext current
+  ${If} ${RunningX64}
+    SetRegView 64
+  ${EndIf}
+!macroend
+
+Function .onInit
+  !insertmacro UserContext
+FunctionEnd
+
+Function un.onInit
+  !insertmacro UserContext
+FunctionEnd
+
+Section "Agent"
+  SetOutPath "$INSTDIR"
+  ${If} ${RunningX64}
+    File /oname=agent-rover-agent.exe "{{nsis amd64}}"
+  ${Else}
+    File /oname=agent-rover-agent.exe "{{nsis i686}}"
+  ${EndIf}
+{{for doc documents}}
+  SetOutPath "$INSTDIR\{{doc.directory}}"
+  File /oname={{doc.filename}} "{{nsis doc.path}}"
+{{end}}
+  SetOutPath "$INSTDIR"
+  WriteUninstaller "$INSTDIR\uninstall.exe"
+  CreateDirectory "$SMPROGRAMS\agent-rover"
+  CreateShortcut "$SMPROGRAMS\agent-rover\agent-rover.lnk" "$INSTDIR\agent-rover-agent.exe" "" "$INSTDIR\agent-rover-agent.exe"
+  CreateShortcut "$SMPROGRAMS\agent-rover\Uninstall.lnk" "$INSTDIR\uninstall.exe" "" "$INSTDIR\uninstall.exe"
+  WriteRegStr HKCU "${UninstallKey}" "DisplayName" "agent-rover"
+  WriteRegStr HKCU "${UninstallKey}" "DisplayVersion" "{{version}}"
+  WriteRegStr HKCU "${UninstallKey}" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKCU "${UninstallKey}" "DisplayIcon" "$INSTDIR\agent-rover-agent.exe"
+  WriteRegStr HKCU "${UninstallKey}" "UninstallString" '$\"$INSTDIR\uninstall.exe$\"'
+  WriteRegStr HKCU "${UninstallKey}" "QuietUninstallString" '$\"$INSTDIR\uninstall.exe$\" /S'
+  WriteRegDWORD HKCU "${UninstallKey}" "NoModify" 1
+  WriteRegDWORD HKCU "${UninstallKey}" "NoRepair" 1
+  IfErrors 0 +3
+    SetErrorLevel 1
+    Abort "Installation failed."
+SectionEnd
+
+; $0 is a shortcut path, $1 its expected target. Failure to inspect preserves it.
+Function un.RemoveOwnedShortcut
+  System::Call 'ole32::CoInitializeEx(p 0, i 2) i .r6'
+  System::Call 'ole32::CoCreateInstance(g "{00021401-0000-0000-C000-000000000046}", p 0, i 1, g "{000214F9-0000-0000-C000-000000000046}", *p .r2) i .r3'
+  ${If} $3 == 0
+    ; IShellLinkW::QueryInterface(IPersistFile), IPersistFile::Load, IShellLinkW::GetPath.
+    System::Call '$2->0(g "{0000010B-0000-0000-C000-000000000046}", *p .r4) i .r3'
+    ${If} $3 == 0
+      System::Call '$4->5(w r0, i 0) i .r3'
+      ${If} $3 == 0
+        System::Call '$2->3(w .r5, i ${NSIS_MAX_STRLEN}, p 0, i 0) i .r3'
+        ${If} $3 == 0
+        ${AndIf} $5 == $1
+          Delete "$0"
+        ${EndIf}
+      ${EndIf}
+      System::Call '$4->2()'
+    ${EndIf}
+    System::Call '$2->2()'
+  ${EndIf}
+  ${If} $6 >= 0
+    System::Call 'ole32::CoUninitialize()'
+  ${EndIf}
+FunctionEnd
+
+Section "Uninstall"
+  ReadRegStr $0 HKCU "${RunKey}" "AgentRover"
+  ${If} $0 == '$\"$INSTDIR\agent-rover-agent.exe$\"'
+    DeleteRegValue HKCU "${RunKey}" "AgentRover"
+  ${EndIf}
+  StrCpy $0 "$SMPROGRAMS\agent-rover\agent-rover.lnk"
+  StrCpy $1 "$INSTDIR\agent-rover-agent.exe"
+  Call un.RemoveOwnedShortcut
+  StrCpy $0 "$SMPROGRAMS\agent-rover\Uninstall.lnk"
+  StrCpy $1 "$INSTDIR\uninstall.exe"
+  Call un.RemoveOwnedShortcut
+  RMDir "$SMPROGRAMS\agent-rover"
+  ReadRegStr $0 HKCU "${UninstallKey}" "InstallLocation"
+  ${If} $0 == "$INSTDIR"
+    DeleteRegKey HKCU "${UninstallKey}"
+  ${EndIf}
+  Delete "$INSTDIR\agent-rover-agent.exe"
+{{for doc documents}}
+  Delete "$INSTDIR\{{doc.name}}"
+{{end}}
+  Delete "$INSTDIR\uninstall.exe"
+  RMDir "$INSTDIR\images"
+  RMDir "$INSTDIR"
+SectionEnd

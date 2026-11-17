@@ -1,0 +1,15 @@
+{
+  "extends": "../agent-rover/tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "noEmit": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "scripts/**/*.ts",
+    "vite.config.ts",
+    "tests/distribution.test.ts",
+    "../agent-rover/src/**/*.d.ts"
+  ],
+  "exclude": ["node_modules", "dist", ".build"]
+}

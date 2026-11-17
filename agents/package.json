@@ -2,15 +2,22 @@
   "name": "agent-rover-windows-agent",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "description": "Windows native agent for agent-rover",
   "scripts": {
     "build": "make -j4",
     "clean": "make clean",
-    "pack": "npm run build && ./pack.sh",
+    "pack": "npm run build && vite build && node .build/pack/pack-windows.mjs",
     "test": "vitest run"
   },
   "devDependencies": {
+    "@types/node": "^26.6.6",
+    "funcity": "^1.5.0",
+    "prettier-max": "^1.16.0",
+    "resolved-killer": "^1.1.0",
     "screw-up": ">=1.34.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.3.8",
     "vitest": ">=2.0.0"
   }
 }
