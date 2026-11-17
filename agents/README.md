@@ -13,7 +13,7 @@ schema unless the driver is extended.
 
 | Name | Value | Source |
 | --- | --- | --- |
-| JSON protocol version | `2026-09-09.1` | `protocolVersion` / `kProtocolVersion` |
+| JSON protocol version | `2026-11-17.1` | `protocolVersion` / `kProtocolVersion` |
 | TCP frame version | `2` | `tcpFrameVersion` / `kTcpFrameVersion` |
 | TCP transport capability | `transport.tcp-frame-v1` | `tcpFrameCapabilityId` / `kTcpFrameCapabilityId` |
 | Default frame payload limit | `16 * 1024 * 1024` bytes | driver and native agent |
@@ -21,7 +21,7 @@ schema unless the driver is extended.
 | Binary transfer chunk size used by driver and native agent | `64 * 1024` bytes | implementation detail, peers must accept other positive chunk sizes |
 
 The driver rejects the connection during the ready handshake when the reported
-JSON protocol version is not exactly `2026-09-09.1`.
+JSON protocol version is not exactly `2026-11-17.1`.
 
 ## Connection Lifecycle
 
@@ -275,7 +275,7 @@ Immediately after authentication, the agent must send:
   "name": "agent.ready",
   "data": {
     "capabilities": {
-      "protocolVersion": "2026-09-09.1",
+      "protocolVersion": "2026-11-17.1",
       "platform": "windows",
       "features": [
         "capabilities",
@@ -322,14 +322,14 @@ Immediately after authentication, the agent must send:
         "agent.native-windows"
       ]
     },
-    "protocolVersion": "2026-09-09.1"
+    "protocolVersion": "2026-11-17.1"
   }
 }
 ```
 
 The driver validates `data.capabilities`:
 
-- `protocolVersion` must be a string and must equal `2026-09-09.1`.
+- `protocolVersion` must be a string and must equal `2026-11-17.1`.
 - `platform` must be the string `windows`.
 - `features` must be an array of strings.
 
@@ -435,7 +435,7 @@ monitors; use individual work areas to choose a visible placement.
 
 ```json
 {
-  "protocolVersion": "2026-09-09.1",
+  "protocolVersion": "2026-11-17.1",
   "platform": "windows",
   "features": ["transport.tcp-frame-v1"]
 }
@@ -1436,7 +1436,7 @@ when no event log query is supplied.
 1. Listen on a TCP port and read/write 20-byte `TRVR` frames.
 2. Implement optional auth challenge/response, including the NUL byte in the
    HMAC message prefix.
-3. Send `agent.ready` with protocol version `2026-09-09.1`, platform `windows`,
+3. Send `agent.ready` with protocol version `2026-11-17.1`, platform `windows`,
    and a string feature array.
 4. Decode JSON request frames and return matching JSON response frames.
 5. Implement binary transfer chunk encode/decode, contiguous sequence
@@ -1479,6 +1479,17 @@ release and removal of its temporary directory both succeed.
 
 `process.managedRunning` takes `managedProcessId` and returns whether the Job
 contains active processes, including descendants whose parents have exited.
+`process.managedProcesses` takes the same argument and returns an array of
+running descendant snapshots in the `process.list` format, excluding the root.
+Membership comes from the retained Job, with each opened process handle checked
+before its state is read. Exited processes and recycled IDs outside the Job are
+omitted; enumeration, access and state-query failures return `OPERATION_FAILED`,
+not an empty successful result. The root uses its retained handle through
+`process.managedSnapshot`. These observations are not an atomic snapshot;
+`process.managedRunning` remains authoritative when enumeration is incomplete
+because processes are starting or exiting. The SDK does not supplement native
+membership with parent-PID or creation-time inference.
+
 `process.readCaptured` takes `managedProcessId` and `stream` (`stdout` or
 `stderr`) and returns a binary file-transfer reference. While the root runs it
 reads a snapshot using write sharing. After root exit it reports `busy` until

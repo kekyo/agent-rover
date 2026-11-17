@@ -1186,6 +1186,16 @@ await agent.files.remove(remoteDirectory, {
 
 ### Process Cleanup And File Removal
 
+The Windows agent manages the launched root and its descendants in an OS Job
+object. `snapshot().running` and `waitForExit()` use the state of the whole Job,
+so descendants keep the application running after the original root exits.
+`processes()` returns remaining Job descendants, and `windows()` searches
+windows owned by the running root and those descendants. A matching parent PID
+or creation time does not make an unrelated process a member. If no owned
+window matches an explicit selector, newly appearing windows of other processes
+are still considered. Agents without native management infer descendants from
+the process list.
+
 `await process.releaseAsync({ timeoutMs: 10000 })` waits for the managed process
 tree to exit, closes its capture resources, and removes its internal output
 directory. Concurrent release calls share the work. A failed call keeps its

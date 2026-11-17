@@ -8,6 +8,7 @@
 #include "command_line.h"
 #include "json_protocol.h"
 #include "win32_util.h"
+#include "win32_job.h"
 #include "win32_video.h"
 #include "win32_cleanup.h"
 #include "managed_launch.h"
@@ -243,25 +244,15 @@ static cardio::promise<void> WaitForJobExit(HANDLE job, cardio::cancellation can
   // (a Job is not generally signaled when its last process exits).
   for (unsigned int snapshot = 0; snapshot < 16 && !JobEmpty(job); ++snapshot) {
     cancellation.throw_if_cancellation_requested();
-    std::vector<ULONG_PTR> storage(130);
-    for (;;) {
-      if (QueryInformationJobObject(job, JobObjectBasicProcessIdList, storage.data(),
-          storage.size() * sizeof(ULONG_PTR), nullptr)) break;
-      if (GetLastError() != ERROR_MORE_DATA || storage.size() >= 65538)
-        throw NativeFailure("QueryInformationJobObject(process ids)");
-      storage.resize(storage.size() * 2);
-    }
-    const auto list = reinterpret_cast<const JOBOBJECT_BASIC_PROCESS_ID_LIST*>(storage.data());
+    std::vector<uint32_t> ids;
+    OperationError error;
+    if (!ListJobProcessIds(job, &ids, &error)) throw std::runtime_error(error.message);
     bool observed = false;
-    for (DWORD i = 0; i < list->NumberOfProcessIdsInList; ++i) {
-      const auto process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE, list->ProcessIdList[i]);
-      if (!process) {
-        if (GetLastError() == ERROR_INVALID_PARAMETER) continue;
-        throw NativeFailure("OpenProcess(owned exit)");
-      }
-      BOOL member = FALSE;
-      if (!IsProcessInJob(process, job, &member)) { const auto error = NativeFailure("IsProcessInJob"); CloseHandle(process); throw error; }
-      if (!member) { CloseHandle(process); continue; } // A recycled PID is never a termination target.
+    for (const auto id : ids) {
+      HANDLE process = nullptr;
+      if (!OpenJobProcess(job, id, SYNCHRONIZE | PROCESS_QUERY_INFORMATION, &process, &error))
+        throw std::runtime_error(error.message);
+      if (!process) continue;
       try { co_await cardio::from_win32_handle(process, cancellation); }
       catch (...) { CloseHandle(process); throw; }
       CloseHandle(process);

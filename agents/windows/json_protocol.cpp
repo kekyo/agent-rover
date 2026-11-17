@@ -538,6 +538,7 @@ static std::string CapabilitiesJson() {
       "\"process.launchManaged\","
       "\"process.managedSnapshot\","
       "\"process.managedRunning\","
+      "\"process.managedProcesses\","
       "\"process.readCaptured\","
       "\"process.snapshot\","
       "\"eventLogs.read\","
@@ -1354,7 +1355,7 @@ std::string HandleJsonRequest(
     }
     return SuccessResponseJson(id, ProcessSnapshotJson(process));
   }
-  if (method == "process.managedRunning" || method == "process.readCaptured") {
+  if (method == "process.managedRunning" || method == "process.managedProcesses" || method == "process.readCaptured") {
     int managed_id = 0;
     if (!FindJsonNumberField(payload, "managedProcessId", &managed_id) || managed_id <= 0) return FailureResponseJson(id, "A managed process ID is required.");
     OperationError error;
@@ -1362,6 +1363,11 @@ std::string HandleJsonRequest(
       bool running = false;
       if (!ManagedProcessRunning(static_cast<uint32_t>(managed_id), &running, &error)) return OperationFailureJson(id, method, error);
       return SuccessResponseJson(id, running ? "true" : "false");
+    }
+    if (method == "process.managedProcesses") {
+      std::vector<ProcessSnapshot> processes;
+      if (!ListManagedProcesses(static_cast<uint32_t>(managed_id), &processes, &error)) return OperationFailureJson(id, method, error);
+      return SuccessResponseJson(id, ProcessSnapshotArrayJson(processes));
     }
     std::string stream;
     if (!FindJsonStringField(payload, "stream", &stream) || (stream != "stdout" && stream != "stderr")) return FailureResponseJson(id, "Capture stream must be stdout or stderr.");

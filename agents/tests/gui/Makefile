@@ -26,3 +26,7 @@ $(OUTPUT)/agent-i686.res.o: $(RESOURCES) $(TOOLCHAIN_DEPENDENCIES)
 $(OUTPUT)/control-amd64.exe: control.cpp $(TOOLCHAIN_DEPENDENCIES)
 	@mkdir -p $(@D)
 	$(AMD64_CXX) $(CXXFLAGS) -D_WIN32_WINNT=0x0502 -DWINVER=0x0502 $< -luser32 -o $@
+
+$(OUTPUT)/control-i686.exe: control.cpp $(TOOLCHAIN_DEPENDENCIES)
+	@mkdir -p $(@D)
+	$(I686_CXX) $(CXXFLAGS) -D_WIN32_WINNT=0x0501 -DWINVER=0x0501 $< -luser32 -o $@

@@ -3732,7 +3732,13 @@ const connectRemoteAgentOnce = async (
 
     const snapshot = async (): Promise<RemoteManagedProcessSnapshot> => {
       const root = await rootSnapshot();
-      const trackedProcesses = await collectTrackedProcesses(root);
+      const trackedProcesses = options.nativeManaged
+        ? parseProcessSnapshotArray(
+            await requestJson('process.managedProcesses', {
+              managedProcessId: nativeManagedProcessId(),
+            })
+          )
+        : await collectTrackedProcesses(root);
       const nativeRunning = options.nativeManaged
         ? await requestJson('process.managedRunning', {
             managedProcessId: nativeManagedProcessId(),
@@ -3896,7 +3902,9 @@ const connectRemoteAgentOnce = async (
       );
       const effectiveQuery = query ?? {};
       const trackedProcessIds = new Set([
-        current.root.id,
+        ...(!options.nativeManaged || current.root.running
+          ? [current.root.id]
+          : []),
         ...current.processes.map((process) => process.id),
       ]);
       const trackedMatches = candidates.filter(

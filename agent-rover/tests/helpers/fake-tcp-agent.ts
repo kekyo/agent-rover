@@ -145,6 +145,7 @@ export const defaultFakeCapabilities: RemoteAgentCapabilities = {
     'process.launchManaged',
     'process.managedSnapshot',
     'process.managedRunning',
+    'process.managedProcesses',
     'process.readCaptured',
     'process.releaseManaged',
     'process.snapshot',
@@ -936,6 +937,24 @@ export const startFakeTcpAgent = async (
             });
           }
           return;
+        case 'process.managedProcesses': {
+          const processId = managedProcesses.get(
+            Number(recordParams.managedProcessId)
+          );
+          if (processId === undefined) {
+            sendFailure(id, 'Unknown managed process id.');
+            return;
+          }
+          sendSuccess(
+            id,
+            toJson(
+              (managedDescendants.get(processId) ?? []).filter(
+                (process) => process.running
+              )
+            )
+          );
+          return;
+        }
         case 'process.managedRunning': {
           const processId = managedProcesses.get(
             Number(recordParams.managedProcessId)
@@ -995,6 +1014,7 @@ export const startFakeTcpAgent = async (
             return;
           }
           options.killedManagedProcessIds?.push(managedProcessId);
+          managedDescendants.set(processId, []);
           options.killedProcessIds?.push(processId);
           const current = processes.get(processId);
           processes.set(processId, {

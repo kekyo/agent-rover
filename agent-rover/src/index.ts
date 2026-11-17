@@ -431,9 +431,9 @@ export interface RemoteManagedProcessLaunchOptions {
 export interface RemoteManagedProcessSnapshot {
   /** Current root process state. */
   readonly root: RemoteProcessSnapshot;
-  /** Running descendant processes tracked for this managed process. */
+  /** Running descendants; native Windows uses Job membership, even after parent exit. */
   readonly processes: readonly RemoteProcessSnapshot[];
-  /** Whether the root or any tracked descendant process is still running. */
+  /** Whether the root or its Job is active (inferred descendants on non-native agents). */
   readonly running: boolean;
 }
 
@@ -451,9 +451,14 @@ export interface RemoteManagedProcess
   readonly rootSnapshot: () => Promise<RemoteProcessSnapshot>;
   /** Reads the current logical application state. */
   readonly snapshot: () => Promise<RemoteManagedProcessSnapshot>;
-  /** Lists running descendant processes tracked for this managed process. */
+  /** Lists running descendants from native Job membership, or non-native parent inference. */
   readonly processes: () => Promise<readonly RemoteProcessSnapshot[]>;
-  /** Finds top-level windows related to this managed process. */
+  /**
+   * Finds windows owned by the running root or its descendants.
+   * @param query Optional window filters.
+   * @returns Matching owned windows, or newly appearing windows matching an explicit selector.
+   * @remarks Native Windows uses Job membership; unrelated existing windows are not owned.
+   */
   readonly windows: (
     query?: RemoteWindowQuery
   ) => Promise<readonly AppWindow[]>;
@@ -469,7 +474,7 @@ export interface RemoteManagedProcess
   ) => Promise<void>;
   /** Terminates the tracked process tree. */
   readonly kill: () => Promise<void>;
-  /** Waits until the root and tracked descendants exit. */
+  /** Waits until the root and its native Job (or non-native inferred descendants) exit. */
   readonly waitForExit: (
     options?: RemoteWaitOptions
   ) => Promise<RemoteManagedProcessSnapshot>;

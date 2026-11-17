@@ -10,6 +10,7 @@ import { createTcpFrameTransport } from '../../src/driver/transport';
 import {
   createPendingRequestTable,
   createBinaryTransferChunks,
+  createBinaryTransferReceiver,
   type JsonValue,
 } from '../../src/protocol';
 
@@ -22,6 +23,8 @@ export interface WindowsBootstrap {
   ) => Promise<JsonValue | undefined>;
   /** Uploads a file using binary transfer frames. */
   readonly upload: (path: string, data: Buffer) => Promise<void>;
+  /** Downloads deployment diagnostics with chunk checksum validation. */
+  readonly download: (path: string) => Promise<Buffer>;
   /** Releases a deployment Job after its native children actually finish. */
   readonly releaseManaged: (id: number) => Promise<void>;
   /** Closes the deployment connection. */
@@ -66,6 +69,8 @@ const connectWindowsBootstrapOnce = async (
   authToken: string
 ): Promise<WindowsBootstrap> => {
   const pending = createPendingRequestTable({ requestTimeoutMs: 30000 });
+  const receiver = createBinaryTransferReceiver();
+  const received = new Map<string, Buffer>();
   let readyResolve: () => void = () => {};
   let readyReject: (error: Error) => void = () => {};
   const ready = new Promise<void>((resolve, reject) => {
@@ -83,7 +88,11 @@ const connectWindowsBootstrapOnce = async (
     timeoutMs: 30000,
     callbacks: {
       onOpen: () => {},
-      onBinaryChunk: async () => {},
+      onBinaryChunk: async (chunk) => {
+        const result = receiver.acceptChunk(chunk);
+        if (result.state === 'complete')
+          received.set(chunk.transferId, result.data);
+      },
       onMessage: (message) => {
         if (message.kind === 'event' && message.name === 'agent.ready')
           readyResolve();
@@ -130,6 +139,21 @@ const connectWindowsBootstrapOnce = async (
   };
   return {
     request,
+    download: async (path) => {
+      const metadata = await request('file.read', { path });
+      if (
+        metadata === null ||
+        typeof metadata !== 'object' ||
+        Array.isArray(metadata) ||
+        typeof metadata.transferId !== 'string'
+      )
+        throw new Error('Invalid deployment download metadata.');
+      const data = received.get(metadata.transferId);
+      received.delete(metadata.transferId);
+      if (data === undefined)
+        throw new Error('Deployment download did not complete.');
+      return data;
+    },
     releaseManaged: async (managedProcessId) => {
       await waitForResult(
         async () => {
