@@ -19,6 +19,7 @@ namespace agent_rover {
 static constexpr UINT kTrayMessage = WM_APP + 41;
 static constexpr UINT kLogTimer = 1;
 static constexpr UINT kShowLogs = 1, kOpenLogs = 2, kExit = 3;
+static constexpr UINT kOpenConfig = 4;
 static constexpr UINT kCopyToken = 104;
 static const std::wstring kTokenPrefix = L"Token: ";
 
@@ -29,7 +30,7 @@ struct AgentGui {
   bool refresh_pending = false;
   uint64_t first_sequence = 0;
   std::wstring cell;
-  std::function<void()> exit, open_logs;
+  std::function<void()> exit, open_logs, open_config;
   ~AgentGui() {
     Shell_NotifyIconW(NIM_DELETE, &tray);
     if (window) DestroyWindow(window);
@@ -78,6 +79,7 @@ static void ShowTrayMenu(AgentGui* gui) {
   if (!menu) return;
   AppendMenuW(menu, MF_STRING, kShowLogs, L"Show logs");
   AppendMenuW(menu, MF_STRING | (gui->open_logs ? 0 : MF_GRAYED), kOpenLogs, L"Open log folder");
+  AppendMenuW(menu, MF_STRING | (gui->open_config ? 0 : MF_GRAYED), kOpenConfig, L"Open config file");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, kExit, L"Exit");
   POINT point = {};
@@ -114,6 +116,7 @@ static LRESULT CALLBACK ViewerWindowProc(HWND window, UINT message, WPARAM wpara
     case WM_COMMAND:
       if (LOWORD(wparam) == kShowLogs) ShowLogs(gui);
       else if (LOWORD(wparam) == kOpenLogs && gui->open_logs) gui->open_logs();
+      else if (LOWORD(wparam) == kOpenConfig && gui->open_config) gui->open_config();
       else if (LOWORD(wparam) == kExit && gui->exit) gui->exit();
       else if (LOWORD(wparam) == kCopyToken && HIWORD(wparam) == BN_CLICKED && gui->copy_token) {
         DWORD start = 0, end = 0;
@@ -224,6 +227,14 @@ void SetAgentGuiStatus(const AgentGuiHandle& gui, const std::string& status) {
 
 void SetAgentGuiOpenLogs(const AgentGuiHandle& gui, std::function<void()> open) {
   gui->open_logs = std::move(open);
+}
+
+void SetAgentGuiOpenConfig(const AgentGuiHandle& gui, std::function<void()> open) {
+  gui->open_config = std::move(open);
+}
+
+void ShowAgentGuiError(const AgentGuiHandle& gui, const std::wstring& error) {
+  MessageBoxW(gui->window, error.c_str(), L"agent-rover", MB_OK | MB_ICONERROR);
 }
 
 }  // namespace agent_rover

@@ -12,6 +12,7 @@
 #include "auth.h"
 #include "command_line.h"
 #include "agent_configuration.h"
+#include "config_editor.h"
 #include "tcp_server.h"
 #include "version_banner.h"
 #include "win32_util.h"
@@ -52,6 +53,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, wchar_t*, int) {
   if (argc == 2 && std::wstring(argv[1]) == L"--agent-log-worker") {
     LocalFree(argv);
     return agent_rover::RunFileLogWorker();
+  }
+  if (argc == 2 && std::wstring(argv[1]) == L"--agent-config-editor") {
+    LocalFree(argv);
+    return agent_rover::RunConfigEditorWorker();
   }
   if (argc >= 2 && (std::wstring(argv[1]) == L"--agent-worker" || std::wstring(argv[1]) == L"--agent-probe")) {
     const bool probe = std::wstring(argv[1]) == L"--agent-probe";

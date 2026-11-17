@@ -29,6 +29,7 @@ enum class WorkerMessageKind : uint32_t {
   /** Releases an acknowledged parent launch registry entry. */ ReleaseLaunch = 112,
   /** Private server options, token and explicitly duplicated handles. */ HostConfiguration = 113,
   /** Reserves recovery capacity before creating a capture directory. */ ReserveCapture = 114,
+  /** Opens the startup-selected INI through the local shell. */ ConfigOpen = 115,
 };
 /** Private process roles for this executable. */
 enum class HelperRole {
@@ -39,6 +40,7 @@ enum class HelperRole {
   /** Creates one application inside a parent-owned Job. */ Launch,
   /** Launch whose application tree survives session release. */ PersistentLaunch,
   /** One monitored GUI/TCP host. */ Server,
+  /** One local INI creation/edit request; editor children outlive the agent. */ ConfigEditor,
 };
 /** A bounded IPC message. */
 struct WorkerMessage {

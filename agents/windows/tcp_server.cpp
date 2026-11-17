@@ -10,6 +10,7 @@
 #include "auth.h"
 #include "frame.h"
 #include "file_logger.h"
+#include "config_editor.h"
 #include "json_protocol.h"
 #include "operation_worker.h"
 #include "operation_limits.h"
@@ -77,6 +78,7 @@ struct ServerState {
   SocketConnection listener;
   AgentGuiHandle gui;
   FileLoggerHandle logger;
+  ConfigEditorHandle config_editor;
   std::string listen_status = "Starting...", log_status;
   cardio::cancellation_source stop;
   std::list<std::shared_ptr<ClientSession>> sessions;
@@ -559,6 +561,7 @@ static cardio::promise<void> Serve(std::shared_ptr<ServerState> server, int* res
   server->recovery_ready.Notify();
   co_await server->recovery;
   PrintAgentLogEvent("phase=shutdown connections drained");
+  co_await StopConfigEditor(server->config_editor);
   co_await StopFileLogger(server->logger);
 }
 
@@ -582,6 +585,10 @@ int RunTcpServer(const ServerOptions& options, std::string* error) {
       }
     });
     SetAgentGuiOpenLogs(server->gui, [weak] { if (auto state = weak.lock()) OpenFileLogFolder(state->logger); });
+    server->config_editor = CreateConfigEditor(options.config_path, [weak](const std::wstring& error) {
+      if (auto state = weak.lock()) ShowAgentGuiError(state->gui, error);
+    });
+    SetAgentGuiOpenConfig(server->gui, [weak] { if (auto state = weak.lock()) RequestConfigEditor(state->config_editor); });
     SetAgentLogSink([weak](const AgentLogRecord& record) {
       if (auto state = weak.lock()) { NotifyAgentGuiLog(state->gui); EnqueueFileLog(state->logger, record); }
     });

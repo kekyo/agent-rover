@@ -6,6 +6,16 @@ SOURCES := loader.cpp ../../windows/agent_configuration.cpp ../../windows/comman
 .PHONY: all
 all: $(OUTPUT)/loader-amd64.exe $(OUTPUT)/loader-i686.exe
 
+EDITOR_SOURCES := editor.cpp ../../windows/config_file.cpp ../../windows/command_line.cpp ../../windows/win32_files.cpp ../../windows/win32_util.cpp ../../windows/operation_error.cpp ../../windows/binary_codec.cpp
+
+$(OUTPUT)/editor-amd64.exe: $(EDITOR_SOURCES) $(TOOLCHAIN_DEPENDENCIES)
+	@mkdir -p $(@D)
+	$(AMD64_CXX) $(CXXFLAGS) -D_WIN32_WINNT=0x0502 -DWINVER=0x0502 $(EDITOR_SOURCES) -ladvapi32 -luser32 -lshell32 -lole32 -o $@
+
+$(OUTPUT)/editor-i686.exe: $(EDITOR_SOURCES) $(TOOLCHAIN_DEPENDENCIES)
+	@mkdir -p $(@D)
+	$(I686_CXX) $(CXXFLAGS) -D_WIN32_WINNT=0x0501 -DWINVER=0x0501 $(EDITOR_SOURCES) -ladvapi32 -luser32 -lshell32 -lole32 -o $@
+
 $(OUTPUT)/loader-amd64.exe: $(SOURCES) $(TOOLCHAIN_DEPENDENCIES)
 	@mkdir -p $(@D)
 	$(AMD64_CXX) $(CXXFLAGS) -D_WIN32_WINNT=0x0502 -DWINVER=0x0502 $(SOURCES) -luserenv -ladvapi32 -luser32 -o $@

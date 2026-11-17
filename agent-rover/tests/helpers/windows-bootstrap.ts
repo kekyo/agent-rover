@@ -102,6 +102,7 @@ const connectWindowsBootstrapOnce = async (
           typeof message.data === 'object' &&
           message.data !== null &&
           !Array.isArray(message.data) &&
+          'code' in message.data &&
           message.data.code === 'AGENT_BUSY'
         )
           readyReject(
@@ -145,6 +146,7 @@ const connectWindowsBootstrapOnce = async (
         metadata === null ||
         typeof metadata !== 'object' ||
         Array.isArray(metadata) ||
+        !('transferId' in metadata) ||
         typeof metadata.transferId !== 'string'
       )
         throw new Error('Invalid deployment download metadata.');

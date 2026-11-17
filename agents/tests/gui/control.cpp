@@ -265,6 +265,11 @@ int wmain(int argc, wchar_t** argv) {
     CloseHandle(process);
     return result == WAIT_OBJECT_0 && queried && code == 0 ? 0 : 8;
   }
+  if (mode == L"open-config") {
+    DWORD_PTR ignored = 0;
+    return SendMessageTimeoutW(window, WM_COMMAND, 4, 0,
+        SMTO_ABORTIFHUNG, 5000, &ignored) ? 0 : 65;
+  }
   if (mode == L"inspect") {
     DWORD_PTR ignored = 0;
     if (!SendMessageTimeoutW(window, WM_COMMAND, 1, 0, SMTO_ABORTIFHUNG, 5000, &ignored)) return 9;

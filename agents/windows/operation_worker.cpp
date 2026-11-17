@@ -83,8 +83,9 @@ Worker StartOperationWorker(HelperRole role, uint64_t max_transfer_bytes) {
     if (role != HelperRole::PersistentLaunch)
       limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     if (role == HelperRole::Operations || role == HelperRole::Server) limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_BREAKAWAY_OK;
-    // Opening the log folder must not tie a new Explorer process to the logger.
-    if (role == HelperRole::FileLogger) limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+    // Shell-opened Explorer and editors must outlive their isolated helpers.
+    if (role == HelperRole::FileLogger || role == HelperRole::ConfigEditor)
+      limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
     if (!SetInformationJobObject(worker->job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)))
       throw NativeFailure("SetInformationJobObject(worker)");
     worker->input = CreateWorkerPipe(&input, false);
@@ -94,6 +95,7 @@ Worker StartOperationWorker(HelperRole role, uint64_t max_transfer_bytes) {
     const auto mode = role == HelperRole::Probe ? L"--agent-probe" :
         role == HelperRole::Server ? L"--agent-server" :
         role == HelperRole::FileLogger ? L"--agent-log-worker" :
+        role == HelperRole::ConfigEditor ? L"--agent-config-editor" :
         (role == HelperRole::Launch || role == HelperRole::PersistentLaunch) ? L"--agent-launch-worker" :
         role == HelperRole::Cleanup ? L"--agent-cleanup-worker" : L"--agent-worker";
     std::vector<std::wstring> arguments = {mode};
