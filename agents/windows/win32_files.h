@@ -9,6 +9,7 @@
 #include "operation_error.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -188,15 +189,17 @@ bool RenamePath(
     const std::string& to,
     OperationError* error);
 /**
- * Creates a temporary directory from a prefix.
+ * Exclusively creates a caller-owned temporary directory without creating parents.
  *
- * @param prefix UTF-8 path prefix used to create a unique directory.
+ * @param safe_base_dir Startup-selected absolute Windows directory.
+ * @param prefix Optional UTF-8 name or absolute path prefix. Missing uses agent-rover-.
  * @param path Receives the created directory path.
  * @param error Receives a structured diagnostic on failure.
  * @return true on success.
  */
 bool MakeTempDirectory(
-    const std::string& prefix,
+    const std::string& safe_base_dir,
+    const std::optional<std::string>& prefix,
     std::string* path,
     OperationError* error);
 

@@ -30,6 +30,7 @@ enum class WorkerMessageKind : uint32_t {
   /** Private server options, token and explicitly duplicated handles. */ HostConfiguration = 113,
   /** Reserves recovery capacity before creating a capture directory. */ ReserveCapture = 114,
   /** Opens the startup-selected INI through the local shell. */ ConfigOpen = 115,
+  /** Startup-selected public workspace path, without capture ownership. */ WorkspaceConfiguration = 116,
 };
 /** Private process roles for this executable. */
 enum class HelperRole {
@@ -78,8 +79,9 @@ cardio::promise<void> WriteWorker(Worker worker, WorkerMessage message, cardio::
 cardio::promise<WorkerMessage> ReadWorker(Worker worker, cardio::cancellation cancellation);
 /** Confirms worker initialization before waiting for desktop access.
  * Startup has its own deadline so client cancellation cannot discard the worker.
- * @param worker Newly started operation helper. @return Completion promise. */
-cardio::promise<void> InitializeOperationWorker(Worker worker);
+ * @param worker Newly started operation helper.
+ * @param safe_base_dir Startup-selected UTF-8 workspace directory. @return Completion promise. */
+cardio::promise<void> InitializeOperationWorker(Worker worker, std::string safe_base_dir);
 /** Handles private launch/release messages while retaining parent ownership.
  * @param worker Operation helper. @param message Private reply.
  * @param cancellation Operation deadline. @return Whether the message was handled. */

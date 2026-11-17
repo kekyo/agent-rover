@@ -34,6 +34,10 @@ uint32_t ReadAgentVideoDuration(const std::string& payload);
 /** Builds a capability response using cached data only.
  * @param id Request identifier. @return JSON response. */
 std::string CreateCapabilitiesResponse(const std::string& id);
+/** Returns the cached workspace path without accessing configuration or storage.
+ * @param id Request identifier. @param path Startup-selected UTF-8 directory.
+ * @return JSON response. */
+std::string CreateSafeBaseDirResponse(const std::string& id, const std::string& path);
 /** Builds an operation failure response without exposing request contents.
  * @param id Request identifier. @param code Stable failure code.
  * @param message Diagnostic description. @return JSON response. */
@@ -46,6 +50,7 @@ std::string CreateAgentResultLog(const std::string& payload);
  * Handles one JSON request payload.
  *
  * @param payload UTF-8 JSON request payload.
+ * @param safe_base_dir Startup-selected absolute Windows workspace directory.
  * @param transfers Incoming transfer store and configured file transfer limit.
  * @param recordings Connection-owned asynchronous video recording state.
  * @param outbound_chunks Receives binary chunks to send before the JSON response.
@@ -54,6 +59,7 @@ std::string CreateAgentResultLog(const std::string& payload);
  */
 std::string HandleJsonRequest(
     const std::string& payload,
+    const std::string& safe_base_dir,
     BinaryTransferStore* transfers,
     VideoRecordingStore* recordings,
     std::vector<BinaryTransferChunk>* outbound_chunks,

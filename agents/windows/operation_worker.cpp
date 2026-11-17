@@ -174,8 +174,10 @@ cardio::promise<WorkerMessage> ReadWorker(Worker worker, cardio::cancellation ca
   co_return message;
 }
 
-cardio::promise<void> InitializeOperationWorker(Worker worker) {
+cardio::promise<void> InitializeOperationWorker(Worker worker, std::string safe_base_dir) {
   auto deadline = cardio::cancellations::timeout(3000);
+  WorkerMessage configuration = {WorkerMessageKind::WorkspaceConfiguration, {safe_base_dir.begin(), safe_base_dir.end()}};
+  co_await WriteWorker(worker, std::move(configuration), deadline.get_cancellation());
   const auto ready = co_await ReadWorker(worker, deadline.get_cancellation());
   if (ready.kind != WorkerMessageKind::Complete) throw std::runtime_error("Missing worker readiness message.");
 }
@@ -492,6 +494,11 @@ int RunOperationWorker(bool probe, uint64_t max_transfer_bytes) {
       WSACleanup();
       return 0;
     }
+    WorkerMessage configuration;
+    if (!ReadWorkerCommand(&configuration) || configuration.kind != WorkerMessageKind::WorkspaceConfiguration ||
+        configuration.payload.empty() || configuration.payload.size() > 131072) return 1;
+    const std::string safe_base_dir(configuration.payload.begin(), configuration.payload.end());
+    if (safe_base_dir.find('\0') != std::string::npos || !IsAbsoluteWindowsPath(Utf8ToWide(safe_base_dir))) return 1;
     bool owns_capture = false;
     InstallManagedLaunchBroker();
     SendWorkerReply(WorkerMessageKind::Complete, {});
@@ -533,7 +540,7 @@ int RunOperationWorker(bool probe, uint64_t max_transfer_bytes) {
         }
         std::vector<BinaryTransferChunk> chunks;
         OutboundFileTransfer file = {};
-        const auto response = HandleJsonRequest(request, &transfers, &recordings, &chunks, &file);
+        const auto response = HandleJsonRequest(request, safe_base_dir, &transfers, &recordings, &chunks, &file);
         PrintAgentLogEvent(CreateAgentResultLog(response));
         try {
           for (const auto& chunk : chunks) SendWorkerChunk(chunk);

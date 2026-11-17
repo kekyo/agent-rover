@@ -5,6 +5,7 @@
 #include "config_file.h"
 #include "operation_worker.h"
 #include "win32_util.h"
+#include <optional>
 #include <stdexcept>
 
 namespace agent_rover {
@@ -13,8 +14,10 @@ struct ConfigEditor {
   std::function<void(const std::wstring&)> failed;
   Worker worker;
   cardio::cancellation_source stop;
-  cardio::promise<void> task;
-  bool started = false, busy = false, stopping = false;
+  // A default cardio promise is pending and keeps the dispatcher alive.
+  // No task exists until the user requests editing.
+  std::optional<cardio::promise<void>> task;
+  bool busy = false, stopping = false;
 };
 
 static cardio::promise<void> EditConfiguration(ConfigEditor* editor) {
@@ -50,15 +53,14 @@ ConfigEditorHandle CreateConfigEditor(std::string path, std::function<void(const
 void RequestConfigEditor(const ConfigEditorHandle& editor) {
   if (!editor || editor->busy || editor->stopping) return;
   editor->busy = true;
-  editor->started = true;
-  editor->task = EditConfiguration(editor.get());
+  editor->task.emplace(EditConfiguration(editor.get()));
 }
 
 cardio::promise<void> StopConfigEditor(ConfigEditorHandle editor) {
   if (!editor) co_return;
   editor->stopping = true;
   editor->stop.cancel();
-  if (editor->started) co_await editor->task;
+  if (editor->task) co_await *editor->task;
 }
 
 int RunConfigEditorWorker() {

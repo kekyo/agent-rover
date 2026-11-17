@@ -1074,6 +1074,7 @@ await agent.clipboard.clear();
 
 | API | Description |
 | :-- | :-- |
+| `RemoteAgent.files.safeBaseDir()` | Gets the suggested workspace directory on the connected machine. |
 | `RemoteAgent.files.writeFile(path, data)` | Writes a file to the connected machine. |
 | `RemoteAgent.files.readFile(path)` | Reads a file from the connected machine. |
 | `RemoteAgent.files.exists(path)` / `RemoteAgent.files.stat(path)` | Checks whether a path exists, or gets its metadata. |
@@ -1081,7 +1082,7 @@ await agent.clipboard.clear();
 | `RemoteAgent.files.readdir(path)` | Gets the list of directory entries. |
 | `RemoteAgent.files.remove(path, options?)` | Removes a file or directory. |
 | `RemoteAgent.files.rename(from, to)` | Renames or moves a file or directory. |
-| `RemoteAgent.files.mkdtemp(prefix)` | Creates a temporary directory. |
+| `RemoteAgent.files.mkdtemp(prefix?)` | Creates a new caller-owned temporary directory. |
 | `RemoteAgent.files.syncDirectory(options)` | Synchronizes a local directory to the connected machine with checksum-based diffing. |
 | `RemoteAgent.files.downloadDirectory(options)` | Downloads a remote directory to a local directory. |
 | `RemoteAgent.eventLogs.read(query?)` | Gets event logs from the connected machine. |
@@ -1089,22 +1090,48 @@ await agent.clipboard.clear();
 | `saveDiagnostics(directory, options)` | Saves diagnostics to a local directory. |
 | `withDiagnostics(agent, directory, operation, options?)` | Saves diagnostics when `operation` fails, then rethrows the original error. |
 
+The suggested workspace directory is a location for test files on the connected
+Windows machine. `await agent.files.safeBaseDir()` returns the absolute path
+selected when the agent starts. Settings take precedence in this order:
+`--safe-base-dir <path>`, `safe-base-dir` in the agent INI, then the remote OS
+temporary directory. An explicit path must be an existing absolute Windows drive
+or UNC directory. The driver's temporary directory is not used.
+
+For ordinary tests, use `mkdtemp('case-')` to create a workspace under that base.
+A prefix is the beginning of the generated directory name; it can also be an
+absolute path.
+
+| Call | Destination |
+| :-- | :-- |
+| `agent.files.mkdtemp()` | A name starting with `agent-rover-` directly under the suggested base |
+| `agent.files.mkdtemp('case-')` | A name starting with `case-` directly under the suggested base |
+| ``agent.files.mkdtemp(String.raw`D:\OtherWork\case-`)`` | A name starting with `case-` directly under `D:\OtherWork` |
+
+Each name receives a unique suffix. Concurrent calls never return an existing
+directory. Create the parent directory first. Empty strings, `.`, `..`, relative
+paths containing separators, and drive-relative paths such as `C:case-` are invalid
+arguments. A creation failure, including insufficient write permission, returns an
+error without switching to another location.
+
+The caller manages the created directory and removes only that directory after
+the test. Disconnecting or stopping the agent does not delete it. Other absolute
+paths remain available. Reporting or configuring the suggested base does not add
+Microsoft Defender exclusions or guarantee that files will avoid quarantine.
+After editing the INI, choose `Exit` from the tray and restart the agent to apply
+the change.
+
 Code example:
 
 ```typescript
 import { saveDiagnostics, withDiagnostics } from 'agent-rover';
 
-// Prepare a temporary directory and file paths on the remote side.
-const remoteDirectory = await agent.files.mkdtemp(
-  String.raw`C:\agent-rover\case-`
-);
+// Check the remote suggested base and create a test directory beneath it.
+const suggestedDirectory = await agent.files.safeBaseDir();
+const remoteDirectory = await agent.files.mkdtemp('case-');
 const remoteFilePath = `${remoteDirectory}\\input.txt`;
 const movedFilePath = `${remoteDirectory}\\moved.txt`;
 
 // Write a file, then check its existence and metadata.
-await agent.files.mkdir(remoteDirectory, {
-  recursive: true,
-});
 await agent.files.writeFile(remoteFilePath, Buffer.from('hello'));
 expect(await agent.files.exists(remoteFilePath)).toBe(true);
 

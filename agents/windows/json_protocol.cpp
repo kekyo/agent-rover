@@ -530,6 +530,7 @@ static std::string CapabilitiesJson() {
       "\"file.remove\","
       "\"file.rename\","
       "\"file.mkdtemp\","
+      "\"file.safeBaseDir\","
       "\"process.createCaptureDirectory\","
       "\"process.kill\","
       "\"process.killManaged\","
@@ -1127,6 +1128,10 @@ std::string CreateCapabilitiesResponse(const std::string& id) {
   return SuccessResponseJson(id, CapabilitiesJson());
 }
 
+std::string CreateSafeBaseDirResponse(const std::string& id, const std::string& path) {
+  return SuccessResponseJson(id, "{\"path\":\"" + JsonEscape(path) + "\"}");
+}
+
 std::string CreateAgentFailure(const std::string& id, const std::string& code, const std::string& message) {
   return "{\"id\":\"" + JsonEscape(id) + "\",\"kind\":\"response\",\"ok\":false,\"error\":{\"code\":\"" +
       JsonEscape(code) + "\",\"message\":\"" + JsonEscape(message) + "\"}}";
@@ -1148,6 +1153,7 @@ std::string CreateAgentResultLog(const std::string& payload) {
 
 std::string HandleJsonRequest(
     const std::string& payload,
+    const std::string& safe_base_dir,
     BinaryTransferStore* transfers,
     VideoRecordingStore* recordings,
     std::vector<BinaryTransferChunk>* outbound_chunks,
@@ -1717,13 +1723,20 @@ std::string HandleJsonRequest(
     return SuccessResponseJson(id, "null");
   }
   if (method == "file.mkdtemp" || method == "process.createCaptureDirectory") {
-    std::string prefix;
-    if (method == "file.mkdtemp" && !FindJsonStringField(payload, "prefix", &prefix)) {
-      return FailureResponseJson(id, "file.mkdtemp requires prefix.");
+    std::optional<std::string> prefix;
+    if (method == "file.mkdtemp") {
+      std::string params;
+      if (FindJsonObjectField(payload, "params", &params) && params.find("\"prefix\"") != std::string::npos) {
+        std::string value;
+        if (!FindJsonStringField(params, "prefix", &value))
+          return CreateAgentFailure(id, "INVALID_ARGUMENT", "file.mkdtemp prefix must be a string when supplied.");
+        prefix = std::move(value);
+      }
     }
     std::string path;
     OperationError error;
-    if (!(method == "process.createCaptureDirectory" ? CreateCaptureDirectory(&path, &error) : MakeTempDirectory(prefix, &path, &error))) {
+    if (!(method == "process.createCaptureDirectory" ? CreateCaptureDirectory(&path, &error) : MakeTempDirectory(safe_base_dir, prefix, &path, &error))) {
+      if (error.reason == "invalidArgument") return CreateAgentFailure(id, "INVALID_ARGUMENT", error.message);
       return OperationFailureJson(id, method, error);
     }
     std::string output = "{\"path\":";

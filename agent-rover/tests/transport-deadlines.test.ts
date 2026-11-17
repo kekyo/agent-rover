@@ -86,6 +86,31 @@ it('ends a send whose native write callback never completes', async () => {
   expect(socket.destroyed).toBe(true);
 }, 3000);
 
+it('sends concurrent writes without listener warnings and rejects all on close', async () => {
+  const connection = transport();
+  ready();
+  const warning = vi.spyOn(process, 'emitWarning');
+  const sends = Array.from({ length: 20 }, (_, index) =>
+    connection.send({
+      id: String(index),
+      kind: 'request',
+      method: 'file.mkdtemp',
+      params: { prefix: 'case-' },
+    })
+  );
+  const results = Promise.allSettled(sends);
+  try {
+    expect(warning).not.toHaveBeenCalled();
+  } finally {
+    socket.destroy();
+    warning.mockRestore();
+  }
+  expect((await results).every((result) => result.status === 'rejected')).toBe(
+    true
+  );
+  expect(vi.getTimerCount()).toBe(0);
+}, 3000);
+
 it('finishes close when a peer never finishes its half of the connection', async () => {
   const connection = transport();
   ready();

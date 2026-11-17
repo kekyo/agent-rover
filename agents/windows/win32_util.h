@@ -10,6 +10,11 @@
 
 namespace agent_rover {
 
+/** Tests whether a path has an absolute Windows drive or UNC root.
+ * @param path UTF-16 path, including optional extended-length prefix.
+ * @return Whether the path is independent of the current drive/directory. */
+bool IsAbsoluteWindowsPath(const std::wstring& path);
+
 /**
  * Converts a UTF-16 Windows string to UTF-8.
  *

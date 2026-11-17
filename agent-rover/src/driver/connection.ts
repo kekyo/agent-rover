@@ -1120,6 +1120,16 @@ const parseTempDirectory = (value: JsonValue | undefined): string => {
   return readString(value, 'path');
 };
 
+const parseSafeBaseDirectory = (value: JsonValue | undefined): string => {
+  if (!isRecord(value) || typeof value.path !== 'string' || !value.path) {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'file.safeBaseDir result must include a nonempty path.'
+    );
+  }
+  return value.path;
+};
+
 const parseApplicationProcess = (
   value: JsonValue | undefined
 ): RemoteApplicationProcess => {
@@ -3126,11 +3136,11 @@ const connectRemoteAgentOnce = async (
       throw new Error(`Process is still running: ${String(processId)}.`);
     }, options);
 
-  const makeRemoteTempDirectory = async (prefix: string): Promise<string> =>
+  const makeRemoteTempDirectory = async (
+    prefix: string | undefined
+  ): Promise<string> =>
     parseTempDirectory(
-      await requestJson('file.mkdtemp', {
-        prefix,
-      })
+      await requestJson('file.mkdtemp', prefix === undefined ? {} : { prefix })
     );
 
   const readRemoteFile = async (path: string): Promise<Buffer> =>
@@ -4353,6 +4363,10 @@ const connectRemoteAgentOnce = async (
     findWindows: async (query): Promise<readonly AppWindow[]> =>
       await findWindowsByQuery(query),
     files: {
+      safeBaseDir: async (): Promise<string> =>
+        parseSafeBaseDirectory(
+          await requestJson('file.safeBaseDir', undefined)
+        ),
       downloadDirectory: async (
         options
       ): Promise<RemoteDirectoryDownloadResult> =>

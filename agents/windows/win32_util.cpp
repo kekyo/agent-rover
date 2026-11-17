@@ -9,6 +9,19 @@
 
 namespace agent_rover {
 
+bool IsAbsoluteWindowsPath(const std::wstring& path) {
+  const auto separator = [](wchar_t ch) { return ch == L'\\' || ch == L'/'; };
+  auto value = path;
+  if (value.rfind(L"\\\\?\\UNC\\", 0) == 0) value = L"\\\\" + value.substr(8);
+  else if (value.rfind(L"\\\\?\\", 0) == 0) value = value.substr(4);
+  if (value.size() >= 3 && ((value[0] >= L'A' && value[0] <= L'Z') ||
+      (value[0] >= L'a' && value[0] <= L'z')) && value[1] == L':' && separator(value[2])) return true;
+  if (value.size() < 5 || !separator(value[0]) || !separator(value[1]) ||
+      value[2] == L'.' || value[2] == L'?' || separator(value[2])) return false;
+  const auto share = value.find_first_of(L"\\/", 2);
+  return share != std::wstring::npos && share + 1 < value.size() && !separator(value[share + 1]);
+}
+
 std::string WideToUtf8(const std::wstring& value) {
   if (value.empty()) {
     return std::string();

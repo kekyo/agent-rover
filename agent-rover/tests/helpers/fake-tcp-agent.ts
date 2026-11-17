@@ -49,6 +49,10 @@ import {
 } from '../../src/driver/tcp-frame';
 
 export interface FakeTcpAgentOptions {
+  /** Absolute workspace path reported by the agent. */
+  readonly safeBaseDir?: string;
+  /** Explicit response for malformed workspace response tests. */
+  readonly safeBaseDirResult?: JsonValue;
   /** Complete the operation, then close the socket instead of acknowledging it. */
   readonly disconnectAfterRequest?: readonly string[];
   /** Close after flushing the successful response. */
@@ -131,6 +135,7 @@ export const defaultFakeCapabilities: RemoteAgentCapabilities = {
     'file.exists',
     'file.mkdir',
     'file.mkdtemp',
+    'file.safeBaseDir',
     'process.createCaptureDirectory',
     'file.manifest',
     'file.read',
@@ -513,6 +518,10 @@ export const startFakeTcpAgent = async (
     directories.add(normalized);
   };
 
+  const safeBaseDir = options.safeBaseDir ?? 'C:/Windows/Temp';
+  ensureDirectory(safeBaseDir);
+  let nextTempDirectory = 0;
+
   const fileStatJson = (path: string): JsonValue | undefined => {
     const normalized = normalizePath(path);
     const file = files.get(normalized);
@@ -676,6 +685,14 @@ export const startFakeTcpAgent = async (
       switch (method) {
         case 'agent.capabilities':
           sendSuccess(id, toJson(capabilities));
+          return;
+        case 'file.safeBaseDir':
+          sendSuccess(
+            id,
+            options.safeBaseDirResult === undefined
+              ? { path: safeBaseDir }
+              : options.safeBaseDirResult
+          );
           return;
         case 'clipboard.readText':
           sendSuccess(id, {
@@ -1374,21 +1391,58 @@ export const startFakeTcpAgent = async (
           sendSuccess(id, null);
           return;
         }
-        case 'process.createCaptureDirectory':
-        case 'file.mkdtemp': {
-          const prefix =
-            method === 'process.createCaptureDirectory'
-              ? 'C:/agent-rover-managed-process-'
-              : recordParams.prefix;
-          if (typeof prefix !== 'string') {
-            sendFailure(id, 'file.mkdtemp requires prefix.');
-            return;
-          }
-          const path = `${prefix}fake`;
+        case 'process.createCaptureDirectory': {
+          const path = 'C:/agent-rover-managed-process-fake';
           ensureDirectory(path);
           sendSuccess(id, {
             path,
           });
+          return;
+        }
+        case 'file.mkdtemp': {
+          const prefix =
+            recordParams.prefix === undefined
+              ? 'agent-rover-'
+              : recordParams.prefix;
+          const absolute =
+            typeof prefix === 'string' &&
+            /^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+)/u.test(prefix);
+          if (
+            typeof prefix !== 'string' ||
+            !prefix ||
+            prefix.includes('\0') ||
+            (!absolute &&
+              (prefix === '.' || prefix === '..' || /[\\/:]/u.test(prefix)))
+          ) {
+            sendTcpProtocolMessage(socket, {
+              id,
+              kind: 'response',
+              ok: false,
+              error: {
+                code: 'INVALID_ARGUMENT',
+                message: 'Invalid temporary directory prefix.',
+              },
+            });
+            return;
+          }
+          const resolved = absolute
+            ? prefix
+            : `${safeBaseDir.replace(/[\\/]$/u, '')}\\${prefix}`;
+          const path = `${resolved}fake${String(++nextTempDirectory)}`;
+          if (!directories.has(parentPath(path))) {
+            sendTcpProtocolMessage(socket, {
+              id,
+              kind: 'response',
+              ok: false,
+              error: {
+                code: 'OPERATION_FAILED',
+                message: 'The parent directory does not exist.',
+              },
+            });
+            return;
+          }
+          directories.add(normalizePath(path));
+          sendSuccess(id, { path });
           return;
         }
         case 'file.remove': {

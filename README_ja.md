@@ -1002,6 +1002,7 @@ await agent.clipboard.clear();
 
 | API | 内容 |
 | :-- | :-- |
+| `RemoteAgent.files.safeBaseDir()` | 接続先の推奨作業ディレクトリを取得します。 |
 | `RemoteAgent.files.writeFile(path, data)` | 接続先マシンへファイルを書き込みます。 |
 | `RemoteAgent.files.readFile(path)` | 接続先マシンからファイルを読み込みます。 |
 | `RemoteAgent.files.exists(path)` / `RemoteAgent.files.stat(path)` | パスの存在確認、またはメタデータ取得を行います。 |
@@ -1009,7 +1010,7 @@ await agent.clipboard.clear();
 | `RemoteAgent.files.readdir(path)` | ディレクトリエントリ一覧を取得します。 |
 | `RemoteAgent.files.remove(path, options?)` | ファイル、またはディレクトリを削除します。 |
 | `RemoteAgent.files.rename(from, to)` | ファイル、またはディレクトリをリネーム・移動します。 |
-| `RemoteAgent.files.mkdtemp(prefix)` | 一時ディレクトリを作成します。 |
+| `RemoteAgent.files.mkdtemp(prefix?)` | 利用者が管理する一時ディレクトリを新規作成します。 |
 | `RemoteAgent.files.syncDirectory(options)` | ローカルディレクトリをチェックサム差分で接続先マシンへ同期します。 |
 | `RemoteAgent.files.downloadDirectory(options)` | 接続先マシンのディレクトリをローカルディレクトリへ一括取得します。 |
 | `RemoteAgent.eventLogs.read(query?)` | 接続先マシンのイベントログを取得します。 |
@@ -1017,22 +1018,43 @@ await agent.clipboard.clear();
 | `saveDiagnostics(directory, options)` | 診断情報をローカルディレクトリに保存します。 |
 | `withDiagnostics(agent, directory, operation, options?)` | `operation`が失敗した場合に診断情報を保存し、元のエラーを再送出します。 |
 
+推奨作業ディレクトリは接続先のWindowsでテスト用ファイルを置く場所です。
+`await agent.files.safeBaseDir()`で、エージェントが起動時に選んだ絶対パスを取得できます。
+設定は`--safe-base-dir <path>`、エージェント用INIの`safe-base-dir`、接続先OSの標準一時ディレクトリの順で決まります。
+指定する場合は、存在するWindowsのドライブ付き絶対パスまたはUNCパスを使ってください。
+ドライバー側の一時ディレクトリは使いません。
+
+通常のテストでは`mkdtemp('case-')`で推奨先の配下に作業場所を作ります。
+prefixは生成するディレクトリ名の先頭部分です。絶対パスで渡すこともできます。
+
+| 呼び出し | 作成先 |
+| :-- | :-- |
+| `agent.files.mkdtemp()` | 推奨先の直下に`agent-rover-`で始まる名前 |
+| `agent.files.mkdtemp('case-')` | 推奨先の直下に`case-`で始まる名前 |
+| ``agent.files.mkdtemp(String.raw`D:\OtherWork\case-`)`` | `D:\OtherWork`の直下に`case-`で始まる名前 |
+
+名前には一意な文字列が付き、並行して呼び出しても既存のディレクトリを返しません。
+親ディレクトリはあらかじめ作成してください。
+空文字列、`.`、`..`、区切り文字を含む相対パス、`C:case-`のようなドライブ相対パスは引数エラーになります。
+書込み権限不足などで作成に失敗した場合は、別の場所へ切り替えずエラーを返します。
+
+作成したディレクトリは呼び出し側で管理し、テスト終了時にそのディレクトリだけを削除してください。
+接続の切断やエージェントの終了では自動削除しません。
+推奨先以外の絶対パスも選べます。また、推奨先の通知や設定はMicrosoft Defenderの除外登録を行わず、ファイルが隔離されないことも保証しません。
+INIを編集した場合は、トレイの`Exit`でエージェントを終了して起動し直すと反映されます。
+
 コード例:
 
 ```typescript
 import { saveDiagnostics, withDiagnostics } from 'agent-rover';
 
-// リモート側にテスト用の一時ディレクトリとファイルパスを用意
-const remoteDirectory = await agent.files.mkdtemp(
-  String.raw`C:\agent-rover\case-`
-);
+// 接続先の推奨先を確認し、その配下にテスト用のディレクトリを作成
+const suggestedDirectory = await agent.files.safeBaseDir();
+const remoteDirectory = await agent.files.mkdtemp('case-');
 const remoteFilePath = `${remoteDirectory}\\input.txt`;
 const movedFilePath = `${remoteDirectory}\\moved.txt`;
 
 // ファイルを書き込み、存在とメタデータを確認
-await agent.files.mkdir(remoteDirectory, {
-  recursive: true,
-});
 await agent.files.writeFile(remoteFilePath, Buffer.from('hello'));
 expect(await agent.files.exists(remoteFilePath)).toBe(true);
 

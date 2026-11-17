@@ -13,21 +13,9 @@ namespace agent_rover {
 
 static bool Separator(wchar_t ch) { return ch == L'\\' || ch == L'/'; }
 
-static bool AbsolutePath(const std::wstring& path) {
-  auto value = path;
-  if (value.rfind(L"\\\\?\\UNC\\", 0) == 0) value = L"\\\\" + value.substr(8);
-  else if (value.rfind(L"\\\\?\\", 0) == 0) value = value.substr(4);
-  if (value.size() >= 3 && ((value[0] >= L'A' && value[0] <= L'Z') ||
-      (value[0] >= L'a' && value[0] <= L'z')) && value[1] == L':' && Separator(value[2])) return true;
-  if (value.size() < 5 || !Separator(value[0]) || !Separator(value[1]) ||
-      value[2] == L'.' || value[2] == L'?' || Separator(value[2])) return false;
-  const auto share = value.find_first_of(L"\\/", 2);
-  return share != std::wstring::npos && share + 1 < value.size() && !Separator(value[share + 1]);
-}
-
 static bool DirectoryPath(const std::wstring& value, const std::wstring& source,
     std::wstring* result, std::wstring* error) {
-  if (!AbsolutePath(value)) {
+  if (!IsAbsoluteWindowsPath(value)) {
     *error = source + L": Expected an absolute Windows drive or UNC directory.";
     return false;
   }
@@ -38,8 +26,16 @@ static bool DirectoryPath(const std::wstring& value, const std::wstring& source,
     return false;
   }
   result->assign(buffer.data(), length);
-  const auto attributes = GetFileAttributesW(result->c_str());
-  if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+  // GetFileAttributesW rejects UNC share roots. Query an existing directory
+  // handle instead, without creating the path or requesting write access.
+  const auto handle = CreateFileW(result->c_str(), FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+      FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+  BY_HANDLE_FILE_INFORMATION information = {};
+  const bool directory = handle != INVALID_HANDLE_VALUE && GetFileInformationByHandle(handle, &information) &&
+      (information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+  if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+  if (!directory) {
     *error = source + L": Expected an existing directory: " + *result + L".";
     return false;
   }

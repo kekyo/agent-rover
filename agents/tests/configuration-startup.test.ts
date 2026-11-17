@@ -85,7 +85,7 @@ it.each(["amd64", "i686"])(
     try {
       await writeFile(
         join(directory, ".agent-rover-agent.ini"),
-        `[agent]\nhost=127.0.0.1\nport=${port}\nunsafe-token=${token}\nconnection-mode=multiple\nmax-transfer-size=1\n`,
+        `[agent]\nhost=127.0.0.1\nport=${port}\nunsafe-token=${token}\nconnection-mode=multiple\nmax-transfer-size=1\nsafe-base-dir=${home}\n`,
       );
       await writeFile(
         join(directory, "oversized.bin"),
@@ -123,6 +123,7 @@ it.each(["amd64", "i686"])(
         return client;
       };
       const first = await connect();
+      expect(await first.files.safeBaseDir()).toBe(home);
       const second = await connect();
       expect(typeof (await second.clipboard.readText())).toBe("string");
       await expect(
@@ -144,6 +145,7 @@ it.each(["amd64", "i686"])(
       )![1];
       await run("kill-server", String(port));
       const recovered = await connect();
+      expect(await recovered.files.safeBaseDir()).toBe(home);
       expect(
         (await run("metrics", String(port))).stdout.match(/pid=(\d+)/u)![1],
       ).not.toBe(before);
@@ -153,6 +155,10 @@ it.each(["amd64", "i686"])(
         recovered.files.readFile(`${home}\\oversized.bin`),
       ).rejects.toMatchObject({ code: "OPERATION_FAILED" });
       await run("private-token", String(port));
+      // An unused config editor must not keep the dispatcher alive at Exit.
+      await run("exit", String(port));
+      await run("wait-exit", supervisor!);
+      supervisor = undefined;
     } finally {
       for (const client of clients) client.release();
       try {

@@ -868,6 +868,12 @@ export interface ImageComparisonResult {
 
 /** Remote file transfer API. */
 export interface RemoteFileSystem {
+  /**
+   * Returns the suggested absolute workspace directory on the agent machine.
+   * @returns The startup-selected path, defaulting to the agent OS temporary directory.
+   * @remarks Does not create a directory or configure Microsoft Defender exclusions.
+   */
+  readonly safeBaseDir: () => Promise<string>;
   /** Writes a complete file to the agent machine. */
   readonly writeFile: (path: string, data: Buffer) => Promise<void>;
   /** Reads a complete file from the agent machine. */
@@ -887,8 +893,15 @@ export interface RemoteFileSystem {
   ) => Promise<void>;
   /** Renames or moves a file or directory. */
   readonly rename: (from: string, to: string) => Promise<void>;
-  /** Creates a temporary directory from a prefix and returns its path. */
-  readonly mkdtemp: (prefix: string) => Promise<string>;
+  /**
+   * Exclusively creates a caller-owned temporary directory.
+   * @param prefix Name prefix under safeBaseDir(), or an absolute Windows path prefix.
+   * Omit to use agent-rover- under safeBaseDir(). The parent must already exist.
+   * @returns The absolute path of the newly created directory.
+   * @remarks Empty, relative path and drive-relative prefixes are rejected.
+   * The caller removes the returned directory; disconnecting does not remove it.
+   */
+  readonly mkdtemp: (prefix?: string) => Promise<string>;
   /** Synchronizes a local directory to the agent machine. */
   readonly syncDirectory: (
     options: RemoteDirectorySyncOptions

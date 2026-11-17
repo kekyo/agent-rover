@@ -310,7 +310,7 @@ static cardio::promise<void> ExecuteRequests(std::shared_ptr<ClientSession> sess
           if (session->server->workers >= kMaxWorkers) throw std::runtime_error("Operation worker limit reached.");
           session->worker = StartOperationWorker(HelperRole::Operations, session->server->options.max_transfer_bytes);
           ++session->server->workers;
-          co_await InitializeOperationWorker(session->worker);
+          co_await InitializeOperationWorker(session->worker, session->server->options.safe_base_dir);
         }
         if (UsesDesktop(request.method)) {
           co_await AcquireDesktop(session->server, cancel.get_cancellation());
@@ -408,10 +408,12 @@ static cardio::promise<void> ServeClient(std::shared_ptr<ClientSession> session)
         request.budget_ms = OperationBudgetMs(request.method, session->video_duration_ms);
         const auto context = RequestContext(session->id, request);
         PrintAgentLogEvent(context + " phase=received");
-        if (request.method == "agent.capabilities") {
+        if (request.method == "agent.capabilities" || request.method == "file.safeBaseDir") {
           ReleaseRequestBytes(session, request.frame.payload.size() + kFrameHeaderBytes);
           PrintAgentLogEvent(context + " phase=execute");
-          EnqueueOutput(session, JsonFrame(CreateCapabilitiesResponse(request.id)), context, request.received);
+          const auto response = request.method == "agent.capabilities" ? CreateCapabilitiesResponse(request.id) :
+              CreateSafeBaseDirResponse(request.id, options.safe_base_dir);
+          EnqueueOutput(session, JsonFrame(response), context, request.received);
           PrintAgentLogEvent(context + " phase=succeeded" + Elapsed(request.received));
           continue;
         }
