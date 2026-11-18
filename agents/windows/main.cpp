@@ -3,6 +3,7 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+#include "agent_update.h"
 #include "operation_worker.h"
 #include "file_logger.h"
 #include "managed_launch.h"
@@ -38,6 +39,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, wchar_t*, int) {
   int argc = 0;
   wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
   if (!argv) return 1;
+  if (argc == 3 && (std::wstring(argv[1]) == L"--agent-update-helper" || std::wstring(argv[1]) == L"--agent-update-restart")) {
+    const bool helper = std::wstring(argv[1]) == L"--agent-update-helper";
+    const std::wstring handle = argv[2];
+    LocalFree(argv);
+    return helper ? agent_rover::RunAgentUpdateHelper(handle.c_str()) : agent_rover::RunUpdatedAgent(handle.c_str());
+  }
   if (argc == 2 && std::wstring(argv[1]) == L"--agent-server") {
     LocalFree(argv);
     return agent_rover::RunSupervisedServer();

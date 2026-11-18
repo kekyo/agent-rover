@@ -105,6 +105,10 @@ static void CloseSocketState(AsyncSocket* connection) {
   connection->writable.Notify();
 }
 
+void ShareUpdateSocket(const SocketConnection& connection,DWORD process,WSAPROTOCOL_INFOW* info) {
+  if(connection->closed || WSADuplicateSocketW(connection->socket,process,info))
+    throw SocketError("WSADuplicateSocketW",WSAGetLastError());
+}
 void CloseSocket(const SocketConnection& connection) { CloseSocketState(connection.get()); }
 
 cardio::promise<void> DrainSocket(SocketConnection connection) {
