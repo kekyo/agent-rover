@@ -6,12 +6,13 @@
 // agent-rover - Verified Windows releases
 // Copyright (c) Kouji Matsui. Under MIT.
 import { createHash } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { zipSync } from 'fflate';
 import {
   checkRelease,
   compareVersions,
   extractExecutable,
+  fetchAgentRelease,
 } from '../src/update/release.ts';
 
 const hash = (data: Buffer) => createHash('sha256').update(data).digest('hex');
@@ -37,6 +38,25 @@ const info = {
   binaries: { i686: { bytes: executable.length, sha256: hash(executable) } },
 };
 describe('official agent releases', () => {
+  it('stops at a missing tag, a missing archive or an HTTP redirect', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch');
+    const signal = new AbortController().signal;
+    try {
+      for (const [response, message] of [
+        [new Response(null, { status: 404 }), /404/],
+        [Response.json({ tag_name: '0.10.0', assets: [] }), /asset/],
+        [Response.redirect('http://example.invalid/release', 302), /HTTPS/],
+      ] as const) {
+        fetch.mockResolvedValueOnce(response);
+        await expect(
+          fetchAgentRelease('0.10.0', 'i686', signal)
+        ).rejects.toThrow(message);
+      }
+      expect(fetch).toHaveBeenCalledTimes(3);
+    } finally {
+      fetch.mockRestore();
+    }
+  });
   it('compares three decimal version components numerically', () => {
     expect(compareVersions('0.9.0', '0.10.0')).toBe(-1);
     expect(compareVersions('1.0.0', '0.10.0')).toBe(1);
