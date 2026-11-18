@@ -253,7 +253,7 @@ beforeAll(async () => {
       authority,
       'sh',
       '-c',
-      'echo "$DISPLAY"; exec wine "$@" >/dev/null 2>&1',
+      'wine wineboot --init >/dev/null 2>&1 && echo "$DISPLAY" && exec wine "$@" >/dev/null 2>&1',
       'sh',
       join(agentsDirectory, 'dist/agent-amd64.exe'),
       '--host',
@@ -274,13 +274,7 @@ beforeAll(async () => {
     break;
   }
   if (!environment.DISPLAY)
-    throw new Error('xvfb-run did not start a display.');
-  remoteDirectory = (
-    await exec('winepath', ['-w', directory], { env: environment })
-  ).stdout.trim();
-  remoteFixture = (
-    await exec('winepath', ['-w', fixture], { env: environment })
-  ).stdout.trim();
+    throw new Error('Could not initialize Wine on the test display.');
   observer = await waitForResult(
     async () => {
       try {
@@ -295,6 +289,14 @@ beforeAll(async () => {
     },
     { timeoutMs: 30000 }
   );
+  // A winepath process that starts the Wine server can hand its output pipes
+  // to long-lived children. Let the agent start the session before querying paths.
+  remoteDirectory = (
+    await exec('winepath', ['-w', directory], { env: environment })
+  ).stdout.trim();
+  remoteFixture = (
+    await exec('winepath', ['-w', fixture], { env: environment })
+  ).stdout.trim();
 }, 120000);
 
 afterAll(async () => {
