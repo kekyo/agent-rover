@@ -46,22 +46,12 @@ A small agent runs on the target OS and lets you control applications remotely f
 
 The API lets you perform the same actions you would carry out manually in a remote desktop (RDP) session.
 
-Start the agent on the target machine to get its access token. On the machine that runs your tests,
-add the agent's endpoint and token to `$HOME/.agent-rover`.
-
-```ini
-[default]
-test-agent.example.com=<access-token>
-```
-
-With agent-rover, you can write test code like this:
-
 ```typescript
 import { writeFile } from 'node:fs/promises';
 
 import { connectRemoteAgent } from 'agent-rover';
 
-// Connect to the remote agent.
+// Connect to the default remote agent.
 const agent = await connectRemoteAgent();
 
 // Save a file in the remote environment.
@@ -149,10 +139,17 @@ Double-click the tray icon or choose `Show logs` to open the log viewer.
 
 The version banner, access token, and `Copy` button appear above the log list.
 Choose `Copy` and paste the token into `$HOME/.agent-rover` on the driver machine.
+In the following example, we register a token as the 'default' remote agent:
 
-Closing the viewer keeps the agent running. Choose `Exit` from the tray menu to stop it.
+```ini
+[default]
+test-agent.example.com=<access-token>
+```
 
 > If you supply a token with `--unsafe-token` at startup or in the agent's configuration file, the viewer hides the token field and the `Copy` button.
+
+Closing the viewer keeps the agent running.
+Choose `Exit` from the tray menu to stop it.
 
 Logs include connection, authentication and process events, request IDs and
 methods, execution results, response transmission and elapsed time. Sequence

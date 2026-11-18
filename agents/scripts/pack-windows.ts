@@ -47,6 +47,9 @@ const documents = [
   'README_pack.md',
   'images/README.md',
   'images/agent-rover-120.png',
+  'images/agent.png',
+  'images/agent-menu.png',
+  'images/architecture.png',
 ].map((name) => ({
   name,
   path: resolve(repo, name),

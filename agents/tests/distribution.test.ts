@@ -38,16 +38,20 @@ it('packs the same native build into a ZIP and a per-user installer', async () =
   const installer = await readFile(`${base}-setup.exe`);
   expect(installer.subarray(0, 2).toString()).toBe('MZ');
   const archive = `${base}.zip`;
-  expect(
-    (await exec('unzip', ['-Z1', archive])).stdout.trim().split('\n').sort()
-  ).toEqual([
+  const readme = await readFile(resolve(root, 'README_pack.md'), 'utf8');
+  const imagePaths = Array.from(
+    readme.matchAll(/!\[[^\]]*\]\((?:\.\/)?(images\/[^)]+)\)/gu),
+    (match) => match[1]!
+  );
+  const documents = [
     'LICENSE',
     'README_pack.md',
-    'agent-amd64.exe',
-    'agent-i686.exe',
     'images/README.md',
-    'images/agent-rover-120.png',
-  ]);
+    ...new Set(imagePaths),
+  ];
+  expect(
+    (await exec('unzip', ['-Z1', archive])).stdout.trim().split('\n').sort()
+  ).toEqual([...documents, 'agent-amd64.exe', 'agent-i686.exe'].sort());
   for (const arch of ['amd64', 'i686']) {
     const content = await exec('unzip', ['-p', archive, `agent-${arch}.exe`], {
       encoding: 'buffer',
@@ -91,13 +95,16 @@ it('packs the same native build into a ZIP and a per-user installer', async () =
       await readFile(resolve(directory, 'installed/agent-rover-agent.exe'))
     ).toEqual(await readFile(resolve(root, 'agents/dist/agent-amd64.exe')));
     await run([command, 'installed', installed, version]);
-    for (const name of [
-      'LICENSE',
-      'README_pack.md',
-      'images/README.md',
-      'images/agent-rover-120.png',
-    ])
-      await access(resolve(directory, 'installed', name));
+    await exec('unzip', ['-q', archive, '-d', resolve(directory, 'zip')]);
+    for (const name of documents) {
+      const source = await readFile(resolve(root, name));
+      const zipped = await readFile(resolve(directory, 'zip', name));
+      const installedFile = await readFile(
+        resolve(directory, 'installed', name)
+      );
+      expect(zipped, name).toEqual(source);
+      expect(installedFile, name).toEqual(source);
+    }
     await expect(
       run([
         'reg',
@@ -221,13 +228,15 @@ it('packs the same native build into a ZIP and a per-user installer', async () =
     await expect(
       access(resolve(directory, 'installed/agent-rover-agent.exe'))
     ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(
+      access(resolve(directory, 'installed/images'))
+    ).rejects.toMatchObject({ code: 'ENOENT' });
     expect(
       await readFile(resolve(directory, 'installed/keep.txt'), 'utf8')
     ).toBe('user data');
     expect(
       await readFile(resolve(directory, '.agent-rover-agent.ini'), 'utf8')
     ).toContain(`port=${port}`);
-    await exec('unzip', ['-q', archive, '-d', resolve(directory, 'zip')]);
     for (const arch of ['amd64', 'i686']) {
       const portable = spawn(
         'wine',

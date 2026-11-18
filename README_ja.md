@@ -45,21 +45,11 @@ agent-roverには、WindowsとX11環境で使用できる小さな「エージ�
 つまり、我々人間がRDPを通じてリモートセッションでアプリケーションを操作したりする事を、
 APIで実現できるということです！
 
-テストドライバー側では、接続先とトークンを、あらかじめ`$HOME/.agent-rover`に登録します。
-トークンは、あらかじめエージェントプログラムを起動して確認しておきます。
-
-```ini
-[default]
-test-agent.example.com=<access-token>
-```
-
-agent-roverを使用すれば、テストコードを以下のように書けます。
-
 ```typescript
 import { connectRemoteAgent } from 'agent-rover';
 import { waitForResult } from 'agent-rover/testing';
 
-// リモートエージェントに接続する
+// デフォルトリモートエージェントに接続する
 const agent = await connectRemoteAgent();
 
 // リモート環境にファイルを保存
@@ -148,11 +138,18 @@ Windowsエージェントは、ユーザーのデスクトップから実行し�
 ![agent window](./images/agent.png)
 
 上部にバージョンバナー、その下にトークン欄と「Copy」ボタン、ログ一覧が表示されます。
-「Copy」ボタンでトークンをコピーして、ドライバー側の`$HOME/.agent-rover`に登録してください。
+「Copy」ボタンでトークンをコピーして、テストドライバー側の`$HOME/.agent-rover`に登録してください。
+以下の例では、'default' リモートエージェントとしてトークンを登録します:
 
-ウィンドウを閉じてもエージェントは常駐します。終了する場合はトレイの「Exit」を選びます。
+```ini
+[default]
+test-agent.example.com=<access-token>
+```
 
 > 注意: 起動時の`--unsafe-token`引数、またはエージェント用INIでトークンを指定した場合、トークン欄と「Copy」ボタンは表示されません。
+
+なお、ウィンドウを閉じてもエージェントは常駐します。
+終了する場合はトレイの「Exit」を選びます。
 
 ログには接続・認証・プロセス操作のほか、要求IDとメソッド、実行結果、応答の送信、経過時間を記録します。
 画面とファイルは同じ連番で照合できます。認証トークン、要求本文、環境変数、クリップボードの内容はログへ転記しません。
