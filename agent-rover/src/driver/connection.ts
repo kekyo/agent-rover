@@ -1803,7 +1803,8 @@ export interface AgentUpdateSession {
   readonly status: (
     updateId: string,
     source: string,
-    digest: string
+    digest: string,
+    requestedVersion: string
   ) => Promise<AgentUpdateOutcome | undefined>;
   /** Closes this connection. */
   readonly release: () => void;
@@ -1881,7 +1882,12 @@ export const connectAgentForUpdate = async (
             active = await open();
             if (!active.capabilities.features.includes('agent.update.v1'))
               break;
-            const saved = await active.status(id, source, release.sha256);
+            const saved = await active.status(
+              id,
+              source,
+              release.sha256,
+              release.version
+            );
             if (saved) return saved;
           } catch (error) {
             if (
@@ -2480,7 +2486,8 @@ async function connectRemoteAgentOnce(
       response: JsonValue | undefined,
       id: string,
       source: string,
-      digest: string
+      digest: string,
+      requestedVersion: string
     ): AgentUpdateOutcome => {
       if (
         !isRecord(response) ||
@@ -2492,6 +2499,9 @@ async function connectRemoteAgentOnce(
           response.status !== 'recovery-required') ||
         (response.actualVersion !== null &&
           typeof response.actualVersion !== 'string') ||
+        (response.status === 'applied' &&
+          response.actualVersion !== requestedVersion) ||
+        (response.status === 'restored' && !response.actualVersion) ||
         typeof response.message !== 'string'
       )
         throw new Error('Invalid Windows update result.');
@@ -2502,14 +2512,14 @@ async function connectRemoteAgentOnce(
       };
     };
     return {
-      status: async (id, source, digest) => {
+      status: async (id, source, digest, requestedVersion) => {
         const value = await requestJson('agent.update.status', {
           updateId: id,
         });
         return value === null ||
           (isRecord(value) && value.status === 'applying')
           ? undefined
-          : outcome(value, id, source, digest);
+          : outcome(value, id, source, digest, requestedVersion);
       },
       endpoint: { host: options.host, port: options.port },
       capabilities: connectedCapabilities,
@@ -2564,7 +2574,13 @@ async function connectRemoteAgentOnce(
             message: 'The accepted update is still in progress.',
           };
         if (prepared !== null)
-          return outcome(prepared, updateId, sourceSha256, release.sha256);
+          return outcome(
+            prepared,
+            updateId,
+            sourceSha256,
+            release.sha256,
+            release.version
+          );
         const transfer = await sendBinaryTransfer(
           'application/vnd.agent-rover.update',
           release.executable
@@ -2574,7 +2590,13 @@ async function connectRemoteAgentOnce(
             updateId,
             transferId: transfer.transferId,
           });
-          return outcome(result, updateId, sourceSha256, release.sha256);
+          return outcome(
+            result,
+            updateId,
+            sourceSha256,
+            release.sha256,
+            release.version
+          );
         } catch (error) {
           if (
             typeof error !== 'object' ||

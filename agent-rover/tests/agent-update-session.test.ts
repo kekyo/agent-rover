@@ -109,6 +109,43 @@ it('returns the recorded transaction without sending another apply', async () =>
   }
 });
 
+it('rejects a success report for a different running version', async () => {
+  const id = randomUUID(),
+    source = 'b'.repeat(64);
+  const fake = await startFakeTcpAgent({
+    respond: (method) =>
+      method === 'agent.update.apply'
+        ? {
+            updateId: id,
+            sourceSha256: source,
+            sha256: release.sha256,
+            status: 'applied',
+            actualVersion: '1.0.0',
+            message: '',
+          }
+        : null,
+  });
+  try {
+    const s = await connectAgentForUpdate(
+      {
+        kind: 'explicit',
+        endpoint: { host: fake.host, port: fake.port, authToken: undefined },
+        redact: (t) => t,
+      },
+      { retry: false }
+    );
+    try {
+      await expect(s.install(id, source, release)).rejects.toThrow(
+        /update result/i
+      );
+    } finally {
+      s.release();
+    }
+  } finally {
+    await fake.close();
+  }
+});
+
 it('waits for a busy selected endpoint even when another section member is available', async () => {
   const source = 'b'.repeat(64),
     id = randomUUID();
