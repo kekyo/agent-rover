@@ -80,6 +80,9 @@ nativeビルドテストは配布エージェントのPE importを調べ、想�
 配布テストは実際のpackコマンドを実行し、ZIPとインストーラーの生成、起動、更新失敗時の保持、アンインストールを確認します。
 Wineとunzipが必要です。
 
+`npm test`と`npm run pack`は、Wine上で`arctl screenshot`が撮影後も同じウィンドウをアクティブに保つことを確認します。
+このテストには専用の仮想画面を使うため、LinuxホストにXvfb（`xvfb-run`）と`xauth`が必要です。
+
 Windows実機テストでは対話デスクトップで起動した制御用エージェントの接続先を`AGENT_ROVER_WIN11_HOST`、トークンを`AGENT_ROVER_WIN11_TOKEN`へ指定します。
 制御用エージェントは0.10.0で検証しています。指定がなければ実機テストはスキップします。
 テスト対象は別の配置先へ転送します。テストで使うポートをファイアウォールで許可するか、Windowsから到達できるLinux側IPを`AGENT_ROVER_WIN11_REVERSE_HOST`へ指定してください。

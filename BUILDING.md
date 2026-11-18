@@ -96,6 +96,10 @@ Distribution tests run the actual pack command and verify ZIP and installer
 generation, startup, failed-update preservation, and uninstallation. They require
 Wine and unzip.
 
+Both `npm test` and `npm run pack` check that `arctl screenshot` preserves the
+active window under Wine. This test uses a private display and requires Xvfb
+(`xvfb-run`) and `xauth` on the Linux host.
+
 For Windows integration tests, configure `AGENT_ROVER_WIN11_HOST` and
 `AGENT_ROVER_WIN11_TOKEN` for an interactive Windows 11 machine running the
 bootstrap agent (validated with 0.10.0), then run the same `npm test` command. The

@@ -16,6 +16,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createInterface } from 'node:readline';
 import { promisify } from 'node:util';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { PNG } from 'pngjs';
@@ -29,7 +30,7 @@ const { repositoryDirectory: root, agentsDirectory } = nativeTestPaths(
 import { createConfigurationFixture } from './helpers/configuration-fixture';
 
 const exec = promisify(execFile);
-const environment = { ...process.env, WINEDEBUG: '-all' };
+let environment: NodeJS.ProcessEnv;
 const port = 39751;
 let server: ChildProcess | undefined;
 let observer: RemoteAgent | undefined;
@@ -37,7 +38,6 @@ let directory: string;
 let remoteDirectory: string;
 let remoteFixture: string;
 const fixture = join(agentsDirectory, '.build/arctl/launch-amd64.exe');
-const control = join(agentsDirectory, '.build/gui/control-amd64.exe');
 
 const arctl = async (args: readonly string[]) => {
   const fixture = await createConfigurationFixture(
@@ -144,7 +144,13 @@ it('captures visible desktop and window pixels without changing the active windo
       env: environment,
       timeout: 40000,
     });
-    const window = await observer!.waitForWindow({ title, visible: true });
+    const target = await observer!.waitForWindow({ title, visible: true });
+    // Both fixtures open at the same position. Leave the target visible
+    // from the moment the foreground window opens.
+    const window = await target.setBounds({
+      ...target.bounds,
+      x: target.bounds.x + target.bounds.width + 20,
+    });
     const expectedPixel = [36, 180, 90, 255];
     // WM_PAINT completes before the desktop compositor finishes showing a
     // new window. Observe the rendered content without activating the window.
@@ -169,10 +175,6 @@ it('captures visible desktop and window pixels without changing the active windo
     const foreground = await observer!.waitForWindow({
       processId: foregroundPid,
       visible: true,
-    });
-    await foreground.setBounds({
-      ...foreground.bounds,
-      x: window.bounds.x + window.bounds.width + 20,
     });
     await foreground.activate();
     await waitForResult(async () => {
@@ -216,12 +218,12 @@ it('captures visible desktop and window pixels without changing the active windo
       await expect(arctl(['screenshot', path])).rejects.toMatchObject({
         code: 1,
       });
+      expect(
+        (await observer!.windows())
+          .filter((entry) => entry.active)
+          .map((entry) => entry.id)
+      ).toEqual([foreground.id]);
     }
-    expect(
-      (await observer!.windows())
-        .filter((window) => window.active)
-        .map((window) => window.id)
-    ).toEqual([foreground.id]);
   } finally {
     if (foregroundPid !== undefined)
       await observer!.processes.kill(foregroundPid);
@@ -232,21 +234,27 @@ it('captures visible desktop and window pixels without changing the active windo
 beforeAll(async () => {
   await exec('make', ['-j4', 'amd64'], { cwd: agentsDirectory });
   await exec('make', ['-C', 'tests/arctl'], { cwd: agentsDirectory });
-  await exec(
-    'make',
-    ['-C', 'tests/gui', '../../.build/gui/control-amd64.exe'],
-    { cwd: agentsDirectory }
-  );
   directory = await mkdtemp(join(tmpdir(), 'agent-rover-arctl-native-'));
-  remoteDirectory = (
-    await exec('winepath', ['-w', directory], { env: environment })
-  ).stdout.trim();
-  remoteFixture = (
-    await exec('winepath', ['-w', fixture], { env: environment })
-  ).stdout.trim();
-  server = spawn(
-    'wine',
+  // Both X11 focus and the Wine server must belong to this test session.
+  const authority = join(directory, 'Xauthority');
+  environment = {
+    ...process.env,
+    DISPLAY: undefined,
+    WAYLAND_DISPLAY: undefined,
+    WINEDEBUG: '-all',
+    WINEPREFIX: join(directory, 'wine'),
+    XAUTHORITY: authority,
+  };
+  const session = spawn(
+    'xvfb-run',
     [
+      '-a',
+      '-f',
+      authority,
+      'sh',
+      '-c',
+      'echo "$DISPLAY"; exec wine "$@" >/dev/null 2>&1',
+      'sh',
       join(agentsDirectory, 'dist/agent-amd64.exe'),
       '--host',
       '127.0.0.1',
@@ -256,8 +264,23 @@ beforeAll(async () => {
       '--connection-mode',
       'multiple',
     ],
-    { env: environment, stdio: 'ignore' }
+    { cwd: directory, env: environment, stdio: ['ignore', 'pipe', 'inherit'] }
   );
+  server = session;
+  await once(session, 'spawn');
+  // Join the same display for winepath and the event-waiting fixture.
+  for await (const display of createInterface({ input: session.stdout })) {
+    environment.DISPLAY = display;
+    break;
+  }
+  if (!environment.DISPLAY)
+    throw new Error('xvfb-run did not start a display.');
+  remoteDirectory = (
+    await exec('winepath', ['-w', directory], { env: environment })
+  ).stdout.trim();
+  remoteFixture = (
+    await exec('winepath', ['-w', fixture], { env: environment })
+  ).stdout.trim();
   observer = await waitForResult(
     async () => {
       try {
@@ -277,16 +300,14 @@ beforeAll(async () => {
 afterAll(async () => {
   observer?.release();
   try {
-    await exec('wine', [control, 'exit', String(port)], {
-      env: environment,
-      timeout: 30000,
-    });
-  } finally {
-    if (server && server.exitCode === null && server.signalCode === null) {
-      const exited = once(server, 'exit');
-      server.kill('SIGKILL');
-      await exited;
+    if (server?.pid !== undefined && environment.DISPLAY) {
+      await exec('wineserver', ['-k'], { env: environment });
+      await exec('wineserver', ['-w'], { env: environment });
+      if (server.exitCode === null && server.signalCode === null) {
+        await once(server, 'exit');
+      }
     }
+  } finally {
     if (directory) await rm(directory, { force: true, recursive: true });
   }
 }, 60000);
