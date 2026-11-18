@@ -8,13 +8,30 @@
 namespace agent_rover {
 /** The client may select a build, but never a destination path or launch command. */
 struct AgentUpdateSpec {
-  std::string id, source_hash, version, architecture, hash, source_instance, authorization;
+  /** UUID used for the handoff and the durable outcome. */
+  std::string id;
+  /** SHA-256 of the executable selected before the download. */
+  std::string source_hash;
+  /** Exact three-part release tag. */
+  std::string version;
+  /** CPU of the selected Windows executable. */
+  std::string architecture;
+  /** Expected SHA-256 of the release executable. */
+  std::string hash;
+  /** Identity of the server that initially answered the client. */
+  std::string source_instance;
+  /** Digest authorization derived from the existing connection token. */
+  std::string authorization;
+  /** Size of the release executable in bytes. */
   uint64_t bytes = 0;
+  /** Update protocol supported by the release, or zero for a cataloged legacy release. */
   uint32_t protocol = 0;
 };
 /** @return SHA-256 of the executable that owns this server. */
 std::string RunningAgentHash();
-/** Checks the requested build and its compatibility with the active settings. */
+/** Checks the requested build and its compatibility with the active settings.
+ * @param spec Client's verified release selection. @param options Current listener and authentication settings.
+ * @throws std::runtime_error if the selection is stale, incompatible or unauthorized. */
 void ValidateAgentUpdate(const AgentUpdateSpec& spec, const ServerOptions& options);
 /** Starts a one-shot helper and waits for it to acquire the result connection.
  * @param spec Previously validated build. @param image Verified binary transfer.
@@ -24,13 +41,19 @@ void ValidateAgentUpdate(const AgentUpdateSpec& spec, const ServerOptions& optio
 cardio::promise<void> HandOffAgentUpdate(AgentUpdateSpec spec, std::vector<unsigned char> image,
                                          ServerOptions options, SocketConnection socket,
                                          std::string request_id, cardio::cancellation stop);
-/** @return Recorded result JSON for this transaction, or null. */
+/** @param id Transaction UUID. @return Recorded result JSON for this transaction, or JSON null. */
 cardio::promise<std::string> AgentUpdateStatus(std::string id);
 /** Reconciles an interrupted transaction after this instance has acquired its listener. */
 cardio::promise<void> RecoverAgentUpdate();
-/** Runs the temporary updater from a private inherited mapping. */
+/** Runs the temporary updater from a private inherited mapping.
+ * @param handle Decimal handle from the running agent. @return Process exit code. */
 int RunAgentUpdateHelper(const wchar_t* handle);
-/** Restarts the supervisor with the effective settings of the verified transaction. */
+/** Waits for the specific updater process so its executable can be deleted.
+ * @param pid Decimal process ID. @param created Decimal creation time to distinguish reused IDs.
+ * @return Zero once this process identity has exited. */
+int WaitForAgentUpdateExit(const wchar_t* pid, const wchar_t* created);
+/** Restarts the supervisor with the effective settings of the verified transaction.
+ * @param handle Decimal handle from the update helper. @return Supervisor exit code. */
 int RunUpdatedAgent(const wchar_t* handle);
 }  // namespace agent_rover
 #endif

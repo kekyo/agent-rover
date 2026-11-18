@@ -276,7 +276,7 @@ cardio::promise<void> HandOffAgentUpdate(AgentUpdateSpec spec, std::vector<unsig
     PROCESS_INFORMATION process = {};
     if (!CreateProcessW(helper.c_str(), command.data(), nullptr, nullptr, TRUE,
                         CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB, nullptr,
-                        dir.c_str(), &startup, &process))
+                        bridge->working_directory, &startup, &process))
       throw Failure("CreateProcessW(update)");
     KernelHandle child(process.hProcess), thread(process.hThread);
     try {

@@ -8,7 +8,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createHash, randomUUID } from 'node:crypto';
-import { copyFile, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { copyFile, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -39,7 +39,7 @@ it('hands the maintenance connection to a helper and confirms the replacement li
     host: '127.0.0.1',
     port,
     authToken: randomUUID(),
-    retry: false,
+    retry: { maxRetries: 30, intervalMs: 100 },
     timeoutMs: 45000,
   };
   const target = await resolveConnectionTarget(options);
@@ -55,10 +55,11 @@ it('hands the maintenance connection to a helper and confirms the replacement li
       '--unsafe-token',
       options.authToken,
     ],
-    { env: { ...env, HOME: home, APPDATA: home }, stdio: 'ignore' }
+    { cwd: dir, env: { ...env, APPDATA: home }, stdio: 'ignore' }
   );
 
   const ended = once(child, 'exit');
+  const updateId = randomUUID();
   try {
     const session = await waitForResult(
       async () => {
@@ -74,15 +75,23 @@ it('hands the maintenance connection to a helper and confirms the replacement li
       expect(session.capabilities.features).toContain('agent.update.v1');
       expect(await session.imageHash()).toBe(sha256);
       const version = session.capabilities.agentVersion!;
-
-      const result = await session.install(randomUUID(), sha256, {
+      const release = {
         version,
         gitCommit: session.capabilities.gitCommit!,
-        architecture: 'amd64',
+        architecture: 'amd64' as const,
         sha256,
         executable: data,
         updateProtocol: 1,
-      });
+      };
+      await expect(
+        session.install(randomUUID(), sha256, {
+          ...release,
+          sha256: '0'.repeat(64),
+        })
+      ).rejects.toThrow(/checksum|sha256|digest|metadata/i);
+      // Acceptance checks the server instance again. A hash error must leave
+      // this same process available for the next, correctly verified transfer.
+      const result = await session.install(updateId, sha256, release);
       expect(result).toMatchObject({
         status: 'applied',
         actualVersion: version,
@@ -91,6 +100,9 @@ it('hands the maintenance connection to a helper and confirms the replacement li
       session.release();
     }
     await ended;
+    await waitForResult(async () => {
+      expect(await readdir(dir)).not.toContain('.agent-rover-update-' + updateId);
+    }, { timeoutMs: 10000 });
 
     const replacement = await connectAgentForUpdate(target, options);
     try {

@@ -39,6 +39,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, wchar_t*, int) {
   int argc = 0;
   wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
   if (!argv) return 1;
+  if (argc == 4 && std::wstring(argv[1]) == L"--agent-update-wait") {
+    const auto result = agent_rover::WaitForAgentUpdateExit(argv[2], argv[3]);
+    LocalFree(argv);
+    return result;
+  }
   if (argc == 3 && (std::wstring(argv[1]) == L"--agent-update-helper" || std::wstring(argv[1]) == L"--agent-update-restart")) {
     const bool helper = std::wstring(argv[1]) == L"--agent-update-helper";
     const std::wstring handle = argv[2];

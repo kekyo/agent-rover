@@ -12,6 +12,7 @@
 #include <tlhelp32.h>
 #include <chrono>
 #include <cstring>
+#include <utility>
 
 namespace agent_rover {
 static std::runtime_error Failure(const char* op, DWORD code = GetLastError()) {
@@ -253,17 +254,14 @@ static cardio::promise<void> ReplaceAgent(UpdateBridge* b, int* exit_code) {
   const auto candidate = dir + L"\\release.exe", backup = dir + L"\\previous.exe";
   const auto supervisor = b->supervisor;
   SocketConnection socket;
-  bool committed = false, replaced = false, registered = false, stopped = false;
+  SOCKET shared = INVALID_SOCKET;
+  bool journaled = false, committed = false, replaced = false, registered = false, stopped = false;
   Registration registration;
   KernelHandle update_lock;
   std::wstring old_version;
   std::string failure, state = "recovery-required", actual;
   try {
     auto handoff = cardio::cancellations::timeout(15000);
-    const auto descriptor = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO,
-                                       &b->connection, 0, WSA_FLAG_OVERLAPPED);
-    if (descriptor == INVALID_SOCKET) throw Failure("Adopt update connection", WSAGetLastError());
-    socket = AdoptSocket(descriptor, false);
     update_lock.reset(CreateFileW((original + L".update-lock").c_str(), GENERIC_READ | DELETE, 0, nullptr,
                                   CREATE_NEW, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE,
                                   nullptr));
@@ -274,15 +272,26 @@ static cardio::promise<void> ReplaceAgent(UpdateBridge* b, int* exit_code) {
       throw std::runtime_error("Staged update digest mismatch.");
     if (!CopyFileW(original.c_str(), backup.c_str(), TRUE) || AgentImageHash(backup) != b->source_hash)
       throw std::runtime_error("Could not preserve the original agent.");
+    shared = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO,
+                        &b->connection, 0, WSA_FLAG_OVERLAPPED);
+    if (shared == INVALID_SOCKET) throw Failure("Share update connection", WSAGetLastError());
     auto pending = Result(*b, "applying", "", "");
     pending.pop_back();
     pending += ",\"requestedVersion\":\"" + JsonEscape(b->version) + "\",\"previousVersion\":\"" +
                JsonEscape(b->source_version) + "\",\"previousDisplayVersion\":\"" +
                JsonEscape(WideToUtf8(old_version)) + "\"}";
     SaveAgentUpdateResult(original, pending);
+    journaled = true;
     SetEvent(b->joined);
     co_await cardio::from_win32_handle(b->offered, handoff.get_cancellation());
     committed = true;
+    // WSAEventSelect on either descriptor changes which process receives events.
+    // Keep the server's FD_CLOSE notification intact until it commits to shutdown.
+    try {
+      socket = AdoptSocket(std::exchange(shared, INVALID_SOCKET), false);
+    } catch (const std::exception&) {
+      // A lost reply channel does not cancel an accepted update. Its result is journaled.
+    }
     auto shutdown = cardio::cancellations::timeout(30000);
     co_await cardio::from_win32_handle(supervisor, shutdown.get_cancellation());
     stopped = true;
@@ -303,7 +312,15 @@ static cardio::promise<void> ReplaceAgent(UpdateBridge* b, int* exit_code) {
   } catch (const std::exception& e) {
     failure = e.what();
   }
+  if (shared != INVALID_SOCKET) closesocket(shared);
   if (!committed && !failure.empty()) {
+    if (journaled) {
+      try {
+        SaveAgentUpdateResult(original, Result(*b, "restored", b->source_version, failure));
+      } catch (const std::exception&) {
+        // Startup can still reconcile the pending record against the unchanged image.
+      }
+    }
     std::strncpy(b->error, failure.c_str(), sizeof(b->error) - 1);
     SetEvent(b->joined);
   }
@@ -347,36 +364,47 @@ static cardio::promise<void> ReplaceAgent(UpdateBridge* b, int* exit_code) {
   if (!committed || state != "recovery-required") DeleteFileW(backup.c_str());
   *exit_code = state == "applied" ? 0 : 1;
 }
-// The read end reaches EOF only when Windows closes this helper's noninheritable
-// writer at process exit. The shell can then remove the unloaded image on XP.
+static uint64_t ProcessCreationTime(HANDLE process) {
+  FILETIME created, exited, kernel, user;
+  if (!GetProcessTimes(process, &created, &exited, &kernel, &user)) throw Failure("GetProcessTimes(helper)");
+  return (static_cast<uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+}
+int WaitForAgentUpdateExit(const wchar_t* pid, const wchar_t* created) {
+  try {
+    const auto id = std::stoul(pid);
+    if (!id || std::to_wstring(id) != pid) return 1;
+    KernelHandle process(OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE, id));
+    if (!process) return GetLastError() == ERROR_INVALID_PARAMETER ? 0 : 1;
+    if (std::to_wstring(ProcessCreationTime(process.get())) != created) return 0;
+    return WaitForSingleObject(process.get(), INFINITE) == WAIT_OBJECT_0 ? 0 : 1;
+  } catch (const std::exception&) {
+    return 1;
+  }
+}
+// XP closes a helper's pipes before unmapping its executable. The command
+// processor waits for a short-lived copy of the same executable, which in turn
+// waits on the original process handle. Both images are unloaded before deletion.
 static void ScheduleHelperRemoval(const UpdateBridge& b) {
-  SECURITY_ATTRIBUTES attrs = {sizeof(attrs), nullptr, TRUE};
-  HANDLE input = nullptr, output = nullptr;
-  if (!CreatePipe(&input, &output, &attrs, 0)) throw Failure("CreatePipe(helper cleanup)");
-  KernelHandle read(input), write(output);
-  if (!SetHandleInformation(write.get(), HANDLE_FLAG_INHERIT, 0)) throw Failure("Protect cleanup writer");
   wchar_t system[MAX_PATH];
   if (!GetSystemDirectoryW(system, MAX_PATH)) throw Failure("GetSystemDirectoryW");
   const auto shell = std::wstring(system) + L"\\cmd.exe";
-  auto command = QuoteCommandLineArgument(shell) +
-                 L" /d /q /v:off /c set /p done= & del /q helper.exe & cd .. & rd .agent-rover-update-" +
-                 Utf8ToWide(b.id);
-  KernelHandle sink(CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_WRITE | FILE_SHARE_READ, &attrs,
-                                OPEN_EXISTING, 0, nullptr));
+  const auto directory = L".agent-rover-update-" + Utf8ToWide(b.id);
+  const auto helper = directory + L"\\helper.exe";
+  // Only a validated UUID and locally generated decimal identifiers enter the command.
+  auto command = QuoteCommandLineArgument(shell) + L" /d /q /e:on /v:off /c start \"\" /b /wait " +
+                 helper + L" --agent-update-wait " + std::to_wstring(GetCurrentProcessId()) + L" " +
+                 std::to_wstring(ProcessCreationTime(GetCurrentProcess())) +
+                 L" && del /q " + helper + L" && rd " + directory;
   STARTUPINFOW startup = {};
   startup.cb = sizeof(startup);
-  startup.dwFlags = STARTF_USESTDHANDLES;
-  startup.hStdInput = read.get();
-  startup.hStdOutput = sink.get();
-  startup.hStdError = sink.get();
   PROCESS_INFORMATION pi = {};
-  const auto dir = AgentUpdateDirectory(b.original, b.id);
-  if (!CreateProcessW(shell.c_str(), command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
-                      dir.c_str(), &startup, &pi))
+  const std::wstring original = b.original;
+  const auto parent = original.substr(0, original.find_last_of(L"\\/") + 1);
+  if (!CreateProcessW(shell.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                      parent.c_str(), &startup, &pi))
     throw Failure("CreateProcessW(helper cleanup)");
   CloseHandle(pi.hThread);
   CloseHandle(pi.hProcess);
-  write.release();  // Lifetime is exactly this process, including abnormal exit.
 }
 int RunAgentUpdateHelper(const wchar_t* text) {
   WSADATA wsa = {};

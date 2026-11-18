@@ -378,57 +378,71 @@ static cardio::promise<void> ExecuteRequests(std::shared_ptr<ClientSession> sess
   } catch (const std::exception& error) { CloseSession(session, std::string("operation: ") + error.what()); }
 }
 
-static cardio::promise<void> HandleUpdate(std::shared_ptr<ClientSession> session,const std::string& text,
-    const std::string& id,const std::string& method) {
-  const auto server=session->server;
+static cardio::promise<void> HandleUpdate(std::shared_ptr<ClientSession> session, const std::string& text,
+                                          const std::string& id, const std::string& method) {
+  const auto server = session->server;
   std::string response;
-  try{
-    if(method=="agent.update.inspect")response=SuccessResponseJson(id,"\""+RunningAgentHash()+"\"");
-    else if(method=="agent.update.status"){
+  try {
+    if (method == "agent.update.inspect")
+      response = SuccessResponseJson(id, "\"" + RunningAgentHash() + "\"");
+    else if (method == "agent.update.status") {
       std::string update_id;
-      if(!FindJsonStringField(text,"updateId",&update_id))throw std::runtime_error("Missing update ID.");
-      const auto record=co_await AgentUpdateStatus(update_id);
-      response=SuccessResponseJson(id,record);
-    } else if(method=="agent.update.prepare"){
+      if (!FindJsonStringField(text, "updateId", &update_id)) throw std::runtime_error("Missing update ID.");
+      const auto record = co_await AgentUpdateStatus(update_id);
+      response = SuccessResponseJson(id, record);
+    } else if (method == "agent.update.prepare") {
       AgentUpdateSpec spec;
-      if(!ReadAgentUpdateSpec(text,&spec))throw std::runtime_error("Invalid update metadata.");
-      const auto previous=co_await AgentUpdateStatus(spec.id);
-      if(previous!="null"){
-        std::string source,hash;
-        if(!FindJsonStringField(previous,"sourceSha256",&source)||source!=spec.source_hash||
-            !FindJsonStringField(previous,"sha256",&hash)||hash!=spec.hash)throw std::runtime_error("Update ID already used.");
-        response=SuccessResponseJson(id,previous);
-      }else if(server->sessions.size()!=1||server->workers||!server->quarantine.empty()||
-          !server->pending_recovery.empty()||!session->requests.empty()||server->update_owner){
-        response=CreateAgentFailure(id,"AGENT_BUSY","An agent session or cleanup is in progress.");
-      }else{
-        if(spec.source_instance!=server->instance_id)throw std::runtime_error("The selected agent instance changed.");
-        ValidateAgentUpdate(spec,server->options);
-        server->update_owner=session->id;session->update=spec;session->update_transfer.max_transfer_bytes=spec.bytes;
-        response=SuccessResponseJson(id,"null");
+      if (!ReadAgentUpdateSpec(text, &spec)) throw std::runtime_error("Invalid update metadata.");
+      const auto previous = co_await AgentUpdateStatus(spec.id);
+      if (previous != "null") {
+        std::string source, hash;
+        if (!FindJsonStringField(previous, "sourceSha256", &source) || source != spec.source_hash ||
+            !FindJsonStringField(previous, "sha256", &hash) || hash != spec.hash)
+          throw std::runtime_error("Update ID already used.");
+        response = SuccessResponseJson(id, previous);
+      } else if (server->sessions.size() != 1 || server->workers || !server->quarantine.empty() ||
+                 !server->pending_recovery.empty() || !session->requests.empty() || server->update_owner) {
+        response = CreateAgentFailure(id, "AGENT_BUSY", "An agent session or cleanup is in progress.");
+      } else {
+        if (spec.source_instance != server->instance_id)
+          throw std::runtime_error("The selected agent instance changed.");
+        ValidateAgentUpdate(spec, server->options);
+        server->update_owner = session->id;
+        session->update = spec;
+        session->update_transfer.max_transfer_bytes = spec.bytes;
+        response = SuccessResponseJson(id, "null");
       }
-    }else if(method=="agent.update.apply"){
-      std::string update_id,transfer_id,error;
-      if(!FindJsonStringField(text,"updateId",&update_id))throw std::runtime_error("Missing update ID.");
-      const auto previous=co_await AgentUpdateStatus(update_id);
-      if(previous!="null")response=SuccessResponseJson(id,previous);
-      else{
-        if(!session->update||session->update->id!=update_id||!FindJsonStringField(text,"transferId",&transfer_id))
+    } else if (method == "agent.update.apply") {
+      std::string update_id, transfer_id, error;
+      if (!FindJsonStringField(text, "updateId", &update_id)) throw std::runtime_error("Missing update ID.");
+      const auto previous = co_await AgentUpdateStatus(update_id);
+      if (previous != "null")
+        response = SuccessResponseJson(id, previous);
+      else {
+        if (!session->update || session->update->id != update_id ||
+            !FindJsonStringField(text, "transferId", &transfer_id))
           throw std::runtime_error("Update was not prepared on this connection.");
-        const auto& spec=*session->update;
+        const auto& spec = *session->update;
         std::vector<unsigned char> bytes;
-        if(!ConsumeBinaryTransfer(&session->update_transfer,transfer_id,"application/vnd.agent-rover.update",spec.bytes,
-            spec.hash,&bytes,&error))throw std::runtime_error(error);
-        co_await HandOffAgentUpdate(spec,std::move(bytes),server->options,session->socket,id,server->stop.get_cancellation());
-        RequestSupervisorExit();StopServer(server);co_return;
+        if (!ConsumeBinaryTransfer(&session->update_transfer, transfer_id,
+                                   "application/vnd.agent-rover.update", spec.bytes, spec.hash, &bytes,
+                                   &error))
+          throw std::runtime_error(error);
+        co_await HandOffAgentUpdate(spec, std::move(bytes), server->options, session->socket, id,
+                                    server->stop.get_cancellation());
+        RequestSupervisorExit();
+        StopServer(server);
+        co_return;
       }
-    }else throw std::runtime_error("Unknown update request.");
-  }catch(const std::exception& e){
-    session->update.reset();session->update_transfer={};
-    if(server->update_owner==session->id)server->update_owner=0;
-    response=CreateAgentFailure(id,"OPERATION_FAILED",e.what());
+    } else
+      throw std::runtime_error("Unknown update request.");
+  } catch (const std::exception& e) {
+    session->update.reset();
+    session->update_transfer = {};
+    if (server->update_owner == session->id) server->update_owner = 0;
+    response = CreateAgentFailure(id, "OPERATION_FAILED", e.what());
   }
-  EnqueueOutput(session,JsonFrame(response));
+  EnqueueOutput(session, JsonFrame(response));
 }
 
 static cardio::promise<void> ServeClient(std::shared_ptr<ClientSession> session) {
@@ -467,12 +481,12 @@ static cardio::promise<void> ServeClient(std::shared_ptr<ClientSession> session)
         request.budget_ms = OperationBudgetMs(request.method, session->video_duration_ms);
         const auto context = RequestContext(session->id, request);
         PrintAgentLogEvent(context + " phase=received");
-        if(request.method.starts_with("agent.update.")){
-          ReleaseRequestBytes(session,request.frame.payload.size()+kFrameHeaderBytes);
-          co_await HandleUpdate(session,text,request.id,request.method);
+        if (request.method.starts_with("agent.update.")) {
+          ReleaseRequestBytes(session, request.frame.payload.size() + kFrameHeaderBytes);
+          co_await HandleUpdate(session, text, request.id, request.method);
           continue;
         }
-        if(session->update)throw std::runtime_error("Only update operations are accepted during transfer.");
+        if (session->update) throw std::runtime_error("Only update operations are accepted during transfer.");
         if (request.method == "agent.capabilities" || request.method == "file.safeBaseDir") {
           ReleaseRequestBytes(session, request.frame.payload.size() + kFrameHeaderBytes);
           PrintAgentLogEvent(context + " phase=execute");
@@ -483,13 +497,14 @@ static cardio::promise<void> ServeClient(std::shared_ptr<ClientSession> session)
           continue;
         }
       } else if (request.frame.kind != FrameKind::Binary) throw std::runtime_error("Unexpected frame kind.");
-      if(session->update && request.frame.kind==FrameKind::Binary){
-        BinaryTransferChunk chunk;std::string error;
-        if(!DecodeBinaryTransferChunkPayload(request.frame.payload,&chunk,&error)||
-            chunk.content_type!="application/vnd.agent-rover.update"||
-            !AcceptBinaryTransferChunk(&session->update_transfer,chunk,&error))
-          throw std::runtime_error("Invalid update transfer: "+error);
-        ReleaseRequestBytes(session,request.frame.payload.size()+kFrameHeaderBytes);
+      if (session->update && request.frame.kind == FrameKind::Binary) {
+        BinaryTransferChunk chunk;
+        std::string error;
+        if (!DecodeBinaryTransferChunkPayload(request.frame.payload, &chunk, &error) ||
+            chunk.content_type != "application/vnd.agent-rover.update" ||
+            !AcceptBinaryTransferChunk(&session->update_transfer, chunk, &error))
+          throw std::runtime_error("Invalid update transfer: " + error);
+        ReleaseRequestBytes(session, request.frame.payload.size() + kFrameHeaderBytes);
         continue;
       }
       session->requests.push_back(std::move(request));
@@ -516,7 +531,7 @@ static cardio::promise<void> ServeClient(std::shared_ptr<ClientSession> session)
     }
     session->worker.reset();
   }
-  if(session->server->update_owner==session->id)session->server->update_owner=0;
+  if (session->server->update_owner == session->id) session->server->update_owner = 0;
   session->server->sessions_changed.Notify();
 }
 
@@ -595,9 +610,12 @@ static cardio::promise<void> Serve(std::shared_ptr<ServerState> server, int* res
     const auto status = "Listening on " + server->options.host + ":" + std::to_string(server->options.port);
     PrintAgentLogEvent("version=" + BuildAgentVersionText() + " " + status);
     SetListenStatus(server, status);
-    if(server->options.update_ready)SetEvent(reinterpret_cast<HANDLE>(server->options.update_ready));
-    try { co_await RecoverAgentUpdate(); }
-    catch(const std::exception& e){PrintAgentLogEvent(std::string("phase=update-recovery-pending ")+e.what());}
+    if (server->options.update_ready) SetEvent(reinterpret_cast<HANDLE>(server->options.update_ready));
+    try {
+      co_await RecoverAgentUpdate();
+    } catch (const std::exception& e) {
+      PrintAgentLogEvent(std::string("phase=update-recovery-pending ") + e.what());
+    }
     uint32_t next_id = 0;
     for (;;) {
       std::string endpoint;
@@ -605,7 +623,7 @@ static cardio::promise<void> Serve(std::shared_ptr<ServerState> server, int* res
       // Authentication and worker teardown both retain the single session slot.
       // An unconfirmed worker exit must also prevent a new session from operating.
       if (server->update_owner || (!server->options.multiple_connections &&
-          (!server->sessions.empty() || !server->quarantine.empty()))) {
+                                   (!server->sessions.empty() || !server->quarantine.empty()))) {
         co_await RejectBusyConnection(socket, server->stop.get_cancellation());
         continue;
       }
