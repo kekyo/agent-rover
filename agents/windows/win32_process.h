@@ -162,6 +162,16 @@ bool SnapshotManagedProcess(
     OperationError* error);
 
 /**
+ * Lists running Job descendants using verified process handles, excluding the root.
+ * @param managed_id Retained managed resource identifier.
+ * @param processes Receives descendant snapshots even after their parent exits.
+ * @param error Receives an enumeration, access or state query failure.
+ * @return Whether the complete available snapshot could be read.
+ */
+bool ListManagedProcesses(uint32_t managed_id, std::vector<ProcessSnapshot>* processes,
+                          OperationError* error);
+
+/**
  * Lists running processes.
  *
  * @param options Process list options.

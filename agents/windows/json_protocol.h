@@ -21,6 +21,20 @@ namespace agent_rover {
  */
 std::string CreateReadyEventJson();
 
+struct AgentUpdateSpec;
+/** Parses the build identity, bounded size and release protocol of a prepare request. */
+bool ReadAgentUpdateSpec(const std::string& json, AgentUpdateSpec* spec);
+/** Reads a string field from an update request or catalog. */
+bool FindJsonStringField(const std::string& json,const std::string& key,std::string* value);
+/** Serializes a successful response with an already encoded JSON result. */
+std::string SuccessResponseJson(const std::string& id,const std::string& result);
+/** Escapes a UTF-8 string for JSON serialization. */
+std::string JsonEscape(const std::string& value);
+/** Matches historical images against the packaged catalog. */
+bool MatchesLegacyAgent(const std::string& catalog, const AgentUpdateSpec& spec);
+
+/** Records the random identifier of this server lifetime. */
+void SetAgentInstanceId(const std::string& id);
 /** Sets the cached video capability after isolated detection.
  * @param supported Whether Media Foundation was successfully detected. */
 void SetAgentVideoCapability(bool supported);
@@ -34,6 +48,10 @@ uint32_t ReadAgentVideoDuration(const std::string& payload);
 /** Builds a capability response using cached data only.
  * @param id Request identifier. @return JSON response. */
 std::string CreateCapabilitiesResponse(const std::string& id);
+/** Returns the cached workspace path without accessing configuration or storage.
+ * @param id Request identifier. @param path Startup-selected UTF-8 directory.
+ * @return JSON response. */
+std::string CreateSafeBaseDirResponse(const std::string& id, const std::string& path);
 /** Builds an operation failure response without exposing request contents.
  * @param id Request identifier. @param code Stable failure code.
  * @param message Diagnostic description. @return JSON response. */
@@ -46,6 +64,7 @@ std::string CreateAgentResultLog(const std::string& payload);
  * Handles one JSON request payload.
  *
  * @param payload UTF-8 JSON request payload.
+ * @param safe_base_dir Startup-selected absolute Windows workspace directory.
  * @param transfers Incoming transfer store and configured file transfer limit.
  * @param recordings Connection-owned asynchronous video recording state.
  * @param outbound_chunks Receives binary chunks to send before the JSON response.
@@ -54,6 +73,7 @@ std::string CreateAgentResultLog(const std::string& payload);
  */
 std::string HandleJsonRequest(
     const std::string& payload,
+    const std::string& safe_base_dir,
     BinaryTransferStore* transfers,
     VideoRecordingStore* recordings,
     std::vector<BinaryTransferChunk>* outbound_chunks,

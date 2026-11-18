@@ -28,6 +28,12 @@ struct AgentCommandLineOptions {
   uint64_t max_transfer_bytes = kDefaultMaxTransferBytes;
   /** Whether multiple independent driver sessions may connect at once. */
   bool multiple_connections = false;
+  /** Requested Windows workspace path, or empty to use the OS temporary directory. */
+  std::wstring safe_base_dir = {};
+  /** Absolute INI path used by the public startup path; empty for internal modes. */
+  std::wstring config_path = {};
+  /** Source line of an INI workspace value, or zero for CLI/defaults. */
+  size_t safe_base_dir_line = 0;
 };
 
 /** Result returned when parsing native Windows agent startup arguments. */
@@ -71,6 +77,23 @@ std::wstring BuildCommandLine(
 AgentCommandLineParseResult ParseAgentCommandLine(
     int argc,
     const wchar_t* const argv[]);
+
+/**
+ * Resolves explicit CLI fields over a strict UTF-8 or UTF-16LE INI document.
+ *
+ * @param argc Argument count including argv[0].
+ * @param argv Argument vector including argv[0].
+ * @param document INI bytes; empty when the file does not exist.
+ * @param path INI path for diagnostics and the local edit command.
+ * @return Selected and validated options, a help request, or a redacted diagnostic.
+ * @remarks This function performs no I/O. CLI authentication replaces both INI
+ * authentication fields. Unselected INI values still undergo syntax validation.
+ */
+AgentCommandLineParseResult ParseAgentConfiguration(
+    int argc,
+    const wchar_t* const argv[],
+    const std::vector<unsigned char>& document,
+    const std::wstring& path);
 
 }  // namespace agent_rover
 

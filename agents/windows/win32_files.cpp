@@ -539,22 +539,4 @@ bool RenamePath(
   return true;
 }
 
-bool MakeTempDirectory(
-    const std::string& prefix,
-    std::string* path,
-    OperationError* error) {
-  for (int index = 0; index < 1000; index += 1) {
-    const std::string candidate = prefix + std::to_string(index);
-    if (PathExists(candidate)) {
-      continue;
-    }
-    if (MakeDirectory(candidate, true, error)) {
-      *path = candidate;
-      return true;
-    }
-  }
-  *error = "Unable to create temporary directory.";
-  return false;
-}
-
 }  // namespace agent_rover

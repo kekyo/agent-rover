@@ -29,5 +29,11 @@ void SetAgentGuiStatus(const AgentGuiHandle& gui, const std::string& status);
 /** Configures the log-directory menu action.
  * @param gui Viewer. @param open Nonblocking callback opening the directory. */
 void SetAgentGuiOpenLogs(const AgentGuiHandle& gui, std::function<void()> open);
+/** Configures the INI menu action.
+ * @param gui Viewer. @param open Nonblocking callback opening the selected INI. */
+void SetAgentGuiOpenConfig(const AgentGuiHandle& gui, std::function<void()> open);
+/** Displays a local action failure; the automatic dispatcher keeps serving requests.
+ * @param gui Viewer. @param error Human-readable message without credentials. */
+void ShowAgentGuiError(const AgentGuiHandle& gui, const std::wstring& error);
 }  // namespace agent_rover
 #endif

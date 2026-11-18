@@ -1,0 +1,172 @@
+{
+  "0.1.0": {
+    "digest": "sha256:86e0a5698825b9177ba693c37927dd7b33957431840d0afcd180dceb88f939b2",
+    "repository": "kekyo/agent-rover",
+    "version": "0.1.0",
+    "gitCommit": "1634a65a294310696bdbabd09d6dee47a870b79a",
+    "updateProtocol": 0,
+    "binaries": {
+      "amd64": {
+        "bytes": 311296,
+        "sha256": "68006f86427594df56accf28fd14a03b34dbeb42481fc6008bbd0b29d3fee6f2"
+      },
+      "i686": {
+        "bytes": 387584,
+        "sha256": "7bf3030c8ab1f99e5735a35be4bf5fa83a5a8c4b09700b260d45b8133120e6e5"
+      }
+    }
+  },
+  "0.2.0": {
+    "digest": "sha256:9e3ff0d7668512f3c1f5407fb76f6754bff120ca03cbb87aae7dbbddd0347919",
+    "repository": "kekyo/agent-rover",
+    "version": "0.2.0",
+    "gitCommit": "f9cf7391633fc63891d8753170919c390a4ba7b2",
+    "updateProtocol": 0,
+    "binaries": {
+      "amd64": {
+        "bytes": 330240,
+        "sha256": "e7e3f1dc07e68f26f61f881aa13e93d9854631bb228e8853fa5f6bf73f8ac483"
+      },
+      "i686": {
+        "bytes": 407040,
+        "sha256": "f0dc4e8d9bb90aa4d234e7e10708a09e03ef3328ade134626d1340c524371adc"
+      }
+    }
+  },
+  "0.3.0": {
+    "digest": "sha256:a13d79352243ae1ed317e5531186207f063896b1dad83ef1fffa314fee1d97eb",
+    "repository": "kekyo/agent-rover",
+    "version": "0.3.0",
+    "gitCommit": "e2587ce0713582ad780269435873d9a81744801d",
+    "updateProtocol": 0,
+    "binaries": {
+      "amd64": {
+        "bytes": 330240,
+        "sha256": "0450c659530d687c2310a3bd64ab19afeb2c84ebd16eff2404db4e26bd0e5dc6"
+      },
+      "i686": {
+        "bytes": 407040,
+        "sha256": "9ffaa2736ace61cdedf4af7e07a822b188bee235b7cfd0e8165d65afc4f1f245"
+      }
+    }
+  },
+  "0.4.0": {
+    "digest": "sha256:5c8dc8b4f288809edc60a70aacf58b9036eafade1cb31a674298265b3583df54",
+    "repository": "kekyo/agent-rover",
+    "version": "0.4.0",
+    "gitCommit": "b89554e70c48094f06d6775e96a3b3ac940e12c3",
+    "updateProtocol": 0,
+    "binaries": {
+      "amd64": {
+        "bytes": 362496,
+        "sha256": "d4053e0cecfe9bb77a9d29a961a6df8d49b12e330447f8360839095b4f1b0573"
+      },
+      "i686": {
+        "bytes": 439296,
+        "sha256": "3dc7dd6bc995e8deb3fe174f049c14ac2cf0573cfc7052b3179bee49c3901108"
+      }
+    }
+  },
+  "0.5.0": {
+    "digest": "sha256:41d4e0ddefb67221ea0319a664c65245f0316bb3eb7a8dcc5f51da82a6ef8459",
+    "repository": "kekyo/agent-rover",
+    "version": "0.5.0",
+    "gitCommit": "579cde5b39120c72bafcab6713a8e7f65c14aa16",
+    "updateProtocol": 0,
+    "binaries": {
+      "amd64": {
+        "bytes": 385536,
+        "sha256": "726c8fea6ffffa6d8fa64938370f24f72e28740de1ee7fd861a7f05840ebc04d"
+      },
+      "i686": {
+        "bytes": 457728,
+        "sha256": "b71907dbff47598b4531f61ce73181f86efa32ebd6d91d423e4f0f5f10567ea9"
+      }
+    }
+  },
+  "0.6.0": {
+    "digest": "sha256:bd493cd3a7a9f05f36214b36842498895c53a4947fdf28e21f17b07e0191649b",
+    "repository": "kekyo/agent-rover",
+    "version": "0.6.0",
+    "gitCommit": "c7cc4e65cb9125796a88089011b670243e71f79c",
+    "updateProtocol": 0,
+    "binaries": {
+      "amd64": {
+        "bytes": 1418752,
+        "sha256": "fb9ea5f723762ceb505f4dccb6cf70aae909b8febcaee99640244a22d8ee5d04"
+      },
+      "i686": {
+        "bytes": 1589248,
+        "sha256": "955686fdc01682a2cbd735574f3d90cc59708bec078cdddf7950cb05336a9048"
+      }
+    }
+  },
+  "0.7.0": {
+    "digest": "sha256:69d286694de799cdd1cc58d4f20f81d962bdc50cd9fc15ae6d7976f0f15071d9",
+    "repository": "kekyo/agent-rover",
+    "version": "0.7.0",
+    "gitCommit": "7b12bfdc9d3bb6b626fc4e610706987510c4b385",
+    "updateProtocol": 0,
+    "binaries": {
+      "amd64": {
+        "bytes": 1490944,
+        "sha256": "839de84bb822ed419051f52819e5c4acdcb61866f7e6d2f15350fc48cd44a5db"
+      },
+      "i686": {
+        "bytes": 1667584,
+        "sha256": "6a959c7b17584d6a0328deecd00344d49edfa678bcc4e26dffd85bf67ec50ce1"
+      }
+    }
+  },
+  "0.8.0": {
+    "digest": "sha256:dcd1efb212ca9abe98fb4f95a4b0ea39a717ae6608d7ede7a4eb1fe04499b775",
+    "repository": "kekyo/agent-rover",
+    "version": "0.8.0",
+    "gitCommit": "ba19585e46d98a78e4e35bb85fc4f500590679c7",
+    "updateProtocol": 0,
+    "binaries": {
+      "amd64": {
+        "bytes": 1493504,
+        "sha256": "e54dbfdf56f8b3733f8c1780f6222c98dfbf7b8e317a49ad024cc4ffcb6b4799"
+      },
+      "i686": {
+        "bytes": 1671168,
+        "sha256": "015265547b635941db8e53bd16c914dfd8fe1df3bfd5ffede9758b77758e628b"
+      }
+    }
+  },
+  "0.9.0": {
+    "digest": "sha256:afd8ed0802e84a9ffb4c5ff6600dd11326f68b67dff3bb017822a938026921ba",
+    "repository": "kekyo/agent-rover",
+    "version": "0.9.0",
+    "gitCommit": "10eadbb40487acc82dc3c2f1dfa289bd6cf176e0",
+    "updateProtocol": 0,
+    "binaries": {
+      "amd64": {
+        "bytes": 1624064,
+        "sha256": "e8d3601780845664b037edb9985050edc249a3b8f22a1fe75018d213311cdb02"
+      },
+      "i686": {
+        "bytes": 1801216,
+        "sha256": "6f24d9ddb306331ee0028ec8b269217798063d8029995be5be3a7d4719ee20ee"
+      }
+    }
+  },
+  "0.10.0": {
+    "digest": "sha256:bb46218713141c410c69a8b4c67294a6e704a437a6b10f0568821ce36e819d9e",
+    "repository": "kekyo/agent-rover",
+    "version": "0.10.0",
+    "gitCommit": "79f99153973a4ee64426fa8abed9b253cff226be",
+    "updateProtocol": 0,
+    "binaries": {
+      "amd64": {
+        "bytes": 1624064,
+        "sha256": "7b78a44372c620390978dbcff9b5f662a583b5296d11163f5af0a94c3e831e29"
+      },
+      "i686": {
+        "bytes": 1801216,
+        "sha256": "f3167898bea4b5fc80abdc4642ecc4f96e3aff0a99352ce2df8a04ce65cd9eb0"
+      }
+    }
+  }
+}

@@ -13,7 +13,7 @@ schema unless the driver is extended.
 
 | Name | Value | Source |
 | --- | --- | --- |
-| JSON protocol version | `2026-09-09.1` | `protocolVersion` / `kProtocolVersion` |
+| JSON protocol version | `2026-11-17.2` | `protocolVersion` / `kProtocolVersion` |
 | TCP frame version | `2` | `tcpFrameVersion` / `kTcpFrameVersion` |
 | TCP transport capability | `transport.tcp-frame-v1` | `tcpFrameCapabilityId` / `kTcpFrameCapabilityId` |
 | Default frame payload limit | `16 * 1024 * 1024` bytes | driver and native agent |
@@ -21,7 +21,7 @@ schema unless the driver is extended.
 | Binary transfer chunk size used by driver and native agent | `64 * 1024` bytes | implementation detail, peers must accept other positive chunk sizes |
 
 The driver rejects the connection during the ready handshake when the reported
-JSON protocol version is not exactly `2026-09-09.1`.
+JSON protocol version is not exactly `2026-11-17.2`.
 
 ## Connection Lifecycle
 
@@ -275,7 +275,7 @@ Immediately after authentication, the agent must send:
   "name": "agent.ready",
   "data": {
     "capabilities": {
-      "protocolVersion": "2026-09-09.1",
+      "protocolVersion": "2026-11-17.2",
       "platform": "windows",
       "features": [
         "capabilities",
@@ -310,6 +310,7 @@ Immediately after authentication, the agent must send:
         "file.remove",
         "file.rename",
         "file.mkdtemp",
+        "file.safeBaseDir",
         "process.kill",
         "process.killManaged",
         "process.list",
@@ -322,14 +323,14 @@ Immediately after authentication, the agent must send:
         "agent.native-windows"
       ]
     },
-    "protocolVersion": "2026-09-09.1"
+    "protocolVersion": "2026-11-17.2"
   }
 }
 ```
 
 The driver validates `data.capabilities`:
 
-- `protocolVersion` must be a string and must equal `2026-09-09.1`.
+- `protocolVersion` must be a string and must equal `2026-11-17.2`.
 - `platform` must be the string `windows`.
 - `features` must be an array of strings.
 
@@ -435,11 +436,26 @@ monitors; use individual work areas to choose a visible placement.
 
 ```json
 {
-  "protocolVersion": "2026-09-09.1",
+  "protocolVersion": "2026-11-17.2",
   "platform": "windows",
   "features": ["transport.tcp-frame-v1"]
 }
 ```
+
+Windows agents that publish build metadata include `agentVersion` (three decimal components), `gitCommit`, `architecture` (`i686` or `amd64`) and an opaque `agentInstanceId` for this server lifetime. These fields appear in both `agent.ready` and `agent.capabilities`. They are optional for legacy agents. The ordinary driver requires an exact test protocol version match. The CLI's update-only session negotiates the feature `agent.update.v1` across test protocol revisions.
+
+### Agent updates
+
+| Request | Parameters and result |
+| --- | --- |
+| `agent.update.inspect` | Returns the running EXE's lowercase SHA-256. A versionless CLI inspection needs only the ready event. |
+| `agent.update.prepare` | Accepts `updateId` (UUID), `sourceInstance`, `sourceSha256`, `version`, `architecture`, `sha256`, `bytes`, `updateProtocol` (0 or 1) and `authorization`. Returns null when the session has exclusive use for this transfer, or a recorded result for the same transaction. Repeating the same preparation on that session restarts the upload from its first chunk. Other active sessions or outstanding cleanup can produce `AGENT_BUSY`. |
+| `agent.update.apply` | Takes the prepared `updateId` and the completed binary `transferId`. The content type is `application/vnd.agent-rover.update`. The agent determines the destination from its own executable. |
+| `agent.update.status` | Takes `updateId` and returns the last matching record or null. A client recovering from response loss queries the originally selected endpoint. |
+
+The client verifies the exact ZIP using the size and SHA-256 from GitHub's release asset metadata. New ZIPs include `agent-update.json` with the repository, tag (`version`), commit, update protocol and per-CPU executable sizes and SHA-256 values. Public releases through 0.10.0 use a built-in catalog. For authenticated sessions the client binds the chosen digest to the existing connection token. The authorization value is unpadded base64url of HMAC-SHA-256 over the following UTF-8 fields joined by LF, with no trailing newline. The fields in order are `agent-rover/update/v1`, source instance, update ID, source SHA-256, target version, architecture, target SHA-256, decimal byte length and decimal update protocol. Unauthenticated updates use an empty authorization and require a locally known image. [GitHub release assets](https://docs.github.com/en/rest/releases/assets)
+
+After acceptance the temporary helper returns the final response on the existing connection. The record includes `updateId`, `sourceSha256`, `sha256`, `status`, `actualVersion` and `message`. A pending journal can report `applying`. Terminal states are `applied`, `restored` and `recovery-required`. The client reports `unconfirmed` when it cannot obtain a terminal record. The previous build and install registration are retained until the replacement's process owns the expected listener.
 
 ### Desktop
 
@@ -1309,13 +1325,29 @@ Params:
 
 Result: `null`.
 
+### `file.safeBaseDir`
+
+Params: omitted. Result:
+
+```json
+{
+  "path": "C:\\RoverWork"
+}
+```
+
+Returns the nonempty absolute workspace base selected at agent startup from CLI,
+INI, or the agent OS temporary directory. Available after authentication and
+`agent.ready`, this operation uses cached configuration and responds independently
+of a blocked operation worker. It neither creates a directory nor changes Defender
+exclusions. Restart the entire agent to apply INI changes.
+
 ### `file.mkdtemp`
 
 Params:
 
 ```json
 {
-  "prefix": "C:\\Temp\\agent-rover-"
+  "prefix": "case-"
 }
 ```
 
@@ -1323,9 +1355,22 @@ Result:
 
 ```json
 {
-  "path": "C:\\Temp\\agent-rover-abc123"
+  "path": "C:\\RoverWork\\case-abc123"
 }
 ```
+
+Omitting `prefix` uses `agent-rover-` under `file.safeBaseDir`. A name-only prefix
+also uses that base. An absolute Windows prefix appends a unique suffix at the
+specified location, including locations outside the suggested base. The parent
+directory must already exist. Empty strings, `.`, `..`, relative paths containing
+separators, drive-relative paths, and non-string values return `INVALID_ARGUMENT`.
+
+Creation is exclusive: an existing file or directory causes another candidate to
+be tried, up to a bounded limit. Other native failures and random-generation
+failures return `OPERATION_FAILED`. The agent never creates missing parents or
+substitutes another base. The caller owns the result and must remove it explicitly;
+disconnect and agent shutdown do not remove public workspaces. Capture-directory
+ownership and automatic cleanup remain separate.
 
 ### `file.read`
 
@@ -1436,7 +1481,7 @@ when no event log query is supplied.
 1. Listen on a TCP port and read/write 20-byte `TRVR` frames.
 2. Implement optional auth challenge/response, including the NUL byte in the
    HMAC message prefix.
-3. Send `agent.ready` with protocol version `2026-09-09.1`, platform `windows`,
+3. Send `agent.ready` with protocol version `2026-11-17.2`, platform `windows`,
    and a string feature array.
 4. Decode JSON request frames and return matching JSON response frames.
 5. Implement binary transfer chunk encode/decode, contiguous sequence
@@ -1479,6 +1524,17 @@ release and removal of its temporary directory both succeed.
 
 `process.managedRunning` takes `managedProcessId` and returns whether the Job
 contains active processes, including descendants whose parents have exited.
+`process.managedProcesses` takes the same argument and returns an array of
+running descendant snapshots in the `process.list` format, excluding the root.
+Membership comes from the retained Job, with each opened process handle checked
+before its state is read. Exited processes and recycled IDs outside the Job are
+omitted; enumeration, access and state-query failures return `OPERATION_FAILED`,
+not an empty successful result. The root uses its retained handle through
+`process.managedSnapshot`. These observations are not an atomic snapshot;
+`process.managedRunning` remains authoritative when enumeration is incomplete
+because processes are starting or exiting. The SDK does not supplement native
+membership with parent-PID or creation-time inference.
+
 `process.readCaptured` takes `managedProcessId` and `stream` (`stdout` or
 `stderr`) and returns a binary file-transfer reference. While the root runs it
 reads a snapshot using write sharing. After root exit it reports `busy` until

@@ -19,12 +19,13 @@ A multi-platform TypeScript test driver for GUI applications
 
 Few problems are as painful as automated testing for GUI applications on Windows and X11.
 agent-rover provides a driver interface for automated tests written in TypeScript in these environments.
+Its command-line client, `arctl`, lets you connect to an agent and run one-off tasks.
 
 > WIP: X11 agent
 
 ```mermaid
 flowchart LR
-  subgraph TestProject["Test project (Node.js / TypeScript)"]
+  subgraph TestProject["Test project (Node.js / TypeScript) or CLI"]
     TestCode["Test code, such as Vitest"]
     Driver["agent-rover API"]
     TestCode --> Driver
@@ -41,25 +42,16 @@ flowchart LR
   Driver <-->|custom TCP protocol / authentication handshake| Agent
 ```
 
-agent-rover provides small agent programs that can be used in Windows and X11 environments.
-By starting an agent on the target OS, you can remotely operate applications from a Node.js environment through a Jest-like testing interface.
-In other words, the operations that we humans perform against applications in a remote session over RDP can be done through an API.
+A small agent runs on the target OS and lets you control applications remotely from Node.js through a Jest-like testing interface.
 
-Register the endpoint and its token in `$HOME/.agent-rover` first.
-
-```ini
-[default]
-test-agent.example.com=<access-token>
-```
-
-With agent-rover, you can write test code like this:
+The API lets you perform the same actions you would carry out manually in a remote desktop (RDP) session.
 
 ```typescript
 import { writeFile } from 'node:fs/promises';
 
 import { connectRemoteAgent } from 'agent-rover';
 
-// Connect to the remote agent.
+// Connect to the default remote agent.
 const agent = await connectRemoteAgent();
 
 // Save a file in the remote environment.
@@ -91,8 +83,22 @@ await writeFile('capture.png', screenshot.image);
 await process.releaseAsync();
 ```
 
-In addition to observing and operating GUI applications themselves, agent-rover also includes APIs for operating the target GUI session.
-As shown in the example above, you can send and receive files and launch applications.
+The SDK can also transfer files and launch applications on the target machine.
+For one-off operations, run `arctl` on the driver machine.
+
+```bash
+# Upload a directory
+arctl put -r ./runtime 'C:\work\runtime'
+
+# Download a directory
+arctl get -r 'C:\work\results' ./results
+
+# Take a screenshot
+arctl screenshot ./screen.png
+
+# Record ten seconds of video
+arctl record ./screen.mp4 --seconds 10 --fps 30
+```
 
 ## Features
 
@@ -101,45 +107,49 @@ As shown in the example above, you can send and receive files and launch applica
   File operations, such as sending and receiving files, are also supported.
 - Capture the screen or an application window as a PNG image, or as an H.264
   MP4 video on a supported Windows agent.
-- Prebuilt agents are available for Windows (i686/amd64 targeting XP SP2 or later) and Linux X11 (i686/amd64/armv7l/arm64/riscv64).
+- Prebuilt Windows agents target Windows XP SP2 and later on i686 and amd64.
+  The Linux X11 agent is in development for i686, amd64, armv7l, arm64, and riscv64.
 - Agent communication uses a custom TCP protocol.
   Authentication uses a digest handshake, although the protocol messages themselves are not encrypted.
 - Image recognition assertions for exact or close matches, and OCR-based assertions.
 
 ---
 
-## Preparation
+## Usage
 
-Download the agent for the target platform from the [releases page](https://github.com/kekyo/agent-rover/releases/).
-The agent is very small and avoids runtime dependencies on other libraries as much as possible.
-After extracting the archive, you can run it as-is. No installation is required.
+Start the agent on the machine that hosts the GUI application. The test driver connects to it from a second machine.
 
-Start the Windows agent from your interactive desktop. It runs in the system tray.
+### Windows Agent Setup
 
-```cmd
-C:\> agent-amd64.exe
+Download the Windows installer or portable ZIP for the target machine from the [releases page](https://github.com/kekyo/agent-rover/releases/).
+
+| Distribution | Usage |
+| --- | --- |
+| `agent-rover-agent-win32-{version}-setup.exe` | Install for the current user, then launch `agent-rover` from the Programs menu. |
+| `agent-rover-agent-win32-{version}.zip` | Extract to a folder of your choice. Run `agent-amd64.exe` on 64-bit Windows or `agent-i686.exe` on 32-bit Windows. |
+
+You can also start the agent from the command line in your Windows desktop session.
+Once it starts, right-click its system tray icon to open the menu.
+
+![Windows agent system tray menu](./images/agent-menu.png)
+
+Double-click the tray icon or choose `Show logs` to open the log viewer.
+
+![Windows agent log viewer](./images/agent.png)
+
+The version banner, access token, and `Copy` button appear above the log list.
+Choose `Copy` and paste the token into `$HOME/.agent-rover` on the driver machine.
+In the following example, we register a token as the 'default' remote agent:
+
+```ini
+[default]
+test-agent.example.com=<access-token>
 ```
 
-By default, the agent accepts one driver connection at a time.
-While a driver is connected, later connections receive `AGENT_BUSY` and are closed.
-The agent remains busy during authentication and while stopping the previous
-connection's operations and owned applications after disconnection.
-When using a section, the driver advances to its next candidate. After all candidates
-fail, it waits ten seconds and retries, up to 360 additional rounds by default.
+> If you supply a token with `--unsafe-token` at startup or in the agent's configuration file, the viewer hides the token field and the `Copy` button.
 
-To retain the previous behavior of accepting multiple connections, start the
-agent with `--connection-mode multiple`. Use `--connection-mode single` to
-explicitly select the default.
-
-```cmd
-C:\> agent-amd64.exe --connection-mode multiple
-```
-
-Double-click the tray icon or choose “Show logs” to open the viewer.
-The version banner, token field and Copy button appear above the log list.
-Use Copy to register the token in `$HOME/.agent-rover` on the driver machine.
-When you supply a token with `--unsafe-token`, the token field and Copy button are hidden.
-Closing the viewer keeps the agent running; choose “Exit” from the tray to stop it.
+Closing the viewer keeps the agent running.
+Choose `Exit` from the tray menu to stop it.
 
 Logs include connection, authentication and process events, request IDs and
 methods, execution results, response transmission and elapsed time. Sequence
@@ -149,14 +159,15 @@ bodies, environment variables and clipboard contents are not copied to logs.
 The default TCP port is 39397. Open it in the OS firewall.
 Start the Windows agent from the user's interactive desktop. Running it as a Windows service is not supported.
 
-Then install agent-rover in your npm project:
+### Writing a Test Driver
+
+Install agent-rover in your test project.
 
 ```bash
 npm install -D agent-rover
 ```
 
-You can use any test framework.
-For example, with Vitest, you can write the following:
+You can use any test framework. This Vitest example checks for a visible Notepad window.
 
 ```typescript
 import { describe, expect, it } from 'vitest';
@@ -164,7 +175,7 @@ import { connectRemoteAgent } from 'agent-rover';
 
 describe('remote agent smoke test', () => {
   it('finds a running Notepad window', async () => {
-    // Connect to the remote agent.
+    // Connect using the [default] section of .agent-rover.
     const agent = await connectRemoteAgent();
 
     try {
@@ -185,12 +196,325 @@ describe('remote agent smoke test', () => {
 });
 ```
 
+For the operations available to test code, see the [test driver API reference](#reference).
+
+### Network Path Notes
+
+When your tests are finished, stop the agent as soon as possible.
+Although the agent uses digest authentication with an access token, if a third party succeeds in accessing it, they may be able to operate the system easily.
+
+Authentication uses hashed data, but agent operations after authentication are not encrypted.
+Be especially careful if you perform operations that would be problematic if leaked.
+
+The preferred setup is to run the agent inside a virtual machine placed on the same host.
+
+> The communication path uses TCP with a custom protocol, rather than HTTPS or a similar protocol, to reduce the agent's library dependencies as much as possible.
+> For example, the Windows agent targets Windows XP SP2 and later, which makes it possible to automate tests for older GUI applications.
+> Future improvements may address this limitation.
+
+---
+
+## Agent Configuration Details
+
+Use the agent's system tray menu on the target machine to edit its configuration and view its logs.
+
+### Log Management
+
+The resizable list shows the latest 1,000 records. Older records are saved as
+UTF-8 files in `%APPDATA%\agent-rover\logs`.
+
+Choose “Open log folder” from the tray to browse them.
+Normally, five files of up to 10 MiB each are retained.
+Active files belonging to other instances are preserved, so concurrent instances
+can exceed five files in total.
+
+The status area reports save failures and records that were dropped or whose
+persistence could not be confirmed.
+
+### Windows Agent Configuration And Startup
+
+Save agent startup settings in `$HOME/.agent-rover-agent.ini`.
+If `HOME` is empty or unset, the agent uses the current user's Windows profile.
+The usual path is `C:\Users\username\.agent-rover-agent.ini`.
+An explicit `HOME` must be an absolute path to an existing directory. The log viewer shows the actual INI path.
+
+> The SDK and `arctl` read connection settings from a separate file, `.agent-rover`, on the driver machine.
+
+Choose `Open config file` from the tray to edit the INI.
+If it does not exist, the agent creates a commented template and opens it in the associated application.
+The template does not copy current command-line values or authentication tokens.
+If no application is associated, open the reported path in Notepad.
+After saving, choose `Exit` from the tray and start the agent again to apply changes. Existing connections and automatic recovery retain the startup configuration.
+
+```ini
+[agent]
+host=0.0.0.0
+port=39397
+connection-mode=single
+max-transfer-size=512
+no-auth=false
+; unsafe-token=replace-with-your-own-token
+; safe-base-dir=C:\RoverWork
+```
+
+`safe-base-dir` is the suggested directory for test files. Create the folder before configuring it.
+The SDK exposes it through `agent.files.safeBaseDir()`, and `agent.files.mkdtemp('case-')` creates a new workspace underneath it.
+
+| INI key | Startup option | Default |
+| --- | --- | --- |
+| `host` | `--host` | `0.0.0.0` |
+| `port` | `--port` | `39397` |
+| `connection-mode` | `--connection-mode` | `single`; `multiple` is also supported. |
+| `max-transfer-size` | `--max-transfer-size` | 512 MiB per transfer |
+| `no-auth` | `--no-auth`, `-n` | `false`, enabling authentication. |
+| `unsafe-token` | `--unsafe-token` | Generated at startup when authentication is enabled. |
+| `safe-base-dir` | `--safe-base-dir` | The remote OS's standard temporary directory |
+
+Ordinary settings use command-line values first, then INI values, then defaults.
+An explicit authentication option replaces both `no-auth` and `unsafe-token` from the INI.
+Combining `--no-auth` with `--unsafe-token`, or combining INI `no-auth=true` with a nonempty `unsafe-token`, is an error.
+With `no-auth=false` and an absent or empty token, the agent generates a new token without writing it to the INI.
+
+Save the INI as UTF-8 or UTF-16LE with a BOM; new templates use the latter.
+Use the lowercase section and key names above. Duplicate or unknown names are errors.
+Blank lines and comment lines beginning with `;` or `#` are accepted. Surrounding whitespace and a pair of enclosing double quotes are removed from values.
+
+There are no inline comments, backslash escapes, or expansions of `%TEMP%`, `~`, or similar strings. Write actual absolute paths.
+A missing INI is allowed; read or syntax errors produce a diagnostic and prevent startup. `--help` remains available with an invalid INI.
+
+`Start at sign-in` in the tray toggles startup for the current user.
+A checkmark means the current executable is registered. If another copy is registered, its path is shown; enabling startup replaces it with the current copy.
+
+The registration contains only the quoted absolute executable path, without arguments or tokens.
+Store settings needed at the next launch in the INI. Without a fixed token, a new token is generated on each launch.
+After moving a ZIP installation, enable startup again from its new location. Paths producing a command longer than 260 characters cannot be registered.
+
+Windows startup settings or policies may disable or delay execution. See [Windows Run key behavior](https://learn.microsoft.com/en-us/windows/win32/setupapi/run-and-runonce-registry-keys).
+
+### Microsoft Defender Exclusions
+
+Real-time antivirus scans can interfere with files used during a test. The agent can suggest a dedicated folder for the test driver to use.
+If your tests need a Microsoft Defender exclusion, create a folder for those tests.
+
+On Windows 11, open Windows Security → Virus & threat protection → Manage settings → Add or remove exclusions, then select the folder.
+For PowerShell, open an elevated session and replace the example path with your existing dedicated folder.
+Use `Add-MpPreference` to preserve existing exclusions.
+[Microsoft's configuration instructions](https://learn.microsoft.com/en-us/defender-endpoint/microsoft-defender-antivirus-exclusions-configure)
+
+```powershell
+Add-MpPreference -ExclusionPath 'C:\RoverWork'
+```
+
+> An exclusion changes which files Defender scans under the selected folder. Limit it to the dedicated test folder. An entire drive or the system temporary directory is too broad.
+
+Set `safe-base-dir` in the agent's INI file to the absolute path of that folder. For example, if the folder is `C:\RoverWork`, use the following setting.
+
+```ini
+[agent]
+safe-base-dir=C:\RoverWork
+```
+
+When a folder is no longer needed, select and remove it in the same settings screen or run the following in elevated PowerShell.
+Changing the INI or uninstalling the agent does not remove exclusions.
+[Remove-MpPreference](https://learn.microsoft.com/en-us/powershell/module/defender/remove-mppreference)
+
+```powershell
+Remove-MpPreference -ExclusionPath 'C:\RoverWork'
+```
+
+The public WMI API also accepts `ExclusionPath` through `MSFT_MpPreference.Add`, with a minimum client OS of Windows 8.1. It does not support XP.
+[WMI API requirements and parameters](https://learn.microsoft.com/en-us/previous-versions/windows/desktop/defender/add-msft-mppreference)
+If organizational policy restricts changing or viewing exclusions, ask your administrator to configure them.
+
+### Process Supervision And Management (Advanced topic)
+
+An independent supervisor starts with the agent. If the host stops making progress
+for 15 seconds or exits unexpectedly, the supervisor confirms termination and
+restarts it. Startup has a 30-second allowance.
+
+Automatic host restarts retain the authentication token, port, transfer limit
+and other startup settings.
+Reconnect the driver to continue; requests from the disconnected session are
+never replayed.
+
+Starts are limited to three in any 60-second period, with delayed retries after
+repeated failures. Choosing “Exit” stops both the host and its supervisor.
+
+TCP disconnects stop the session's work and reclaim managed application trees
+that are configured to terminate. Once termination is confirmed, other connections
+can operate even if capture-file deletion fails; file cleanup retries independently.
+
+Applications with `killTreeOnRelease: false` keep running. Their captured output
+is retained while it is still in use. Pending recovery survives automatic host restarts.
+Logs record restart reasons and the failing cleanup stage and path, including
+directories that could not be removed at shutdown.
+
+A replacement host waits until the old processes have been confirmed stopped.
+Automatic recovery does not cover an OS-wide failure or termination of the
+supervisor itself.
+
+### Agent Limits (Advanced topic)
+
+Driver requests have a default deadline of 30 seconds. An expired request closes
+the entire connection and cancels its queued operations.
+Reconnect to continue. Side effects already submitted to the target application
+cannot be undone.
+
+Windows operation budgets are 30 seconds for windows, input and clipboard, and
+normally 120 seconds for other operations.
+Recording is limited to ten minutes; result retrieval allows the recording
+duration plus 120 seconds.
+
+Windows accepts one connection by default. With `connection-mode=multiple` in the agent INI,
+it accepts up to 16 connections and reserves operation workers for up to
+eight connections. Capture directories are limited to 64 connections, including
+active and pending recovery.
+At capacity, new captures and recordings cannot start; operations that do not
+require captured output remain available.
+
+Whole-file reads and the combined incoming transfer data retained per connection
+are limited to 512 MiB by default.
+Set `max-transfer-size` in the agent INI to a positive integer in MiB, for example
+`max-transfer-size=128`. The same limit applies when retrieving captured stdout
+or stderr.
+
+Each Windows connection can own up to 64 managed processes. Split larger workloads.
+
+---
+
+## Test Driver Configuration Details
+
+On the driver machine, the TypeScript SDK and the `arctl` command-line client share the same connection settings.
+
+### Manual Operations With arctl
+
+`arctl` is a client for manual debugging, included in the agent-rover package.
+It runs on Node.js 18 or later. Each invocation connects, performs one operation,
+and disconnects, leaving launched applications, transferred files, and saved
+captures in place. Start the Windows agent on the target using the steps above.
+The Windows agent on the target does not require Node.js.
+
+Install globally to run `arctl` directly:
+
+```bash
+npm install -g agent-rover
+arctl --help
+```
+
+For a project installation with `npm install -D agent-rover`, use `npx arctl`.
+Help such as `arctl --help` and `arctl record --help`, and `arctl --version`,
+work without a connection.
+
+#### Connection And Examples
+
+These examples omit `--section`, so they use the `default` section. They assume
+you have registered the agent's endpoint in that section of `$HOME/.agent-rover`.
+
+```bash
+arctl put ./app.exe 'C:\work\app.exe'
+arctl launch --cwd 'C:\work' -- 'C:\work\app.exe' --debug
+arctl get 'C:\work\result.log' ./result.log
+arctl put -r ./runtime 'C:\work\runtime'
+arctl get -r 'C:\work\results' ./results
+
+arctl windows
+arctl screenshot ./screen.png
+arctl record ./screen.mp4 --seconds 10 --fps 30
+arctl screenshot ./window.png --window 0x12345
+arctl record ./window.mp4 --seconds 10 --window 0x12345
+```
+
+Replace the example window ID with a value from `arctl windows`.
+PowerShell uses the same configuration file. Each invocation selects a server
+again; use a section containing just one endpoint when multiple commands must
+operate on the same machine.
+
+| Common option | Default and purpose |
+| :-- | :-- |
+| `--section <NAME>` | Section in `.agent-rover`; defaults to `default`. |
+| `--timeout <SECONDS>` | Deadline per connection attempt and individual request; defaults to 30 seconds. |
+| `--no-retry` | Try every candidate once, then exit if none connects. |
+| `--retry-count <COUNT>` | Maximum additional rounds after the first; defaults to `360`. `0` allows one round only. |
+| `--retry-interval <SECONDS>` | Wait after every candidate has failed; defaults to `10` seconds. Accepts 0 to 2147483.647 seconds in millisecond increments. |
+| `--json` | Prints success as `{"command":"...","result":...}`. |
+
+Common options can precede or follow the subcommand.
+For host and token arguments, see [Explicit Host Connections (Optional)](#explicit-host-connections-optional).
+
+The request deadline excludes the time spent recording. Specify `--timeout` in seconds.
+The supported range follows the [Node.js timer limits](https://nodejs.org/docs/latest-v24.x/api/timers.html#settimeoutcallback-delay-args).
+
+When using a section, each round shuffles the candidates and tries them in sequence. Busy agents,
+authentication failures, and transport failures advance to the next candidate
+without a retry delay. Waiting occurs only after every candidate has failed.
+The default limit is 361 rounds, including the first.
+For example, `--retry-count 12 --retry-interval 5` waits five seconds after a
+failed round and starts up to 12 additional rounds.
+`--no-retry` overrides the count and interval settings.
+
+#### Command Behavior
+
+| Command | Behavior and options |
+| :-- | :-- |
+| `launch [options] -- <command> [args...]` | Starts an application, prints its PID and process name, and exits. Supports `--cwd`, repeatable `--env KEY=VALUE`, and remote log paths with `--stdout` and `--stderr`. |
+| `put [-r] <local> <remote>` | Copies from local to remote. |
+| `get [-r] <remote> <local>` | Copies from remote to local. |
+| `windows` | Lists IDs, PIDs, process names, and titles of visible top-level windows. |
+| `screenshot <output.png> [--window ID]` | Saves a PNG locally. |
+| `record <output.mp4> --seconds N [--window ID] [--fps N]` | Saves an H.264 MP4 locally. Duration must be greater than 0 and at most 600 seconds, in millisecond increments. FPS is an integer from 1 to 240, defaulting to 60. |
+
+`launch` requires `--` before the executable. Everything after it, including
+options such as `--help`, is passed to the child process. Environment values
+can be empty or contain `=`; the last value wins for a repeated name.
+The CLI exits when startup succeeds, without waiting for application readiness
+or completion. Explicitly launch `cmd.exe` or `powershell.exe` when you need shell syntax.
+Logs are not streamed to the client; retrieve saved logs with `get`.
+
+For a single file, specify the full destination filename. Existing files are
+overwritten and parent directories are created. With `-r`, directory contents,
+including empty directories, are copied into the exact destination without
+appending the source directory name. Destination-only entries remain.
+A file/directory type conflict fails without deleting the existing item.
+Attributes, links, differential synchronization, and transfer resumption are
+not supported. Remote paths are resolved on the target; absolute paths are recommended.
+
+For video recording, omitting `--window` captures all monitors of the current desktop. There is no
+special ID for the whole screen. Window IDs become invalid when their windows
+close and can be reused. Unknown IDs fail instead of selecting the whole screen.
+
+Captures contain the pixels currently visible, including overlapping windows.
+The CLI does not activate or restore windows, or wait for drawing to settle.
+
+The CLI saves images and videos locally, creates parent directories as needed, and requires a new output filename.
+Recording uses quality 90, follows the window's
+position, and uses its initial size. It waits for capture, transfer, and saving
+to complete. The command reports an error if the agent lacks recording support or encoding fails.
+
+#### Results And Interruption
+
+Successful results go to stdout. Errors go to stderr, including when you use `--json`.
+
+Before each retry wait, stdout shows the section, each endpoint failure,
+the delay in seconds, and the retry count. Explicit connections show the chosen host and port.
+With `--json`, these notices go to stderr and stdout contains only the result JSON.
+
+Exit codes are `0` for success, `1` for connection or operation failure,
+`2` for invalid arguments or configuration, and `130` for Ctrl+C.
+If a disconnect or deadline leaves the outcome unknown, the CLI reports that
+uncertainty and does not retry the operation automatically.
+
+Applications already started, files already transferred, and completed captures
+remain after interruption or failure. Restoring a partially written file is not
+guaranteed. Interrupting a recording does not wait for its remaining duration,
+but a playable partial MP4 is not guaranteed.
+
 ### Connection Configuration
 
 The SDK and `arctl` prefer `.agent-rover` in the working directory at invocation.
 If that file or the requested section is absent, they look for the same section
 in your home directory's `.agent-rover`: `$HOME/.agent-rover` on Linux, usually
 `%USERPROFILE%\.agent-rover` on Windows.
+
 Register shared test machines in the home file and place a configuration in the
 working directory when particular tests need their own machines.
 The working directory is `process.cwd()` when the connection starts, rather than
@@ -210,11 +534,14 @@ baz.hoge.com:12345=<baz-token>
 ```
 
 Select a section with `connectRemoteAgent({ section: 'windows' })` or
-`arctl --section windows windows`. The default is `default`.
+`arctl --section windows windows`.
+
+Omit the section name to use `default`.
 Section names are case-sensitive and literal, including dots. Sections do not
 inherit entries from `default`.
 For example, if the working directory's file contains only `windows`, that
 section comes from the local file while `default` is looked up in the home file.
+
 The first matching section supplies the entire candidate list; entries from
 different files are not merged. If every candidate is busy or otherwise fails,
 retries keep using that list. Connection failures do not switch to the home file.
@@ -234,15 +561,11 @@ BOM and CRLF/LF line endings are supported.
 Entries before a section, repeated section names, and duplicate endpoints in a
 section are errors. Endpoint comparison ignores hostname case and omission of
 the default port. An empty local file has no sections, so the home file is checked.
+
 An explicitly empty selected section, syntax error, or read error fails
 immediately before connecting. If neither file provides the requested section,
 the error identifies its name and the searched paths. Syntax errors include the
 file name and line number, without echoing configuration lines or tokens.
-
-Run the repository's Notepad sample from its root with
-`AGENT_ROVER_SAMPLE_SECTION=windows npm run sample:notepad`.
-This variable selects a configuration section. Without it, the sample is skipped
-when running the full test suite.
 
 ### Explicit Host Connections (Optional)
 
@@ -296,211 +619,26 @@ Use the SDK's `retry` or the CLI's `--retry-count` and `--retry-interval` to cha
 these settings. Disable retries with `retry: false` or `--no-retry`.
 Authentication and transport failures return immediately.
 
-### Network Path Notes
+### Updating the Windows agent
 
-When your tests are finished, stop the agent as soon as possible.
-Although the agent uses digest authentication with an access token, if a third party succeeds in accessing it, they may be able to operate the system easily.
-
-Authentication uses hashed data, but agent operations after authentication are not encrypted.
-Be especially careful if you perform operations that would be problematic if leaked.
-
-The preferred setup is to run the agent inside a virtual machine placed on the same host.
-
-> The communication path uses TCP with a custom protocol, rather than HTTPS or a similar protocol, to reduce the agent's library dependencies as much as possible.
-> For example, the Windows agent targets Windows XP SP2 and later, which makes it possible to automate tests for older GUI applications.
-> Future improvements may address this limitation.
-
----
-
-### Agent Limits (Advanced topic)
-
-Driver requests have a default deadline of 30 seconds. An expired request closes
-the entire connection and cancels its queued operations.
-Reconnect to continue. Side effects already submitted to the target application
-cannot be undone.
-
-Windows operation budgets are 30 seconds for windows, input and clipboard, and
-normally 120 seconds for other operations.
-Recording is limited to ten minutes; result retrieval allows the recording
-duration plus 120 seconds.
-
-Windows accepts one connection by default. With `--connection-mode multiple`,
-it accepts up to 16 connections and reserves operation workers for up to
-eight connections. Capture directories are limited to 64 connections, including
-active and pending recovery.
-At capacity, new captures and recordings cannot start; operations that do not
-require captured output remain available.
-
-Whole-file reads and the combined incoming transfer data retained per connection
-are limited to 512 MiB by default.
-Set `--max-transfer-size 128` at agent startup to change the limit to a positive
-integer number of MiB. The same limit applies when retrieving captured stdout
-or stderr.
-
-Each Windows connection can own up to 64 managed processes. Split larger workloads.
-
-### Process Supervision And Management (Advanced topic)
-
-An independent supervisor starts with the agent. If the host stops making progress
-for 15 seconds or exits unexpectedly, the supervisor confirms termination and
-restarts it. Startup has a 30-second allowance.
-
-Automatic host restarts retain the authentication token, port, transfer limit
-and other startup settings.
-Reconnect the driver to continue; requests from the disconnected session are
-never replayed.
-
-Starts are limited to three in any 60-second period, with delayed retries after
-repeated failures. Choosing “Exit” stops both the host and its supervisor.
-
-TCP disconnects stop the session's work and reclaim managed application trees
-that are configured to terminate. Once termination is confirmed, other connections
-can operate even if capture-file deletion fails; file cleanup retries independently.
-
-Applications with `killTreeOnRelease: false` keep running. Their captured output
-is retained while it is still in use. Pending recovery survives automatic host restarts.
-Logs record restart reasons and the failing cleanup stage and path, including
-directories that could not be removed at shutdown.
-
-A replacement host waits until the old processes have been confirmed stopped.
-Automatic recovery does not cover an OS-wide failure or termination of the
-supervisor itself.
-
-### Log Management (Advanced topic)
-
-The resizable list shows the latest 1,000 records. Older records are saved as
-UTF-8 files in `%APPDATA%\agent-rover\logs`.
-
-Choose “Open log folder” from the tray to browse them.
-Normally, five files of up to 10 MiB each are retained.
-Active files belonging to other instances are preserved, so concurrent instances
-can exceed five files in total.
-
-The status area reports save failures and records that were dropped or whose
-persistence could not be confirmed.
-
----
-
-## Manual Operations With arctl
-
-`arctl` is a client for manual debugging, included in the agent-rover package.
-It runs on Node.js 20 or later. Each invocation connects, performs one operation,
-and disconnects, leaving launched applications, transferred files, and saved
-captures in place. Start the Windows agent on the target using the steps above.
-The Windows agent on the target does not require Node.js.
-
-Install globally to run `arctl` directly:
+Run these commands on the test driver's machine. The first reports the selected endpoint, running version, commit, executable architecture and update support. The second installs the exact release on one member of the section. Use a section with one endpoint when successive commands must reach the same PC.
 
 ```bash
-npm install -g agent-rover
-arctl --help
+arctl --section windows-xp update
+arctl --section windows-xp update 0.10.0
 ```
 
-For a project installation with `npm install -D agent-rover`, use `npx arctl`.
-Help such as `arctl --help` and `arctl record --help`, and `arctl --version`,
-work without a connection.
+The client downloads the ZIP over HTTPS, verifies GitHub's SHA-256 and extracts the executable for the running architecture. Windows verifies the executable's SHA-256. An identical build keeps running. With authentication disabled, the agent can accept releases in its built-in legacy hash catalog or its current image. Use token authentication to install new builds. [Windows agent releases](https://github.com/kekyo/agent-rover/releases)
 
-### Connection And Examples
-
-These examples use Bash. Register the endpoint in the `default` section of
-`$HOME/.agent-rover` before running them.
+Releases 0.1.0 through 0.10.0 require manual installation for the next update. Enter `y` to confirm or press Enter to cancel. In automation, supply explicit consent as shown below. With `--json`, progress and warnings go to stderr.
 
 ```bash
-arctl put ./app.exe 'C:\work\app.exe'
-arctl launch --cwd 'C:\work' -- 'C:\work\app.exe' --debug
-arctl get 'C:\work\result.log' ./result.log
-arctl put -r ./runtime 'C:\work\runtime'
-arctl get -r 'C:\work\results' ./results
-
-arctl windows
-arctl screenshot ./screen.png
-arctl record ./screen.mp4 --seconds 10 --fps 30
-arctl screenshot ./window.png --window 0x12345
-arctl record ./window.mp4 --seconds 10 --window 0x12345
+arctl --section windows-xp --json update 0.10.0 --allow-legacy-downgrade
 ```
 
-Replace the example window ID with a value from `arctl windows`.
-PowerShell uses the same configuration file. Each invocation selects a server
-again; use a section containing just one endpoint when multiple commands must
-operate on the same machine.
-
-| Common option | Default and purpose |
-| :-- | :-- |
-| `--section <NAME>` | Section in `.agent-rover`; defaults to `default`. |
-| `--timeout <SECONDS>` | Deadline per connection attempt and individual request; defaults to 30 seconds. |
-| `--no-retry` | Try every candidate once, then exit if none connects. |
-| `--retry-count <COUNT>` | Maximum additional rounds after the first; defaults to `360`. `0` allows one round only. |
-| `--retry-interval <SECONDS>` | Wait after every candidate has failed; defaults to `10` seconds. Accepts 0 to 2147483.647 seconds in millisecond increments. |
-| `--json` | Prints success as `{"command":"...","result":...}`. |
-
-Common options can precede or follow the subcommand.
-For host and token arguments, see [Explicit Host Connections (Optional)](#explicit-host-connections-optional).
-The recording duration itself is separate from the request deadline.
-`--timeout` accepts 0.001 to 2147483.647 seconds, matching the
-[Node.js timer range](https://nodejs.org/docs/latest-v24.x/api/timers.html#settimeoutcallback-delay-args).
-
-When using a section, each round shuffles the candidates and tries them in sequence. Busy agents,
-authentication failures, and transport failures advance to the next candidate
-without a retry delay. Waiting occurs only after every candidate has failed.
-The default limit is 361 rounds, including the first.
-For example, `--retry-count 12 --retry-interval 5` waits five seconds after a
-failed round and starts up to 12 additional rounds.
-`--no-retry` overrides the count and interval settings.
-
-### Command Behavior
-
-| Command | Behavior and options |
-| :-- | :-- |
-| `launch [options] -- <command> [args...]` | Starts an application, prints its PID and process name, and exits. Supports `--cwd`, repeatable `--env KEY=VALUE`, and remote log paths with `--stdout` and `--stderr`. |
-| `put [-r] <local> <remote>` | Copies from local to remote. |
-| `get [-r] <remote> <local>` | Copies from remote to local. |
-| `windows` | Lists IDs, PIDs, process names, and titles of visible top-level windows. |
-| `screenshot <output.png> [--window ID]` | Saves a PNG locally. |
-| `record <output.mp4> --seconds N [--window ID] [--fps N]` | Saves an H.264 MP4 locally. Duration must be greater than 0 and at most 600 seconds, in millisecond increments. FPS is an integer from 1 to 240, defaulting to 60. |
-
-`launch` requires `--` before the executable. Everything after it, including
-options such as `--help`, is passed to the child process. Environment values
-can be empty or contain `=`; the last value wins for a repeated name.
-The CLI exits when startup succeeds, without waiting for application readiness
-or completion. Explicitly launch `cmd.exe` or `powershell.exe` when you need shell syntax.
-Logs are not streamed to the client; retrieve saved logs with `get`.
-
-For a single file, specify the full destination filename. Existing files are
-overwritten and parent directories are created. With `-r`, directory contents,
-including empty directories, are copied into the exact destination without
-appending the source directory name. Destination-only entries remain.
-A file/directory type conflict fails without deleting the existing item.
-Attributes, links, differential synchronization, and transfer resumption are
-not supported. Remote paths are resolved on the target; absolute paths are recommended.
-
-Omitting `--window` captures all monitors of the current desktop. There is no
-special ID for the whole screen. Window IDs become invalid when their windows
-close and can be reused. Unknown IDs fail instead of selecting the whole screen.
-Captures contain the pixels currently visible, including overlapping windows.
-The CLI does not activate or restore windows, or wait for drawing to settle.
-Capture output paths are local; parent directories are created, and existing
-files are never overwritten. Recording uses quality 90, follows the window's
-position, and uses its initial size. It waits for capture, transfer, and saving
-to complete. Unsupported recording and encoding failures are reported as errors.
-
-### Results And Interruption
-
-Success results go to stdout and errors to stderr, including with `--json`.
-Before each retry wait, stdout shows the section, each endpoint failure,
-the delay in seconds, and the retry count. Explicit connections show the host and
-port instead of a section name. With `--json`, these notices go to stderr so stdout contains
-only the result JSON.
-Exit codes are `0` for success, `1` for connection or operation failure,
-`2` for invalid arguments or configuration, and `130` for Ctrl+C.
-If a disconnect or deadline leaves the outcome unknown, the CLI reports that
-uncertainty and does not retry the operation automatically.
-Applications already started, files already transferred, and completed captures
-remain after interruption or failure. Restoring a partially written file is not
-guaranteed. Interrupting a recording does not wait for its remaining duration,
-but a playable partial MP4 is not guaranteed.
+The result includes the previous, requested and observed versions. An installation has an update ID. A `restored` result means the previous agent restarted. An `unconfirmed` result means the client lost confirmation. To update a running legacy agent, exit it on Windows and replace the portable EXE, or run an update-capable installer as the same user into the original directory. Start the agent and check it with `arctl update`.
 
 ---
-
 
 ## Reference
 
@@ -1074,6 +1212,7 @@ await agent.clipboard.clear();
 
 | API | Description |
 | :-- | :-- |
+| `RemoteAgent.files.safeBaseDir()` | Gets the suggested workspace directory on the connected machine. |
 | `RemoteAgent.files.writeFile(path, data)` | Writes a file to the connected machine. |
 | `RemoteAgent.files.readFile(path)` | Reads a file from the connected machine. |
 | `RemoteAgent.files.exists(path)` / `RemoteAgent.files.stat(path)` | Checks whether a path exists, or gets its metadata. |
@@ -1081,7 +1220,7 @@ await agent.clipboard.clear();
 | `RemoteAgent.files.readdir(path)` | Gets the list of directory entries. |
 | `RemoteAgent.files.remove(path, options?)` | Removes a file or directory. |
 | `RemoteAgent.files.rename(from, to)` | Renames or moves a file or directory. |
-| `RemoteAgent.files.mkdtemp(prefix)` | Creates a temporary directory. |
+| `RemoteAgent.files.mkdtemp(prefix?)` | Creates a new caller-owned temporary directory. |
 | `RemoteAgent.files.syncDirectory(options)` | Synchronizes a local directory to the connected machine with checksum-based diffing. |
 | `RemoteAgent.files.downloadDirectory(options)` | Downloads a remote directory to a local directory. |
 | `RemoteAgent.eventLogs.read(query?)` | Gets event logs from the connected machine. |
@@ -1089,22 +1228,48 @@ await agent.clipboard.clear();
 | `saveDiagnostics(directory, options)` | Saves diagnostics to a local directory. |
 | `withDiagnostics(agent, directory, operation, options?)` | Saves diagnostics when `operation` fails, then rethrows the original error. |
 
+The suggested workspace directory is a location for test files on the connected
+Windows machine. `await agent.files.safeBaseDir()` returns the absolute path
+selected when the agent starts. Settings take precedence in this order:
+`--safe-base-dir <path>`, `safe-base-dir` in the agent INI, then the remote OS
+temporary directory. An explicit path must be an existing absolute Windows drive
+or UNC directory. The driver's temporary directory is not used.
+
+For ordinary tests, use `mkdtemp('case-')` to create a workspace under that base.
+A prefix is the beginning of the generated directory name; it can also be an
+absolute path.
+
+| Call | Destination |
+| :-- | :-- |
+| `agent.files.mkdtemp()` | A name starting with `agent-rover-` directly under the suggested base |
+| `agent.files.mkdtemp('case-')` | A name starting with `case-` directly under the suggested base |
+| ``agent.files.mkdtemp(String.raw`D:\OtherWork\case-`)`` | A name starting with `case-` directly under `D:\OtherWork` |
+
+Each name receives a unique suffix. Concurrent calls never return an existing
+directory. Create the parent directory first. Empty strings, `.`, `..`, relative
+paths containing separators, and drive-relative paths such as `C:case-` are invalid
+arguments. A creation failure, including insufficient write permission, returns an
+error without switching to another location.
+
+The caller manages the created directory and removes only that directory after
+the test. Disconnecting or stopping the agent does not delete it. Other absolute
+paths remain available. Reporting or configuring the suggested base does not add
+Microsoft Defender exclusions or guarantee that files will avoid quarantine.
+After editing the INI, choose `Exit` from the tray and restart the agent to apply
+the change.
+
 Code example:
 
 ```typescript
 import { saveDiagnostics, withDiagnostics } from 'agent-rover';
 
-// Prepare a temporary directory and file paths on the remote side.
-const remoteDirectory = await agent.files.mkdtemp(
-  String.raw`C:\agent-rover\case-`
-);
+// Check the remote suggested base and create a test directory beneath it.
+const suggestedDirectory = await agent.files.safeBaseDir();
+const remoteDirectory = await agent.files.mkdtemp('case-');
 const remoteFilePath = `${remoteDirectory}\\input.txt`;
 const movedFilePath = `${remoteDirectory}\\moved.txt`;
 
 // Write a file, then check its existence and metadata.
-await agent.files.mkdir(remoteDirectory, {
-  recursive: true,
-});
 await agent.files.writeFile(remoteFilePath, Buffer.from('hello'));
 expect(await agent.files.exists(remoteFilePath)).toBe(true);
 
@@ -1185,6 +1350,16 @@ await agent.files.remove(remoteDirectory, {
 ```
 
 ### Process Cleanup And File Removal
+
+The Windows agent manages the launched root and its descendants in an OS Job
+object. `snapshot().running` and `waitForExit()` use the state of the whole Job,
+so descendants keep the application running after the original root exits.
+`processes()` returns remaining Job descendants, and `windows()` searches
+windows owned by the running root and those descendants. A matching parent PID
+or creation time does not make an unrelated process a member. If no owned
+window matches an explicit selector, newly appearing windows of other processes
+are still considered. Agents without native management infer descendants from
+the process list.
 
 `await process.releaseAsync({ timeoutMs: 10000 })` waits for the managed process
 tree to exit, closes its capture resources, and removes its internal output

@@ -14,47 +14,22 @@ A multi-platform TypeScript test driver for GUI applications
 
 Few problems are as painful as automated testing for GUI applications on Windows and X11.
 agent-rover provides a driver interface for automated tests written in TypeScript in these environments.
+Its command-line client, `arctl`, lets you connect to an agent and run one-off tasks.
 
 > WIP: X11 agent
 
-```mermaid
-flowchart LR
-  subgraph TestProject["Test project (Node.js / TypeScript)"]
-    TestCode["Test code, such as Vitest"]
-    Driver["agent-rover API"]
-    TestCode --> Driver
-  end
+![architecture](./images/architecture.png)
 
-  subgraph TargetSession["Target OS GUI session"]
-    Agent["agent-rover-agent"]
-    GuiSession["Windows / X11 GUI session"]
-    Application["GUI application under test"]
-    Agent -->|window enumeration / input / image capture / file operations| GuiSession
-    GuiSession --> Application
-  end
+A small agent runs on the target OS and lets you control applications remotely from Node.js through a Jest-like testing interface.
 
-  Driver <-->|custom TCP protocol / authentication handshake| Agent
-```
-
-agent-rover provides small agent programs that can be used in Windows and X11 environments.
-By starting an agent on the target OS, you can remotely operate applications from a Node.js environment through a Jest-like testing interface.
-In other words, the operations that we humans perform against applications in a remote session over RDP can be done through an API.
-
-Register the endpoint and its token in `$HOME/.agent-rover` first.
-
-```ini
-[default]
-test-agent.example.com=<access-token>
-```
-
-With agent-rover, you can write test code like this:
+The API lets you perform the same actions you would carry out manually in a remote desktop (RDP) session.
 
 ```typescript
 import { writeFile } from 'node:fs/promises';
 
 import { connectRemoteAgent } from 'agent-rover';
 
-// Connect to the remote agent.
+// Connect to the default remote agent.
 const agent = await connectRemoteAgent();
 
 // Save a file in the remote environment.
@@ -86,8 +61,22 @@ await writeFile('capture.png', screenshot.image);
 await process.releaseAsync();
 ```
 
-In addition to observing and operating GUI applications themselves, agent-rover also includes APIs for operating the target GUI session.
-As shown in the example above, you can send and receive files and launch applications.
+The SDK can also transfer files and launch applications on the target machine.
+For one-off operations, run `arctl` on the driver machine.
+
+```bash
+# Upload a directory
+arctl put -r ./runtime 'C:\work\runtime'
+
+# Download a directory
+arctl get -r 'C:\work\results' ./results
+
+# Take a screenshot
+arctl screenshot ./screen.png
+
+# Record ten seconds of video
+arctl record ./screen.mp4 --seconds 10 --fps 30
+```
 
 ## Features
 
@@ -96,39 +85,66 @@ As shown in the example above, you can send and receive files and launch applica
   File operations, such as sending and receiving files, are also supported.
 - Capture the screen or an application window as a PNG image, or as an H.264
   MP4 video on a supported Windows agent.
-- Prebuilt agents are available for Windows (i686/amd64 on XP SP2 or later) and Linux X11 (i686/amd64/armv7l/arm64/riscv64).
+- Prebuilt Windows agents target Windows XP SP2 and later on i686 and amd64.
+  The Linux X11 agent is in development for i686, amd64, armv7l, arm64, and riscv64.
 - Agent communication uses a custom TCP protocol.
   Authentication uses a digest handshake, although the protocol messages themselves are not encrypted.
 - Image recognition assertions for exact or close matches, and OCR-based assertions.
 
 ---
 
-## Preparation
+## Usage
 
-Download the agent for the target platform from the [releases page](https://github.com/kekyo/agent-rover/releases/).
-The agent is very small and avoids runtime dependencies on other libraries as much as possible.
-After extracting the archive, you can run it as-is. No installation is required.
+Start the agent on the machine that hosts the GUI application. The test driver connects to it from a second machine.
 
-Start the Windows agent from your interactive desktop. It runs in the system tray.
+### Windows Agent Setup
 
-```cmd
-C:\> agent-amd64.exe
+Download the Windows installer or portable ZIP for the target machine from the [releases page](https://github.com/kekyo/agent-rover/releases/).
+
+| Distribution | Usage |
+| --- | --- |
+| `agent-rover-agent-win32-{version}-setup.exe` | Install for the current user, then launch `agent-rover` from the Programs menu. |
+| `agent-rover-agent-win32-{version}.zip` | Extract to a folder of your choice. Run `agent-amd64.exe` on 64-bit Windows or `agent-i686.exe` on 32-bit Windows. |
+
+You can also start the agent from the command line in your Windows desktop session.
+Once it starts, right-click its system tray icon to open the menu.
+
+![Windows agent system tray menu](./images/agent-menu.png)
+
+Double-click the tray icon or choose `Show logs` to open the log viewer.
+
+![Windows agent log viewer](./images/agent.png)
+
+The version banner, access token, and `Copy` button appear above the log list.
+Choose `Copy` and paste the token into `$HOME/.agent-rover` on the driver machine.
+In the following example, we register a token as the 'default' remote agent:
+
+```ini
+[default]
+test-agent.example.com=<access-token>
 ```
 
-Double-click the tray icon or choose “Show logs” to open the viewer.
-The version banner, token field and Copy button appear above the log list.
-Use Copy to register the token in `$HOME/.agent-rover` on the driver machine.
-When you supply a token with `--unsafe-token`, the token field and Copy button are hidden.
-Closing the viewer keeps the agent running; choose “Exit” from the tray to stop it.
+> If you supply a token with `--unsafe-token` at startup or in the agent's configuration file, the viewer hides the token field and the `Copy` button.
 
-Then install agent-rover in your npm project:
+Closing the viewer keeps the agent running. Choose `Exit` from the tray menu to stop it.
+
+Logs include connection, authentication and process events, request IDs and
+methods, execution results, response transmission and elapsed time. Sequence
+numbers match between the viewer and files. Authentication tokens, request
+bodies, environment variables and clipboard contents are not copied to logs.
+
+The default TCP port is 39397. Open it in the OS firewall.
+Start the Windows agent from the user's interactive desktop. Running it as a Windows service is not supported.
+
+### Writing a Test Driver
+
+Install agent-rover in your test project.
 
 ```bash
 npm install -D agent-rover
 ```
 
-You can use any test framework.
-For example, with Vitest, you can write the following:
+You can use any test framework. This Vitest example checks for a visible Notepad window.
 
 ```typescript
 import { describe, expect, it } from 'vitest';
@@ -136,7 +152,7 @@ import { connectRemoteAgent } from 'agent-rover';
 
 describe('remote agent smoke test', () => {
   it('finds a running Notepad window', async () => {
-    // Connect to the remote agent.
+    // Connect using the [default] section of .agent-rover.
     const agent = await connectRemoteAgent();
 
     try {
@@ -157,11 +173,14 @@ describe('remote agent smoke test', () => {
 });
 ```
 
+For the operations available to test code, see the [test driver API reference](https://github.com/kekyo/agent-rover#reference).
+
 ---
 
 ## Documents
 
-For more information, [please visit the repository](https://github.com/kekyo/agent-rover/).
+- For logs, startup settings, test directories, process supervision, and limits, see [Agent Configuration Details](https://github.com/kekyo/agent-rover#agent-configuration-details).
+- For `arctl` commands, recording options, and connection settings, see [Test Driver Configuration Details](https://github.com/kekyo/agent-rover#test-driver-configuration-details).
 
 ## License
 

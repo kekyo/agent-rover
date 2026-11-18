@@ -29,6 +29,8 @@ enum class WorkerMessageKind : uint32_t {
   /** Releases an acknowledged parent launch registry entry. */ ReleaseLaunch = 112,
   /** Private server options, token and explicitly duplicated handles. */ HostConfiguration = 113,
   /** Reserves recovery capacity before creating a capture directory. */ ReserveCapture = 114,
+  /** Opens the startup-selected INI through the local shell. */ ConfigOpen = 115,
+  /** Startup-selected public workspace path, without capture ownership. */ WorkspaceConfiguration = 116,
 };
 /** Private process roles for this executable. */
 enum class HelperRole {
@@ -39,6 +41,7 @@ enum class HelperRole {
   /** Creates one application inside a parent-owned Job. */ Launch,
   /** Launch whose application tree survives session release. */ PersistentLaunch,
   /** One monitored GUI/TCP host. */ Server,
+  /** One local INI creation/edit request; editor children outlive the agent. */ ConfigEditor,
 };
 /** A bounded IPC message. */
 struct WorkerMessage {
@@ -76,8 +79,9 @@ cardio::promise<void> WriteWorker(Worker worker, WorkerMessage message, cardio::
 cardio::promise<WorkerMessage> ReadWorker(Worker worker, cardio::cancellation cancellation);
 /** Confirms worker initialization before waiting for desktop access.
  * Startup has its own deadline so client cancellation cannot discard the worker.
- * @param worker Newly started operation helper. @return Completion promise. */
-cardio::promise<void> InitializeOperationWorker(Worker worker);
+ * @param worker Newly started operation helper.
+ * @param safe_base_dir Startup-selected UTF-8 workspace directory. @return Completion promise. */
+cardio::promise<void> InitializeOperationWorker(Worker worker, std::string safe_base_dir);
 /** Handles private launch/release messages while retaining parent ownership.
  * @param worker Operation helper. @param message Private reply.
  * @param cancellation Operation deadline. @return Whether the message was handled. */

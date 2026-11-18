@@ -12,8 +12,25 @@ import {
   tcpFrameKindJson,
 } from '../src/driver/tcp-frame';
 import { connectWindowsBootstrap } from './helpers/windows-bootstrap';
+import { startFakeTcpAgent } from './helpers/fake-tcp-agent';
 
 afterEach(() => vi.unstubAllEnvs());
+
+it('downloads deployment diagnostics with verified binary transfers', async () => {
+  const fake = await startFakeTcpAgent({ authToken: 'bootstrap-test' });
+  vi.stubEnv('AGENT_ROVER_WIN11_HOST', fake.host);
+  vi.stubEnv('AGENT_ROVER_WIN11_TOKEN', 'bootstrap-test');
+  vi.stubEnv('AGENT_ROVER_WIN11_PORT', String(fake.port));
+  const bootstrap = await connectWindowsBootstrap();
+  try {
+    const bytes = Buffer.from('diagnostic\u0000日本語');
+    await bootstrap.upload('C:/diagnostic.txt', bytes);
+    expect(await bootstrap.download('C:/diagnostic.txt')).toEqual(bytes);
+  } finally {
+    await bootstrap.close();
+    await fake.close();
+  }
+});
 
 it.each([false, true])(
   'deploys through the configured bootstrap port after a busy rejection: %s',

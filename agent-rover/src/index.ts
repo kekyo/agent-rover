@@ -313,6 +313,14 @@ export type RemoteInputOperation =
 
 /** Capability values reported by a remote agent. */
 export interface RemoteAgentCapabilities {
+  /** Product version embedded in the running executable, when reported. */
+  readonly agentVersion?: string;
+  /** Identifier of this server lifetime, when reported. */
+  readonly agentInstanceId?: string;
+  /** Source revision embedded in the running executable, when reported. */
+  readonly gitCommit?: string;
+  /** Architecture of the executable, including 32-bit agents on 64-bit Windows. */
+  readonly architecture?: 'i686' | 'amd64';
   /** Protocol version spoken by the connected agent. */
   readonly protocolVersion: string;
   /** Platform backend reported by the connected agent. */
@@ -431,9 +439,9 @@ export interface RemoteManagedProcessLaunchOptions {
 export interface RemoteManagedProcessSnapshot {
   /** Current root process state. */
   readonly root: RemoteProcessSnapshot;
-  /** Running descendant processes tracked for this managed process. */
+  /** Running descendants; native Windows uses Job membership, even after parent exit. */
   readonly processes: readonly RemoteProcessSnapshot[];
-  /** Whether the root or any tracked descendant process is still running. */
+  /** Whether the root or its Job is active (inferred descendants on non-native agents). */
   readonly running: boolean;
 }
 
@@ -451,9 +459,14 @@ export interface RemoteManagedProcess
   readonly rootSnapshot: () => Promise<RemoteProcessSnapshot>;
   /** Reads the current logical application state. */
   readonly snapshot: () => Promise<RemoteManagedProcessSnapshot>;
-  /** Lists running descendant processes tracked for this managed process. */
+  /** Lists running descendants from native Job membership, or non-native parent inference. */
   readonly processes: () => Promise<readonly RemoteProcessSnapshot[]>;
-  /** Finds top-level windows related to this managed process. */
+  /**
+   * Finds windows owned by the running root or its descendants.
+   * @param query Optional window filters.
+   * @returns Matching owned windows, or newly appearing windows matching an explicit selector.
+   * @remarks Native Windows uses Job membership; unrelated existing windows are not owned.
+   */
   readonly windows: (
     query?: RemoteWindowQuery
   ) => Promise<readonly AppWindow[]>;
@@ -469,7 +482,7 @@ export interface RemoteManagedProcess
   ) => Promise<void>;
   /** Terminates the tracked process tree. */
   readonly kill: () => Promise<void>;
-  /** Waits until the root and tracked descendants exit. */
+  /** Waits until the root and its native Job (or non-native inferred descendants) exit. */
   readonly waitForExit: (
     options?: RemoteWaitOptions
   ) => Promise<RemoteManagedProcessSnapshot>;
@@ -863,6 +876,12 @@ export interface ImageComparisonResult {
 
 /** Remote file transfer API. */
 export interface RemoteFileSystem {
+  /**
+   * Returns the suggested absolute workspace directory on the agent machine.
+   * @returns The startup-selected path, defaulting to the agent OS temporary directory.
+   * @remarks Does not create a directory or configure Microsoft Defender exclusions.
+   */
+  readonly safeBaseDir: () => Promise<string>;
   /** Writes a complete file to the agent machine. */
   readonly writeFile: (path: string, data: Buffer) => Promise<void>;
   /** Reads a complete file from the agent machine. */
@@ -882,8 +901,15 @@ export interface RemoteFileSystem {
   ) => Promise<void>;
   /** Renames or moves a file or directory. */
   readonly rename: (from: string, to: string) => Promise<void>;
-  /** Creates a temporary directory from a prefix and returns its path. */
-  readonly mkdtemp: (prefix: string) => Promise<string>;
+  /**
+   * Exclusively creates a caller-owned temporary directory.
+   * @param prefix Name prefix under safeBaseDir(), or an absolute Windows path prefix.
+   * Omit to use agent-rover- under safeBaseDir(). The parent must already exist.
+   * @returns The absolute path of the newly created directory.
+   * @remarks Empty, relative path and drive-relative prefixes are rejected.
+   * The caller removes the returned directory; disconnecting does not remove it.
+   */
+  readonly mkdtemp: (prefix?: string) => Promise<string>;
   /** Synchronizes a local directory to the agent machine. */
   readonly syncDirectory: (
     options: RemoteDirectorySyncOptions

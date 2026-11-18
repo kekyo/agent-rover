@@ -10,8 +10,16 @@ import type {
   RemoteApplicationLaunchOptions,
 } from '../index';
 
+import { compareVersions } from '../update/release.ts';
+
 /** Validated operation selected by the CLI. */
 export type ArctlOperation =
+  | {
+      /** Inspect or update the selected Windows agent. */ readonly command: 'update';
+      /** Exact release tag, when requested. */ readonly version:
+        string | undefined;
+      /** Explicit consent to manual future updates. */ readonly allowLegacy: boolean;
+    }
   | { /** Enumerate windows. */ readonly command: 'windows' }
   | {
       /** Launch an independently owned application. */ readonly command: 'launch';
@@ -139,6 +147,29 @@ export const parseArctlArguments = (
       writeErr: () => {},
     })
     .exitOverride();
+  program
+    .command('update')
+    .description(
+      'Inspect the running Windows agent or install an exact GitHub release.'
+    )
+    .argument('[version]', 'Three-component release tag')
+    .option(
+      '--allow-legacy-downgrade',
+      'Accept manual installation for the next update'
+    )
+    .action(
+      (
+        version: string | undefined,
+        values: { allowLegacyDowngrade?: boolean }
+      ) => {
+        if (version !== undefined) compareVersions(version, version);
+        operation = {
+          command: 'update',
+          version,
+          allowLegacy: values.allowLegacyDowngrade === true,
+        };
+      }
+    );
   program
     .command('windows')
     .description(

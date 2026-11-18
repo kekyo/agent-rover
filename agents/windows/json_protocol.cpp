@@ -3,6 +3,7 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+#include "agent_update.h"
 #include "json_protocol.h"
 
 #include "../protocol_version.h"
@@ -16,6 +17,7 @@
 
 #include "agent_log.h"
 #include "binary_codec.h"
+#include "version.h"
 #include "video_recording.h"
 #include "win32_capture.h"
 #include "win32_clipboard.h"
@@ -31,7 +33,7 @@ namespace agent_rover {
 
 static constexpr uint32_t kBinaryTransferChunkBytes = 64 * 1024;
 
-static std::string JsonEscape(const std::string& value) {
+std::string JsonEscape(const std::string& value) {
   std::string output;
   for (const char ch : value) {
     switch (ch) {
@@ -124,7 +126,7 @@ static bool ReadEscapedJsonString(
   return false;
 }
 
-static bool FindJsonStringField(
+bool FindJsonStringField(
     const std::string& json,
     const std::string& key,
     std::string* value) {
@@ -493,6 +495,9 @@ static bool FindJsonObjectField(
   return false;
 }
 
+static std::string agent_instance_id;
+void SetAgentInstanceId(const std::string& id) { agent_instance_id = id; }
+
 static bool agent_video_supported = false;
 
 void SetAgentVideoCapability(bool supported) { agent_video_supported = supported; }
@@ -530,6 +535,7 @@ static std::string CapabilitiesJson() {
       "\"file.remove\","
       "\"file.rename\","
       "\"file.mkdtemp\","
+      "\"file.safeBaseDir\","
       "\"process.createCaptureDirectory\","
       "\"process.kill\","
       "\"process.killManaged\","
@@ -538,6 +544,7 @@ static std::string CapabilitiesJson() {
       "\"process.launchManaged\","
       "\"process.managedSnapshot\","
       "\"process.managedRunning\","
+      "\"process.managedProcesses\","
       "\"process.readCaptured\","
       "\"process.snapshot\","
       "\"eventLogs.read\","
@@ -551,15 +558,22 @@ static std::string CapabilitiesJson() {
   output += kTcpFrameCapabilityId;
   output += "\",";
   output +=
-      "\"agent.native-windows\""
+      "\"agent.update.v1\",\"agent.native-windows\""
       "],\"platform\":\"windows\","
       "\"protocolVersion\":\"";
   output += kProtocolVersion;
-  output += "\"}";
+  output += "\",\"agentInstanceId\":\"" + JsonEscape(agent_instance_id);
+  output += "\",\"agentVersion\":\"" AGENT_ROVER_AGENT_VERSION
+            "\",\"gitCommit\":\"" AGENT_ROVER_AGENT_GIT_COMMIT_HASH
+#ifdef _WIN64
+            "\",\"architecture\":\"amd64\"}";
+#else
+            "\",\"architecture\":\"i686\"}";
+#endif
   return output;
 }
 
-static std::string SuccessResponseJson(
+std::string SuccessResponseJson(
     const std::string& id,
     const std::string& result) {
   std::string output = "{\"id\":\"";
@@ -1117,6 +1131,28 @@ bool ReadAgentRequest(const std::string& payload, std::string* id, std::string* 
       FindJsonStringField(payload, "method", method) && !method->empty() && method->size() <= 128;
 }
 
+bool ReadAgentUpdateSpec(const std::string& json, AgentUpdateSpec* spec) {
+  std::string params;
+  return FindJsonObjectField(json, "params", &params) &&
+         FindJsonStringField(params, "sourceInstance", &spec->source_instance) &&
+         FindJsonStringField(params, "authorization", &spec->authorization) &&
+         FindJsonStringField(params, "updateId", &spec->id) &&
+         FindJsonStringField(params, "sourceSha256", &spec->source_hash) &&
+         FindJsonStringField(params, "version", &spec->version) &&
+         FindJsonStringField(params, "architecture", &spec->architecture) &&
+         FindJsonStringField(params, "sha256", &spec->hash) &&
+         FindJsonUInt64Field(params, "bytes", &spec->bytes) &&
+         FindJsonUInt32Field(params, "updateProtocol", &spec->protocol);
+}
+bool MatchesLegacyAgent(const std::string& catalog, const AgentUpdateSpec& spec) {
+  std::string release, image, digest;
+  uint64_t bytes = 0;
+  return FindJsonObjectField(catalog, spec.version, &release) &&
+         FindJsonObjectField(release, spec.architecture, &image) &&
+         FindJsonStringField(image, "sha256", &digest) && digest == spec.hash &&
+         FindJsonUInt64Field(image, "bytes", &bytes) && bytes == spec.bytes;
+}
+
 uint32_t ReadAgentVideoDuration(const std::string& payload) {
   uint32_t duration = 0;
   return FindJsonUInt32Field(payload, "durationMs", &duration) && duration <= 600000 ? duration : 0;
@@ -1124,6 +1160,10 @@ uint32_t ReadAgentVideoDuration(const std::string& payload) {
 
 std::string CreateCapabilitiesResponse(const std::string& id) {
   return SuccessResponseJson(id, CapabilitiesJson());
+}
+
+std::string CreateSafeBaseDirResponse(const std::string& id, const std::string& path) {
+  return SuccessResponseJson(id, "{\"path\":\"" + JsonEscape(path) + "\"}");
 }
 
 std::string CreateAgentFailure(const std::string& id, const std::string& code, const std::string& message) {
@@ -1147,6 +1187,7 @@ std::string CreateAgentResultLog(const std::string& payload) {
 
 std::string HandleJsonRequest(
     const std::string& payload,
+    const std::string& safe_base_dir,
     BinaryTransferStore* transfers,
     VideoRecordingStore* recordings,
     std::vector<BinaryTransferChunk>* outbound_chunks,
@@ -1354,7 +1395,7 @@ std::string HandleJsonRequest(
     }
     return SuccessResponseJson(id, ProcessSnapshotJson(process));
   }
-  if (method == "process.managedRunning" || method == "process.readCaptured") {
+  if (method == "process.managedRunning" || method == "process.managedProcesses" || method == "process.readCaptured") {
     int managed_id = 0;
     if (!FindJsonNumberField(payload, "managedProcessId", &managed_id) || managed_id <= 0) return FailureResponseJson(id, "A managed process ID is required.");
     OperationError error;
@@ -1362,6 +1403,11 @@ std::string HandleJsonRequest(
       bool running = false;
       if (!ManagedProcessRunning(static_cast<uint32_t>(managed_id), &running, &error)) return OperationFailureJson(id, method, error);
       return SuccessResponseJson(id, running ? "true" : "false");
+    }
+    if (method == "process.managedProcesses") {
+      std::vector<ProcessSnapshot> processes;
+      if (!ListManagedProcesses(static_cast<uint32_t>(managed_id), &processes, &error)) return OperationFailureJson(id, method, error);
+      return SuccessResponseJson(id, ProcessSnapshotArrayJson(processes));
     }
     std::string stream;
     if (!FindJsonStringField(payload, "stream", &stream) || (stream != "stdout" && stream != "stderr")) return FailureResponseJson(id, "Capture stream must be stdout or stderr.");
@@ -1711,13 +1757,20 @@ std::string HandleJsonRequest(
     return SuccessResponseJson(id, "null");
   }
   if (method == "file.mkdtemp" || method == "process.createCaptureDirectory") {
-    std::string prefix;
-    if (method == "file.mkdtemp" && !FindJsonStringField(payload, "prefix", &prefix)) {
-      return FailureResponseJson(id, "file.mkdtemp requires prefix.");
+    std::optional<std::string> prefix;
+    if (method == "file.mkdtemp") {
+      std::string params;
+      if (FindJsonObjectField(payload, "params", &params) && params.find("\"prefix\"") != std::string::npos) {
+        std::string value;
+        if (!FindJsonStringField(params, "prefix", &value))
+          return CreateAgentFailure(id, "INVALID_ARGUMENT", "file.mkdtemp prefix must be a string when supplied.");
+        prefix = std::move(value);
+      }
     }
     std::string path;
     OperationError error;
-    if (!(method == "process.createCaptureDirectory" ? CreateCaptureDirectory(&path, &error) : MakeTempDirectory(prefix, &path, &error))) {
+    if (!(method == "process.createCaptureDirectory" ? CreateCaptureDirectory(&path, &error) : MakeTempDirectory(safe_base_dir, prefix, &path, &error))) {
+      if (error.reason == "invalidArgument") return CreateAgentFailure(id, "INVALID_ARGUMENT", error.message);
       return OperationFailureJson(id, method, error);
     }
     std::string output = "{\"path\":";

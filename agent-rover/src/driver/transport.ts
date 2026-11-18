@@ -72,6 +72,25 @@ export interface TcpFrameTransportOptions {
 const parseTcpJsonFrame = (frame: TcpFrame): ProtocolMessage =>
   parseProtocolMessage(JSON.parse(frame.payload.toString('utf8')));
 
+// Concurrent writes share one failure subscription per socket. A pending write
+// retains its own callback and deadline, without adding EventEmitter listeners.
+const socketWrites = new WeakMap<Socket, Set<(error: Error) => void>>();
+
+const observeSocketWrites = (socket: Socket): Set<(error: Error) => void> => {
+  const existing = socketWrites.get(socket);
+  if (existing) return existing;
+  const pending = new Set<(error: Error) => void>();
+  socketWrites.set(socket, pending);
+  const fail = (error: Error): void => {
+    for (const complete of pending) complete(error);
+  };
+  socket.once('close', () =>
+    fail(new Error('TCP connection closed during write.'))
+  );
+  socket.on('error', fail);
+  return pending;
+};
+
 const writeSocket = async (
   socket: Socket,
   data: Buffer,
@@ -82,25 +101,21 @@ const writeSocket = async (
     throw new Error('TCP outbound queue exceeds 32 MiB.');
   }
   await new Promise<void>((resolve, reject) => {
+    const pending = observeSocketWrites(socket);
     let finished = false;
     const complete = (error: Error | undefined): void => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
-      socket.off('close', onClose);
-      socket.off('error', onError);
+      pending.delete(complete);
       if (error) reject(error);
       else resolve();
     };
-    const onClose = (): void =>
-      complete(new Error('TCP connection closed during write.'));
-    const onError = (error: Error): void => complete(error);
     const timer = setTimeout(() => {
       complete(new Error('TCP frame write timed out.'));
       socket.destroy();
     }, timeoutMs);
-    socket.once('close', onClose);
-    socket.once('error', onError);
+    pending.add(complete);
     try {
       socket.write(data, (error) => complete(error ?? undefined));
     } catch (error) {
