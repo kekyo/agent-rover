@@ -442,6 +442,21 @@ monitors; use individual work areas to choose a visible placement.
 }
 ```
 
+Windows agents that publish build metadata include `agentVersion` (three decimal components), `gitCommit`, `architecture` (`i686` or `amd64`) and an opaque `agentInstanceId` for this server lifetime. These fields appear in both `agent.ready` and `agent.capabilities`. They are optional for legacy agents. The ordinary driver requires an exact test protocol version match. The CLI's update-only session negotiates the feature `agent.update.v1` across test protocol revisions.
+
+### Agent updates
+
+| Request | Parameters and result |
+| --- | --- |
+| `agent.update.inspect` | Returns the running EXE's lowercase SHA-256. A versionless CLI inspection needs only the ready event. |
+| `agent.update.prepare` | Accepts `updateId` (UUID), `sourceInstance`, `sourceSha256`, `version`, `architecture`, `sha256`, `bytes`, `updateProtocol` (0 or 1) and `authorization`. Returns null when the session has exclusive use for this transfer, or a recorded result for the same transaction. Other active sessions or outstanding cleanup can produce `AGENT_BUSY`. |
+| `agent.update.apply` | Takes the prepared `updateId` and the completed binary `transferId`. The content type is `application/vnd.agent-rover.update`. The agent determines the destination from its own executable. |
+| `agent.update.status` | Takes `updateId` and returns the last matching record or null. A client recovering from response loss queries the originally selected endpoint. |
+
+The client verifies the exact ZIP using the size and SHA-256 from GitHub's release asset metadata. New ZIPs include `agent-update.json` with the repository, tag (`version`), commit, update protocol and per-CPU executable sizes and SHA-256 values. Public releases through 0.10.0 use a built-in catalog. For authenticated sessions the client binds the chosen digest to the existing connection token. The authorization value is unpadded base64url of HMAC-SHA-256 over the following UTF-8 fields joined by LF, with no trailing newline. The fields in order are `agent-rover/update/v1`, source instance, update ID, source SHA-256, target version, architecture, target SHA-256, decimal byte length and decimal update protocol. Unauthenticated updates use an empty authorization and require a locally known image. [GitHub release assets](https://docs.github.com/en/rest/releases/assets)
+
+After acceptance the temporary helper returns the final response on the existing connection. The record includes `updateId`, `sourceSha256`, `sha256`, `status`, `actualVersion` and `message`. A pending journal can report `applying`. Terminal states are `applied`, `restored` and `recovery-required`. The client reports `unconfirmed` when it cannot obtain a terminal record. The previous build and install registration are retained until the replacement's process owns the expected listener.
+
 ### Desktop
 
 `agent.desktop` returns one object with `bounds: Rect`, `monitors: Monitor[]`,
