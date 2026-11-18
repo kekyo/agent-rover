@@ -26,6 +26,8 @@ struct AgentUpdateSpec {
   uint64_t bytes = 0;
   /** Update protocol supported by the release, or zero for a cataloged legacy release. */
   uint32_t protocol = 0;
+  /** Compares every field bound to a prepared transaction. */
+  bool operator==(const AgentUpdateSpec&) const = default;
 };
 /** @return SHA-256 of the executable that owns this server. */
 std::string RunningAgentHash();

@@ -449,7 +449,7 @@ Windows agents that publish build metadata include `agentVersion` (three decimal
 | Request | Parameters and result |
 | --- | --- |
 | `agent.update.inspect` | Returns the running EXE's lowercase SHA-256. A versionless CLI inspection needs only the ready event. |
-| `agent.update.prepare` | Accepts `updateId` (UUID), `sourceInstance`, `sourceSha256`, `version`, `architecture`, `sha256`, `bytes`, `updateProtocol` (0 or 1) and `authorization`. Returns null when the session has exclusive use for this transfer, or a recorded result for the same transaction. Other active sessions or outstanding cleanup can produce `AGENT_BUSY`. |
+| `agent.update.prepare` | Accepts `updateId` (UUID), `sourceInstance`, `sourceSha256`, `version`, `architecture`, `sha256`, `bytes`, `updateProtocol` (0 or 1) and `authorization`. Returns null when the session has exclusive use for this transfer, or a recorded result for the same transaction. Repeating the same preparation on that session restarts the upload from its first chunk. Other active sessions or outstanding cleanup can produce `AGENT_BUSY`. |
 | `agent.update.apply` | Takes the prepared `updateId` and the completed binary `transferId`. The content type is `application/vnd.agent-rover.update`. The agent determines the destination from its own executable. |
 | `agent.update.status` | Takes `updateId` and returns the last matching record or null. A client recovering from response loss queries the originally selected endpoint. |
 

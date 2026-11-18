@@ -7,12 +7,16 @@
 // Copyright (c) Kouji Matsui. Under MIT.
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { copyFile, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { expect, it } from 'vitest';
+import { createDeferred } from 'async-primitives';
+import { createTcpFrameTransport } from '../src/driver/transport.ts';
+import type { ProtocolMessage } from '../src/protocol.ts';
+import type { RemoteAgentCapabilities } from '../src/index.ts';
 import {
   connectAgentForUpdate,
   resolveConnectionTarget,
@@ -144,6 +148,71 @@ it('hands the maintenance connection to a helper and confirms the replacement li
       }
     } finally {
       replacement.release();
+    }
+    // Repeating prepare on the same live wire must preserve the transaction.
+    let reply = createDeferred<ProtocolMessage>();
+    const wire = createTcpFrameTransport({
+      ...options,
+      callbacks: {
+        onOpen: () => {},
+        onBinaryChunk: async () => {},
+        onMessage: (message) => reply.resolve(message),
+        onClose: (message) => reply.reject(new Error(message)),
+        onError: (error) => reply.reject(error),
+      },
+    });
+    try {
+      const ready = await reply.promise;
+      if (ready.kind !== 'event' || ready.name !== 'agent.ready')
+        throw new Error('Expected ready event.');
+      const { capabilities } = ready.data as unknown as {
+        capabilities: RemoteAgentCapabilities;
+      };
+      const id = randomUUID(),
+        version = capabilities.agentVersion!,
+        instance = capabilities.agentInstanceId!;
+      const authorization = createHmac('sha256', options.authToken)
+        .update(
+          [
+            'agent-rover/update/v1',
+            instance,
+            id,
+            sha256,
+            version,
+            'amd64',
+            sha256,
+            String(data.length),
+            '1',
+          ].join('\n')
+        )
+        .digest('base64url');
+      const params = {
+        updateId: id,
+        version,
+        architecture: 'amd64',
+        sha256,
+        sourceSha256: sha256,
+        sourceInstance: instance,
+        bytes: data.length,
+        updateProtocol: 1,
+        authorization,
+      };
+      for (const requestId of ['prepare', 'repeat']) {
+        reply = createDeferred<ProtocolMessage>();
+        await wire.send({
+          kind: 'request',
+          id: requestId,
+          method: 'agent.update.prepare',
+          params,
+        });
+        expect(await reply.promise).toMatchObject({
+          id: requestId,
+          ok: true,
+          result: null,
+        });
+      }
+    } finally {
+      await wire.close();
     }
   } finally {
     try {

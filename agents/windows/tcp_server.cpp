@@ -393,6 +393,8 @@ static cardio::promise<void> HandleUpdate(std::shared_ptr<ClientSession> session
     } else if (method == "agent.update.prepare") {
       AgentUpdateSpec spec;
       if (!ReadAgentUpdateSpec(text, &spec)) throw std::runtime_error("Invalid update metadata.");
+      const bool repeated = session->update && session->update->id == spec.id;
+      if (repeated && *session->update != spec) throw std::runtime_error("Update ID already used.");
       const auto previous = co_await AgentUpdateStatus(spec.id);
       if (previous != "null") {
         std::string source, hash;
@@ -400,8 +402,8 @@ static cardio::promise<void> HandleUpdate(std::shared_ptr<ClientSession> session
             !FindJsonStringField(previous, "sha256", &hash) || hash != spec.hash)
           throw std::runtime_error("Update ID already used.");
         response = SuccessResponseJson(id, previous);
-      } else if (server->sessions.size() != 1 || server->workers || !server->quarantine.empty() ||
-                 !server->pending_recovery.empty() || !session->requests.empty() || server->update_owner) {
+      } else if (!repeated && (server->sessions.size() != 1 || server->workers || !server->quarantine.empty() ||
+                 !server->pending_recovery.empty() || !session->requests.empty() || server->update_owner)) {
         response = CreateAgentFailure(id, "AGENT_BUSY", "An agent session or cleanup is in progress.");
       } else {
         if (spec.source_instance != server->instance_id)
@@ -409,6 +411,7 @@ static cardio::promise<void> HandleUpdate(std::shared_ptr<ClientSession> session
         ValidateAgentUpdate(spec, server->options);
         server->update_owner = session->id;
         session->update = spec;
+        session->update_transfer = {};
         session->update_transfer.max_transfer_bytes = spec.bytes;
         response = SuccessResponseJson(id, "null");
       }
