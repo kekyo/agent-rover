@@ -2,6 +2,8 @@
 // Copyright (c) Kouji Matsui. Under MIT.
 #include "update_private.h"
 #include "binary_codec.h"
+#include "auth.h"
+#include <shlobj.h>
 #include "command_line.h"
 #include "json_protocol.h"
 #include "resource.h"
@@ -70,11 +72,26 @@ void ValidateAgentUpdate(const AgentUpdateSpec& spec, const ServerOptions& o) {
       spec.bytes > std::min<uint64_t>(64 * kBytesPerMiB, o.max_transfer_bytes) || spec.protocol > 1 ||
       spec.architecture != (sizeof(void*) == 8 ? "amd64" : "i686"))
     throw std::runtime_error("Invalid agent release metadata or transfer size.");
+  if (o.auth_required) {
+    if (spec.authorization.size() != kAuthTokenLength)
+      throw std::runtime_error("Missing update authorization.");
+    const std::string message = "agent-rover/update/v1\n" + spec.source_instance + "\n" + spec.id + "\n" +
+                                spec.source_hash + "\n" + spec.version + "\n" + spec.architecture + "\n" +
+                                spec.hash + "\n" + std::to_string(spec.bytes) + "\n" +
+                                std::to_string(spec.protocol);
+    const auto expected = Base64UrlEncode(
+        HmacSha256({o.auth_token.begin(), o.auth_token.end()}, {message.begin(), message.end()}));
+    if (!AuthResponseEquals({expected.begin(), expected.end()},
+                            {spec.authorization.begin(), spec.authorization.end()}))
+      throw std::runtime_error("Update authorization does not match the requested release.");
+  }
   if (!o.auth_required && spec.protocol && spec.source_hash != spec.hash &&
       !MatchesLegacyAgent(Resource(nullptr, IDR_AGENT_LEGACY_RELEASES), spec))
     throw std::runtime_error("Configure agent authentication to authorize a new remote release.");
   if (spec.source_hash != RunningAgentHash()) throw std::runtime_error("The running agent build changed.");
   if (!spec.protocol) {
+    if (o.auth_required && !o.show_auth_token && o.auth_token.starts_with("--"))
+      throw std::runtime_error("The legacy command line cannot preserve this token.");
     if (!MatchesLegacyAgent(Resource(nullptr, IDR_AGENT_LEGACY_RELEASES), spec))
       throw std::runtime_error("Unknown legacy release SHA-256.");
     const int minor = std::stoi(spec.version.substr(2));
@@ -128,8 +145,24 @@ static void WriteNew(const std::wstring& path, const void* bytes, DWORD size) {
       !FlushFileBuffers(file.get()))
     throw Failure("WriteFile(update)");
 }
+static std::wstring ResultPath(std::wstring image, bool create) {
+  wchar_t appdata[32768] = {};
+  const DWORD length = GetEnvironmentVariableW(L"APPDATA", appdata, 32768);
+  if ((!length || length >= 32768 || !IsAbsoluteWindowsPath(appdata)) &&
+      FAILED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, appdata)))
+    throw std::runtime_error("Unable to locate the current user's update history.");
+  std::wstring directory = appdata;
+  for (const auto part : {L"agent-rover", L"updates"}) {
+    directory += L"\\" + std::wstring(part);
+    if (create && !CreateDirectoryW(directory.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
+      throw Failure("Create update history directory");
+  }
+  CharLowerBuffW(image.data(), static_cast<DWORD>(image.size()));
+  const auto utf8 = WideToUtf8(image);
+  return directory + L"\\" + Utf8ToWide(Sha256Hex({utf8.begin(), utf8.end()})) + L".json";
+}
 void SaveAgentUpdateResult(const std::wstring& image, const std::string& record) {
-  const auto path = image + L".update-result";
+  const auto path = ResultPath(image, true);
   const auto temp = path + L"." + std::to_wstring(GetCurrentProcessId());
   WriteNew(temp, record.data(), static_cast<DWORD>(record.size()));
   if (!MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
@@ -138,13 +171,12 @@ void SaveAgentUpdateResult(const std::wstring& image, const std::string& record)
     throw error;
   }
 }
-cardio::promise<std::string> AgentUpdateStatus(std::string id) {
-  if (!IsAgentUpdateId(id)) throw std::runtime_error("Invalid update ID.");
-  KernelHandle file(CreateFileW((AgentImagePath() + L".update-result").c_str(), GENERIC_READ,
+cardio::promise<std::string> ReadAgentUpdateRecord() {
+  KernelHandle file(CreateFileW(ResultPath(AgentImagePath(), false).c_str(), GENERIC_READ,
                                 FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
                                 FILE_FLAG_OVERLAPPED, nullptr));
   if (file.get() == INVALID_HANDLE_VALUE) {
-    if (GetLastError() == ERROR_FILE_NOT_FOUND) co_return "null";
+    if (GetLastError() == ERROR_FILE_NOT_FOUND || GetLastError() == ERROR_PATH_NOT_FOUND) co_return "null";
     throw Failure("Open agent update result");
   }
   LARGE_INTEGER size = {};
@@ -159,6 +191,11 @@ cardio::promise<std::string> AgentUpdateStatus(std::string id) {
     if (!count) throw std::runtime_error("Truncated agent update result.");
     offset += count;
   }
+  co_return result;
+}
+cardio::promise<std::string> AgentUpdateStatus(std::string id) {
+  if (!IsAgentUpdateId(id)) throw std::runtime_error("Invalid update ID.");
+  const auto result = co_await ReadAgentUpdateRecord();
   std::string saved;
   co_return FindJsonStringField(result, "updateId", &saved) && saved == id ? result : "null";
 }

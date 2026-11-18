@@ -1,9 +1,14 @@
+// agent-rover - A multi-platform TypeScript test driver for GUI applications
+// Copyright (c) Kouji Matsui. (@kekyo@mi.kekyo.net)
+// Under MIT.
+// https://github.com/kekyo/agent-rover
+
 // agent-rover - Transactional replacement of an isolated Windows agent
 // Copyright (c) Kouji Matsui. Under MIT.
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createHash, randomUUID } from 'node:crypto';
-import { copyFile, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -33,11 +38,12 @@ it('hands the maintenance connection to a helper and confirms the replacement li
   const options = {
     host: '127.0.0.1',
     port,
-    authToken: 'update-fixture',
+    authToken: randomUUID(),
     retry: false,
     timeoutMs: 45000,
   };
   const target = await resolveConnectionTarget(options);
+  const home = (await exec('winepath', ['-w', dir], { env })).stdout.trim();
   const child = spawn(
     'wine',
     [
@@ -49,9 +55,9 @@ it('hands the maintenance connection to a helper and confirms the replacement li
       '--unsafe-token',
       options.authToken,
     ],
-    { env, stdio: 'ignore' }
+    { env: { ...env, HOME: home, APPDATA: home }, stdio: 'ignore' }
   );
-  let phase = 'first connect';
+
   const ended = once(child, 'exit');
   try {
     const session = await waitForResult(
@@ -68,7 +74,7 @@ it('hands the maintenance connection to a helper and confirms the replacement li
       expect(session.capabilities.features).toContain('agent.update.v1');
       expect(await session.imageHash()).toBe(sha256);
       const version = session.capabilities.agentVersion!;
-      phase = 'first install';
+
       const result = await session.install(randomUUID(), sha256, {
         version,
         gitCommit: session.capabilities.gitCommit!,
@@ -85,12 +91,11 @@ it('hands the maintenance connection to a helper and confirms the replacement li
       session.release();
     }
     await ended;
-    phase = 'second connect';
+
     const replacement = await connectAgentForUpdate(target, options);
     try {
-      phase = 'second inspect';
       expect(await replacement.imageHash()).toBe(sha256);
-      phase = 'hold file';
+
       const path = (
         await exec('winepath', ['-w', file], { env })
       ).stdout.trim();
@@ -103,7 +108,7 @@ it('hands the maintenance connection to a helper and confirms the replacement li
       const pid = /held (\d+)/u.exec(String(line))![1]!;
       try {
         const version = replacement.capabilities.agentVersion!;
-        phase = 'second install';
+
         const result = await replacement.install(randomUUID(), sha256, {
           version,
           gitCommit: replacement.capabilities.gitCommit!,
@@ -123,23 +128,6 @@ it('hands the maintenance connection to a helper and confirms the replacement li
     } finally {
       replacement.release();
     }
-  } catch (error) {
-    const files = await readdir(dir);
-    const records = await Promise.all(
-      files
-        .filter((f) => f.endsWith('.update-result'))
-        .map(async (f) => await readFile(join(dir, f), 'utf8'))
-    );
-    throw new Error(
-      phase +
-        ' ' +
-        String(error) +
-        '; ' +
-        files.join(', ') +
-        '; ' +
-        records.join(', '),
-      { cause: error }
-    );
   } finally {
     try {
       await exec('wine', [control, 'exit', String(port)], {

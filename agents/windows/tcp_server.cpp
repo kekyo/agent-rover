@@ -97,6 +97,7 @@ struct ServerState {
   AsyncSignal sessions_drained;
   size_t workers = 0, request_bytes = 0, output_bytes = 0, reading_bytes = 0;
   uint32_t update_owner = 0;
+  std::string instance_id;
   bool desktop_busy = false;
   std::deque<std::shared_ptr<cardio::promise_source<void>>> desktop_waiters;
 };
@@ -401,6 +402,7 @@ static cardio::promise<void> HandleUpdate(std::shared_ptr<ClientSession> session
           !server->pending_recovery.empty()||!session->requests.empty()||server->update_owner){
         response=CreateAgentFailure(id,"AGENT_BUSY","An agent session or cleanup is in progress.");
       }else{
+        if(spec.source_instance!=server->instance_id)throw std::runtime_error("The selected agent instance changed.");
         ValidateAgentUpdate(spec,server->options);
         server->update_owner=session->id;session->update=spec;session->update_transfer.max_transfer_bytes=spec.bytes;
         response=SuccessResponseJson(id,"null");
@@ -594,6 +596,8 @@ static cardio::promise<void> Serve(std::shared_ptr<ServerState> server, int* res
     PrintAgentLogEvent("version=" + BuildAgentVersionText() + " " + status);
     SetListenStatus(server, status);
     if(server->options.update_ready)SetEvent(reinterpret_cast<HANDLE>(server->options.update_ready));
+    try { co_await RecoverAgentUpdate(); }
+    catch(const std::exception& e){PrintAgentLogEvent(std::string("phase=update-recovery-pending ")+e.what());}
     uint32_t next_id = 0;
     for (;;) {
       std::string endpoint;
@@ -649,6 +653,8 @@ int RunTcpServer(const ServerOptions& options, std::string* error) {
     cardio::dispatcher_host_win32_auto dispatcher;
     auto server = std::make_shared<ServerState>();
     server->options = options;
+    if(!GenerateAuthToken(&server->instance_id,error))throw std::runtime_error(*error);
+    SetAgentInstanceId(server->instance_id);
     const auto weak = std::weak_ptr<ServerState>(server);
     server->gui = CreateAgentGui(options, [weak] {
       RequestSupervisorExit();

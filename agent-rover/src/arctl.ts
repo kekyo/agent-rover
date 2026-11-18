@@ -43,6 +43,7 @@ const main = async (): Promise<number> => {
     interruption.abort();
     if (updateSession !== undefined) {
       updateSession.release();
+      process.stderr.write('arctl: Interrupted.\n', () => process.exit(130));
     } else if (agent === undefined) {
       // No operation or temporary transfer exists during the handshake. Ending
       // the CLI closes its pending socket even before the SDK returns a handle.
@@ -96,6 +97,9 @@ const main = async (): Promise<number> => {
             result.status +
             '  ' +
             (result.actualVersion ?? 'unknown') +
+            ('message' in result && result.message
+              ? '  ' + result.message
+              : '') +
             '\n'
         );
         return ['applied', 'unchanged', 'cancelled'].includes(result.status)

@@ -33,6 +33,8 @@ std::string JsonEscape(const std::string& value);
 /** Matches historical images against the packaged catalog. */
 bool MatchesLegacyAgent(const std::string& catalog, const AgentUpdateSpec& spec);
 
+/** Records the random identifier of this server lifetime. */
+void SetAgentInstanceId(const std::string& id);
 /** Sets the cached video capability after isolated detection.
  * @param supported Whether Media Foundation was successfully detected. */
 void SetAgentVideoCapability(bool supported);

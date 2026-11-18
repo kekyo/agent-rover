@@ -8,6 +8,7 @@
 #include "version.h"
 #include "win32_util.h"
 #include <iphlpapi.h>
+#include <psapi.h>
 #include <tlhelp32.h>
 #include <chrono>
 #include <cstring>
@@ -185,6 +186,68 @@ static std::string Result(const UpdateBridge& b, const std::string& state, const
          "\",\"actualVersion\":" + (actual.empty() ? "null" : "\"" + JsonEscape(actual) + "\"") +
          ",\"message\":\"" + JsonEscape(detail) + "\"}";
 }
+// A second portable instance can use a different port while mapping this same file.
+static void CheckOtherInstances(const std::wstring& image) {
+  const auto name = image.substr(image.find_last_of(L"\\/") + 1);
+  KernelHandle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
+  if (snapshot.get() == INVALID_HANDLE_VALUE) throw Failure("Enumerate agent copies");
+  PROCESSENTRY32W entry = {};
+  entry.dwSize = sizeof(entry);
+  if (Process32FirstW(snapshot.get(), &entry)) do {
+      if (_wcsicmp(entry.szExeFile, name.c_str())) continue;
+      KernelHandle process(
+          OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, entry.th32ProcessID));
+      if (!process) {
+        if (GetLastError() == ERROR_INVALID_PARAMETER) continue;
+        throw Failure("Check active agent copy");
+      }
+      wchar_t path[32768];
+      const auto size = GetModuleFileNameExW(process.get(), nullptr, path, 32768);
+      if (size && _wcsicmp(image.c_str(), std::wstring(path, size).c_str()) == 0)
+        throw std::runtime_error("Another instance is using this agent executable.");
+    } while (Process32NextW(snapshot.get(), &entry));
+}
+cardio::promise<void> RecoverAgentUpdate() {
+  const auto record = co_await ReadAgentUpdateRecord();
+  std::string status, id, source, target, version, previous, display;
+  if (!FindJsonStringField(record, "status", &status) || status != "applying") co_return;
+  if (!FindJsonStringField(record, "updateId", &id) || !IsAgentUpdateId(id) ||
+      !FindJsonStringField(record, "sourceSha256", &source) ||
+      !FindJsonStringField(record, "sha256", &target) ||
+      !FindJsonStringField(record, "requestedVersion", &version) ||
+      !FindJsonStringField(record, "previousVersion", &previous) ||
+      !FindJsonStringField(record, "previousDisplayVersion", &display))
+    throw std::runtime_error("Invalid interrupted transaction.");
+  const auto path = AgentImagePath();
+  KernelHandle lock(CreateFileW((path + L".update-lock").c_str(), DELETE, 0, nullptr, CREATE_NEW,
+                                FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr));
+  if (lock.get() == INVALID_HANDLE_VALUE) co_return;
+  const auto again = co_await ReadAgentUpdateRecord();
+  if (record != again) co_return;
+  const auto actual = RunningAgentHash();
+  const bool applied = actual == target && version == AGENT_ROVER_AGENT_VERSION;
+  const bool restored = actual == source && previous == AGENT_ROVER_AGENT_VERSION;
+  if (!applied && !restored)
+    throw std::runtime_error("Interrupted update does not match the running image; keep its backup.");
+  if (!display.empty()) SetVersion(OpenRegistration(path), Utf8ToWide(applied ? version : display));
+  SaveAgentUpdateResult(path, "{\"updateId\":\"" + id + "\",\"sourceSha256\":\"" + JsonEscape(source) +
+                                  "\",\"sha256\":\"" + JsonEscape(target) + "\",\"status\":\"" +
+                                  (applied ? "applied" : "restored") +
+                                  "\",\"actualVersion\":\"" AGENT_ROVER_AGENT_VERSION
+                                  "\",\"message\":\"Recovered after restart.\"}");
+  const auto dir = AgentUpdateDirectory(path, id);
+  const auto attrs = GetFileAttributesW(dir.c_str());
+  if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) &&
+      !(attrs & FILE_ATTRIBUTE_REPARSE_POINT)) {
+    for (const auto& [name, hash] : std::initializer_list<std::pair<std::wstring, std::string>>{
+             {L"previous.exe", source}, {L"helper.exe", source}, {L"release.exe", target}}) {
+      const auto file = dir + L"\\" + name;
+      if (GetFileAttributesW(file.c_str()) != INVALID_FILE_ATTRIBUTES && AgentImageHash(file) == hash)
+        DeleteFileW(file.c_str());
+    }
+    RemoveDirectoryW(dir.c_str());
+  }
+}
 static cardio::promise<void> ReplaceAgent(UpdateBridge* b, int* exit_code) {
   const std::wstring original = b->original, dir = AgentUpdateDirectory(original, b->id);
   const auto candidate = dir + L"\\release.exe", backup = dir + L"\\previous.exe";
@@ -211,12 +274,19 @@ static cardio::promise<void> ReplaceAgent(UpdateBridge* b, int* exit_code) {
       throw std::runtime_error("Staged update digest mismatch.");
     if (!CopyFileW(original.c_str(), backup.c_str(), TRUE) || AgentImageHash(backup) != b->source_hash)
       throw std::runtime_error("Could not preserve the original agent.");
+    auto pending = Result(*b, "applying", "", "");
+    pending.pop_back();
+    pending += ",\"requestedVersion\":\"" + JsonEscape(b->version) + "\",\"previousVersion\":\"" +
+               JsonEscape(b->source_version) + "\",\"previousDisplayVersion\":\"" +
+               JsonEscape(WideToUtf8(old_version)) + "\"}";
+    SaveAgentUpdateResult(original, pending);
     SetEvent(b->joined);
     co_await cardio::from_win32_handle(b->offered, handoff.get_cancellation());
     committed = true;
     auto shutdown = cardio::cancellations::timeout(30000);
     co_await cardio::from_win32_handle(supervisor, shutdown.get_cancellation());
     stopped = true;
+    CheckOtherInstances(original);
     if (AgentImageHash(original) != b->source_hash)
       throw std::runtime_error("Agent changed before replacement.");
     if (!MoveFileExW(candidate.c_str(), original.c_str(),
@@ -239,9 +309,13 @@ static cardio::promise<void> ReplaceAgent(UpdateBridge* b, int* exit_code) {
   }
   if (committed && stopped && state != "applied") {
     try {
-      if (replaced && !MoveFileExW(backup.c_str(), original.c_str(),
-                                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-        throw Failure("Restore original agent");
+      if (replaced) {
+        const auto restore = dir + L"\\restore.exe";
+        if (!CopyFileW(backup.c_str(), restore.c_str(), TRUE) ||
+            !MoveFileExW(restore.c_str(), original.c_str(),
+                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+          throw Failure("Restore original agent");
+      }
       if (registered) SetVersion(registration, old_version);
       if (AgentImageHash(original) != b->source_hash)
         throw std::runtime_error("Original executable SHA-256 mismatch.");

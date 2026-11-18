@@ -41,6 +41,7 @@ std::string AgentImageHash(const std::wstring& path);
 std::wstring AgentUpdateDirectory(const std::wstring& original, const std::string& id);
 KernelHandle CreateUpdateMapping();
 UpdateView MapUpdate(HANDLE h);
+cardio::promise<std::string> ReadAgentUpdateRecord();
 void SaveAgentUpdateResult(const std::wstring& image, const std::string& record);
 }  // namespace agent_rover
 #endif

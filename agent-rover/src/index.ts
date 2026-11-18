@@ -315,6 +315,8 @@ export type RemoteInputOperation =
 export interface RemoteAgentCapabilities {
   /** Product version embedded in the running executable, when reported. */
   readonly agentVersion?: string;
+  /** Identifier of this server lifetime, when reported. */
+  readonly agentInstanceId?: string;
   /** Source revision embedded in the running executable, when reported. */
   readonly gitCommit?: string;
   /** Architecture of the executable, including 32-bit agents on 64-bit Windows. */

@@ -96,6 +96,9 @@ export const installAgentRelease = async (
         '.\n'
     );
     if (release.updateProtocol === 0) {
+      warn(
+        'This release reads its startup options from the command line. A fixed token appears in its process arguments. An automatically generated token changes on restart.\n'
+      );
       const ask = process.stdin.isTTY
         ? async () => {
             const input = createInterface({
@@ -121,13 +124,17 @@ export const installAgentRelease = async (
     }
     signal.throwIfAborted();
     const updateId = randomUUID();
+    warn('Update ID ' + updateId + '\n');
     const outcome = await session.install(updateId, sha256, release);
     return {
       ...base,
       updateId,
       ...outcome,
       manualUpdateRequired:
-        outcome.status === 'applied' && release.updateProtocol === 0,
+        outcome.status === 'unconfirmed' ||
+        outcome.status === 'recovery-required'
+          ? null
+          : outcome.status === 'applied' && release.updateProtocol === 0,
     };
   } catch (error) {
     if (error instanceof Error)

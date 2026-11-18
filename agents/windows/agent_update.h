@@ -8,7 +8,7 @@
 namespace agent_rover {
 /** The client may select a build, but never a destination path or launch command. */
 struct AgentUpdateSpec {
-  std::string id, source_hash, version, architecture, hash;
+  std::string id, source_hash, version, architecture, hash, source_instance, authorization;
   uint64_t bytes = 0;
   uint32_t protocol = 0;
 };
@@ -26,6 +26,8 @@ cardio::promise<void> HandOffAgentUpdate(AgentUpdateSpec spec, std::vector<unsig
                                          std::string request_id, cardio::cancellation stop);
 /** @return Recorded result JSON for this transaction, or null. */
 cardio::promise<std::string> AgentUpdateStatus(std::string id);
+/** Reconciles an interrupted transaction after this instance has acquired its listener. */
+cardio::promise<void> RecoverAgentUpdate();
 /** Runs the temporary updater from a private inherited mapping. */
 int RunAgentUpdateHelper(const wchar_t* handle);
 /** Restarts the supervisor with the effective settings of the verified transaction. */

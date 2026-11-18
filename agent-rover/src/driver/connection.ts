@@ -3,7 +3,7 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import {
   constants as fileConstants,
@@ -463,6 +463,9 @@ const parseCapabilities = (
     protocolVersion: protocolVersionValue,
     ...(typeof value.agentVersion === 'string' && {
       agentVersion: value.agentVersion,
+    }),
+    ...(typeof value.agentInstanceId === 'string' && {
+      agentInstanceId: value.agentInstanceId,
     }),
     ...(typeof value.gitCommit === 'string' && { gitCommit: value.gitCommit }),
     ...((value.architecture === 'amd64' || value.architecture === 'i686') && {
@@ -1796,6 +1799,12 @@ export interface AgentUpdateSession {
     sourceSha256: string,
     release: import('../update/release.ts').VerifiedAgentRelease
   ) => Promise<AgentUpdateOutcome>;
+  /** Looks up one update without replaying its installation. */
+  readonly status: (
+    updateId: string,
+    source: string,
+    digest: string
+  ) => Promise<AgentUpdateOutcome | undefined>;
   /** Closes this connection. */
   readonly release: () => void;
 }
@@ -1810,11 +1819,101 @@ export const connectAgentForUpdate = async (
   target: ResolvedConnectionTarget,
   options: ConnectRemoteAgentOptions
 ): Promise<AgentUpdateSession> => {
-  const connectOnce = async (endpoint: ConnectionEndpoint) =>
-    await connectRemoteAgentOnce(
-      { ...endpoint, timeoutMs: options.timeoutMs ?? defaultTimeoutMs },
-      'update'
-    );
+  const connectOnce = async (
+    endpoint: ConnectionEndpoint
+  ): Promise<AgentUpdateSession> => {
+    const open = async () =>
+      await connectRemoteAgentOnce(
+        { ...endpoint, timeoutMs: options.timeoutMs ?? defaultTimeoutMs },
+        'update'
+      );
+    const initial = await open();
+    let active: AgentUpdateSession | undefined = initial;
+    const abort = new AbortController();
+    const settings =
+      typeof options.retry === 'object' ? options.retry : undefined;
+    return {
+      ...initial,
+      release: () => {
+        abort.abort();
+        active?.release();
+        initial.release();
+      },
+      install: async (id, source, release) => {
+        const result = await selectExplicitConnection(
+          endpoint,
+          options,
+          async () => {
+            abort.signal.throwIfAborted();
+            const session = active ?? (await open());
+            active = session;
+            try {
+              if (
+                session.capabilities.agentInstanceId !==
+                  initial.capabilities.agentInstanceId ||
+                session.capabilities.gitCommit !==
+                  initial.capabilities.gitCommit
+              )
+                throw new Error(
+                  'The selected agent restarted; inspect it again before updating.'
+                );
+              return await session.install(id, source, release);
+            } catch (error) {
+              session.release();
+              active = undefined;
+              throw error;
+            }
+          }
+        );
+        if (result.status !== 'unconfirmed') return result;
+        active?.release();
+        active = undefined;
+        const deadline = Date.now() + (options.timeoutMs ?? defaultTimeoutMs);
+        const attempts =
+          options.retry === false ? 1 : (settings?.maxRetries ?? 360) + 1;
+        for (
+          let attempt = 0;
+          attempt < attempts && Date.now() <= deadline;
+          attempt++
+        ) {
+          abort.signal.throwIfAborted();
+          try {
+            active = await open();
+            if (!active.capabilities.features.includes('agent.update.v1'))
+              break;
+            const saved = await active.status(id, source, release.sha256);
+            if (saved) return saved;
+          } catch (error) {
+            if (
+              typeof error === 'object' &&
+              error !== null &&
+              'code' in error &&
+              ![
+                'DISCONNECTED',
+                'TIMEOUT',
+                'CONNECTION_REFUSED',
+                'AGENT_BUSY',
+                'HANDSHAKE_FAILED',
+              ].includes(String(error.code))
+            )
+              break;
+          } finally {
+            active?.release();
+            active = undefined;
+          }
+          if (attempt + 1 < attempts && Date.now() < deadline)
+            await delay(
+              Math.min(
+                settings?.intervalMs ?? 1000,
+                Math.max(0, deadline - Date.now())
+              ),
+              abort.signal
+            );
+        }
+        return result;
+      },
+    };
+  };
   return target.kind === 'section'
     ? await selectConnection(target.section, options, connectOnce)
     : await selectExplicitConnection(target.endpoint, options, connectOnce);
@@ -2377,7 +2476,41 @@ async function connectRemoteAgentOnce(
   };
 
   if (mode === 'update') {
+    const outcome = (
+      response: JsonValue | undefined,
+      id: string,
+      source: string,
+      digest: string
+    ): AgentUpdateOutcome => {
+      if (
+        !isRecord(response) ||
+        response.updateId !== id ||
+        response.sourceSha256 !== source ||
+        response.sha256 !== digest ||
+        (response.status !== 'applied' &&
+          response.status !== 'restored' &&
+          response.status !== 'recovery-required') ||
+        (response.actualVersion !== null &&
+          typeof response.actualVersion !== 'string') ||
+        typeof response.message !== 'string'
+      )
+        throw new Error('Invalid Windows update result.');
+      return {
+        status: response.status,
+        actualVersion: response.actualVersion,
+        message: response.message,
+      };
+    };
     return {
+      status: async (id, source, digest) => {
+        const value = await requestJson('agent.update.status', {
+          updateId: id,
+        });
+        return value === null ||
+          (isRecord(value) && value.status === 'applying')
+          ? undefined
+          : outcome(value, id, source, digest);
+      },
       endpoint: { host: options.host, port: options.port },
       capabilities: connectedCapabilities,
       imageHash: async () => {
@@ -2390,37 +2523,73 @@ async function connectRemoteAgentOnce(
         const spec = {
           updateId,
           sourceSha256,
+          sourceInstance: connectedCapabilities.agentInstanceId ?? '',
           version: release.version,
           architecture: release.architecture,
           sha256: release.sha256,
           bytes: release.executable.length,
           updateProtocol: release.updateProtocol,
         };
-        await requestJson('agent.update.prepare', spec);
+        const authorization = authToken
+          ? createHmac('sha256', authToken)
+              .update(
+                [
+                  'agent-rover/update/v1',
+                  spec.sourceInstance,
+                  updateId,
+                  sourceSha256,
+                  spec.version,
+                  spec.architecture,
+                  spec.sha256,
+                  String(spec.bytes),
+                  String(spec.updateProtocol),
+                ].join('\n')
+              )
+              .digest('base64url')
+          : '';
+        const prepared = await requestJson('agent.update.prepare', {
+          ...spec,
+          authorization,
+        });
+        if (
+          isRecord(prepared) &&
+          prepared.status === 'applying' &&
+          prepared.updateId === updateId &&
+          prepared.sourceSha256 === sourceSha256 &&
+          prepared.sha256 === release.sha256
+        )
+          return {
+            status: 'unconfirmed',
+            actualVersion: null,
+            message: 'The accepted update is still in progress.',
+          };
+        if (prepared !== null)
+          return outcome(prepared, updateId, sourceSha256, release.sha256);
         const transfer = await sendBinaryTransfer(
           'application/vnd.agent-rover.update',
           release.executable
         );
-        const response = await requestJson('agent.update.apply', {
-          updateId,
-          transferId: transfer.transferId,
-        });
-        if (
-          !isRecord(response) ||
-          response.updateId !== updateId ||
-          (response.status !== 'applied' &&
-            response.status !== 'restored' &&
-            response.status !== 'recovery-required') ||
-          (response.actualVersion !== null &&
-            typeof response.actualVersion !== 'string') ||
-          typeof response.message !== 'string'
-        )
-          throw new Error('Invalid Windows update result.');
-        return {
-          status: response.status,
-          actualVersion: response.actualVersion,
-          message: response.message,
-        };
+        try {
+          const result = await requestJson('agent.update.apply', {
+            updateId,
+            transferId: transfer.transferId,
+          });
+          return outcome(result, updateId, sourceSha256, release.sha256);
+        } catch (error) {
+          if (
+            typeof error !== 'object' ||
+            error === null ||
+            !('code' in error) ||
+            !['DISCONNECTED', 'TIMEOUT'].includes(String(error.code))
+          )
+            throw error;
+          return {
+            status: 'unconfirmed',
+            actualVersion: null,
+            message:
+              'Final acknowledgement lost. Installation was not replayed.',
+          };
+        }
       },
       release: releaseAgent,
     };

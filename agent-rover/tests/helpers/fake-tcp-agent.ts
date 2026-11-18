@@ -59,6 +59,11 @@ export interface FakeTcpAgentOptions {
   readonly disconnectAfterResponse?: readonly string[];
   /** Send only the first video chunk before closing the connection. */
   readonly interruptVideoTransfer?: boolean;
+  /** Supplies a successful response for a test-specific protocol operation. */
+  readonly respond?: (
+    method: string,
+    params: JsonValue | undefined
+  ) => JsonValue | undefined;
   readonly beforeRequest?: (
     method: string,
     params: JsonValue | undefined
@@ -679,6 +684,11 @@ export const startFakeTcpAgent = async (
           ok: false,
           error: failure,
         });
+        return;
+      }
+      const custom = options.respond?.(method, params);
+      if (custom !== undefined) {
+        sendSuccess(id, custom);
         return;
       }
       const recordParams = isRecord(params) ? params : {};

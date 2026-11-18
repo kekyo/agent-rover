@@ -495,6 +495,9 @@ static bool FindJsonObjectField(
   return false;
 }
 
+static std::string agent_instance_id;
+void SetAgentInstanceId(const std::string& id){agent_instance_id=id;}
+
 static bool agent_video_supported = false;
 
 void SetAgentVideoCapability(bool supported) { agent_video_supported = supported; }
@@ -559,6 +562,7 @@ static std::string CapabilitiesJson() {
       "],\"platform\":\"windows\","
       "\"protocolVersion\":\"";
   output += kProtocolVersion;
+  output += "\",\"agentInstanceId\":\""+JsonEscape(agent_instance_id);
   output += "\",\"agentVersion\":\"" AGENT_ROVER_AGENT_VERSION
             "\",\"gitCommit\":\"" AGENT_ROVER_AGENT_GIT_COMMIT_HASH
 #ifdef _WIN64
@@ -1129,7 +1133,8 @@ bool ReadAgentRequest(const std::string& payload, std::string* id, std::string* 
 
 bool ReadAgentUpdateSpec(const std::string& json, AgentUpdateSpec* spec) {
   std::string params;
-  return FindJsonObjectField(json,"params",&params) &&
+  return FindJsonObjectField(json,"params",&params) && FindJsonStringField(params,"sourceInstance",&spec->source_instance) &&
+      FindJsonStringField(params,"authorization",&spec->authorization) &&
       FindJsonStringField(params,"updateId",&spec->id) && FindJsonStringField(params,"sourceSha256",&spec->source_hash) &&
       FindJsonStringField(params,"version",&spec->version) && FindJsonStringField(params,"architecture",&spec->architecture) &&
       FindJsonStringField(params,"sha256",&spec->hash) && FindJsonUInt64Field(params,"bytes",&spec->bytes) &&
