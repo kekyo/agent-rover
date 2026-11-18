@@ -18,24 +18,7 @@ Its command-line client, `arctl`, lets you connect to an agent and run one-off t
 
 > WIP: X11 agent
 
-```mermaid
-flowchart LR
-  subgraph TestProject["Test project (Node.js / TypeScript)"]
-    TestCode["Test code, such as Vitest"]
-    Driver["agent-rover API"]
-    TestCode --> Driver
-  end
-
-  subgraph TargetSession["Target OS GUI session"]
-    Agent["agent-rover-agent"]
-    GuiSession["Windows / X11 GUI session"]
-    Application["GUI application under test"]
-    Agent -->|window enumeration / input / image capture / file operations| GuiSession
-    GuiSession --> Application
-  end
-
-  Driver <-->|custom TCP protocol / authentication handshake| Agent
-```
+![architecture](./images/architecture.png)
 
 agent-rover provides small agent programs that can be used in Windows and X11 environments.
 By starting an agent on the target OS, you can remotely operate applications from a Node.js environment through a Jest-like testing interface.
