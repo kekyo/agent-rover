@@ -387,27 +387,6 @@ arctl --help
 プロジェクトに`npm install -D agent-rover`で導入した場合は、`npx arctl`で実行します。
 `arctl --help`、`arctl record --help`などのヘルプと`arctl --version`は、接続せずに表示できます。
 
-#### Windows エージェントの更新
-
-テストドライバーを実行する PC で、次のように接続先とリリース番号を指定します。
-
-```bash
-arctl --section windows-xp update
-arctl --section windows-xp update 0.10.0
-```
-
-1行目は選ばれた1台のホスト、ポート、稼働バージョン、コミット、CPU、更新機能の有無を表示します。2行目はそのセクションから1台を選び、指定版に切り替えます。同じ端末を続けて操作するときは、接続先が1台のセクションを使ってください。1回の更新で途中から別の端末に切り替わることはありません。
-
-`arctl` が GitHub Releases から ZIP を取得し、公開されている SHA-256 と照合します。Windows に送るのは、稼働中の CPU に合う EXE とその検証情報です。Windows 側でも EXE の SHA-256 を確かめるため、XP 上で GitHub に接続する必要はありません。同じバージョンで内容も一致すれば、転送と再起動を省きます。認証を無効にした端末で適用できるのは、端末にハッシュを同梱した公開旧版か稼働中と同じ EXE です。新しいリリースの導入には通常のトークン認証を使ってください。[Windows エージェントのリリース](https://github.com/kekyo/agent-rover/releases)
-
-0.1.0〜0.10.0 は遠隔更新に対応していません。これらの版を指定すると、次の更新が手動になることを表示します。`y` で続行し、Enter または `n` で中止します。自動化では次のように明示して許可してください。`--json` は結果の出力形式を選びます。
-
-```bash
-arctl --section windows-xp --json update 0.10.0 --allow-legacy-downgrade
-```
-
-更新結果には変更前、指定版、起動を確認した版と更新 ID が含まれます。`restored` は元の版で再起動したことを、`unconfirmed` は今回の結果を確認できなかったことを示します。端末で旧版が稼働しているときは Windows 上で終了し、ポータブル版は元の EXE を更新対応版に入れ替えます。インストーラー版は同じユーザーで同じ場所に対応版をセットアップします。起動後はバージョン無指定の `arctl update` で確認できます。
-
 #### 接続とコマンド例
 
 セクション指定を省略しているので、`$HOME/.agent-rover`の`default`セクションに指定されている接続先を操作します。
@@ -598,6 +577,27 @@ arctl --host test-agent.example.com --port 39397 --token '<access-token>' window
 明示指定時は従来どおり、使用中を示す`AGENT_BUSY`の場合だけ再試行します。
 既定では10秒間隔で最大360回リトライし、SDKの`retry`、CLIの`--retry-count`・`--retry-interval`で変更できます。
 SDKの`retry: false`やCLIの`--no-retry`で無効にできます。認証失敗や通信エラーでは直ちに終了します。
+
+### Windows エージェントの更新
+
+テストドライバーを実行する PC で、次のように接続先とリリース番号を指定します。
+
+```bash
+arctl --section windows-xp update
+arctl --section windows-xp update 0.10.0
+```
+
+1行目は選ばれた1台のホスト、ポート、稼働バージョン、コミット、CPU、更新機能の有無を表示します。2行目はそのセクションから1台を選び、指定版に切り替えます。同じ端末を続けて操作するときは、接続先が1台のセクションを使ってください。1回の更新で途中から別の端末に切り替わることはありません。
+
+`arctl` が GitHub Releases から ZIP を取得し、公開されている SHA-256 と照合します。Windows に送るのは、稼働中の CPU に合う EXE とその検証情報です。Windows 側でも EXE の SHA-256 を確かめるため、XP 上で GitHub に接続する必要はありません。同じバージョンで内容も一致すれば、転送と再起動を省きます。認証を無効にした端末で適用できるのは、端末にハッシュを同梱した公開旧版か稼働中と同じ EXE です。新しいリリースの導入には通常のトークン認証を使ってください。[Windows エージェントのリリース](https://github.com/kekyo/agent-rover/releases)
+
+0.1.0〜0.10.0 は遠隔更新に対応していません。これらの版を指定すると、次の更新が手動になることを表示します。`y` で続行し、Enter または `n` で中止します。自動化では次のように明示して許可してください。`--json` は結果の出力形式を選びます。
+
+```bash
+arctl --section windows-xp --json update 0.10.0 --allow-legacy-downgrade
+```
+
+更新結果には変更前、指定版、起動を確認した版と更新 ID が含まれます。`restored` は元の版で再起動したことを、`unconfirmed` は今回の結果を確認できなかったことを示します。端末で旧版が稼働しているときは Windows 上で終了し、ポータブル版は元の EXE を更新対応版に入れ替えます。インストーラー版は同じユーザーで同じ場所に対応版をセットアップします。起動後はバージョン無指定の `arctl update` で確認できます。
 
 ---
 
