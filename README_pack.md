@@ -20,8 +20,7 @@ Its command-line client, `arctl`, lets you connect to an agent and run one-off t
 
 ![architecture](./images/architecture.png)
 
-agent-rover provides small agent programs that can be used in Windows and X11 environments.
-By starting an agent on the target OS, you can remotely operate applications from a Node.js environment through a Jest-like testing interface.
+A small agent runs on the target OS and lets you control applications remotely from Node.js through a Jest-like testing interface.
 
 The API lets you perform the same actions you would carry out manually in a remote desktop (RDP) session.
 
@@ -96,7 +95,8 @@ arctl record ./screen.mp4 --seconds 10 --fps 30
   File operations, such as sending and receiving files, are also supported.
 - Capture the screen or an application window as a PNG image, or as an H.264
   MP4 video on a supported Windows agent.
-- Prebuilt agents are available for Windows (i686/amd64 on XP SP2 or later) and Linux X11 (WIP: i686/amd64/armv7l/arm64/riscv64).
+- Prebuilt Windows agents target Windows XP SP2 and later on i686 and amd64.
+  The Linux X11 agent is in development for i686, amd64, armv7l, arm64, and riscv64.
 - Agent communication uses a custom TCP protocol.
   Authentication uses a digest handshake, although the protocol messages themselves are not encrypted.
 - Image recognition assertions for exact or close matches, and OCR-based assertions.
@@ -156,7 +156,7 @@ import { connectRemoteAgent } from 'agent-rover';
 
 describe('remote agent smoke test', () => {
   it('finds a running Notepad window', async () => {
-    // Connect to the remote agent.
+    // Connect using the [default] section of .agent-rover.
     const agent = await connectRemoteAgent();
 
     try {
@@ -177,13 +177,14 @@ describe('remote agent smoke test', () => {
 });
 ```
 
-For the operations available to test code, see the test driver API reference.
+For the operations available to test code, see the [test driver API reference](https://github.com/kekyo/agent-rover#reference).
 
 ---
 
 ## Documents
 
-For more information, [please visit the repository](https://github.com/kekyo/agent-rover/).
+- For logs, startup settings, test directories, process supervision, and limits, see [Agent Configuration Details](https://github.com/kekyo/agent-rover#agent-configuration-details).
+- For `arctl` commands, recording options, and connection settings, see [Test Driver Configuration Details](https://github.com/kekyo/agent-rover#test-driver-configuration-details).
 
 ## License
 

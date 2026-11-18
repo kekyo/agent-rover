@@ -42,8 +42,7 @@ flowchart LR
   Driver <-->|custom TCP protocol / authentication handshake| Agent
 ```
 
-agent-rover provides small agent programs that can be used in Windows and X11 environments.
-By starting an agent on the target OS, you can remotely operate applications from a Node.js environment through a Jest-like testing interface.
+A small agent runs on the target OS and lets you control applications remotely from Node.js through a Jest-like testing interface.
 
 The API lets you perform the same actions you would carry out manually in a remote desktop (RDP) session.
 
@@ -118,7 +117,8 @@ arctl record ./screen.mp4 --seconds 10 --fps 30
   File operations, such as sending and receiving files, are also supported.
 - Capture the screen or an application window as a PNG image, or as an H.264
   MP4 video on a supported Windows agent.
-- Prebuilt agents are available for Windows (i686/amd64 targeting XP SP2 or later) and Linux X11 (WIP: i686/amd64/armv7l/arm64/riscv64).
+- Prebuilt Windows agents target Windows XP SP2 and later on i686 and amd64.
+  The Linux X11 agent is in development for i686, amd64, armv7l, arm64, and riscv64.
 - Agent communication uses a custom TCP protocol.
   Authentication uses a digest handshake, although the protocol messages themselves are not encrypted.
 - Image recognition assertions for exact or close matches, and OCR-based assertions.
@@ -178,7 +178,7 @@ import { connectRemoteAgent } from 'agent-rover';
 
 describe('remote agent smoke test', () => {
   it('finds a running Notepad window', async () => {
-    // Connect to the remote agent.
+    // Connect using the [default] section of .agent-rover.
     const agent = await connectRemoteAgent();
 
     try {
@@ -220,6 +220,19 @@ The preferred setup is to run the agent inside a virtual machine placed on the s
 ## Agent Configuration Details
 
 Use the agent's system tray menu on the target machine to edit its configuration and view its logs.
+
+### Log Management
+
+The resizable list shows the latest 1,000 records. Older records are saved as
+UTF-8 files in `%APPDATA%\agent-rover\logs`.
+
+Choose “Open log folder” from the tray to browse them.
+Normally, five files of up to 10 MiB each are retained.
+Active files belonging to other instances are preserved, so concurrent instances
+can exceed five files in total.
+
+The status area reports save failures and records that were dropped or whose
+persistence could not be confirmed.
 
 ### Windows Agent Configuration And Startup
 
@@ -281,38 +294,10 @@ After moving a ZIP installation, enable startup again from its new location. Pat
 
 Windows startup settings or policies may disable or delay execution. See [Windows Run key behavior](https://learn.microsoft.com/en-us/windows/win32/setupapi/run-and-runonce-registry-keys).
 
-### Agent Limits (Advanced topic)
-
-Driver requests have a default deadline of 30 seconds. An expired request closes
-the entire connection and cancels its queued operations.
-Reconnect to continue. Side effects already submitted to the target application
-cannot be undone.
-
-Windows operation budgets are 30 seconds for windows, input and clipboard, and
-normally 120 seconds for other operations.
-Recording is limited to ten minutes; result retrieval allows the recording
-duration plus 120 seconds.
-
-Windows accepts one connection by default. With `--connection-mode multiple`,
-it accepts up to 16 connections and reserves operation workers for up to
-eight connections. Capture directories are limited to 64 connections, including
-active and pending recovery.
-At capacity, new captures and recordings cannot start; operations that do not
-require captured output remain available.
-
-Whole-file reads and the combined incoming transfer data retained per connection
-are limited to 512 MiB by default.
-Set `--max-transfer-size 128` at agent startup to change the limit to a positive
-integer number of MiB. The same limit applies when retrieving captured stdout
-or stderr.
-
-Each Windows connection can own up to 64 managed processes. Split larger workloads.
-
 ### Microsoft Defender Exclusions
 
-agent-rover does not change Defender exclusions or provide a tray command to add them.
-If an exclusion is necessary, create a dedicated test folder and set its absolute path in the agent INI's `safe-base-dir`.
-An exclusion changes scanning for files beneath the folder; do not select the entire system temporary directory or an entire drive.
+Real-time antivirus scans can interfere with files used during a test. The agent can suggest a dedicated folder for the test driver to use.
+If your tests need a Microsoft Defender exclusion, create a folder for those tests.
 
 On Windows 11, open Windows Security → Virus & threat protection → Manage settings → Add or remove exclusions, then select the folder.
 For PowerShell, open an elevated session and replace the example path with your existing dedicated folder.
@@ -321,6 +306,15 @@ Use `Add-MpPreference` to preserve existing exclusions.
 
 ```powershell
 Add-MpPreference -ExclusionPath 'C:\RoverWork'
+```
+
+> An exclusion changes which files Defender scans under the selected folder. Limit it to the dedicated test folder. An entire drive or the system temporary directory is too broad.
+
+Set `safe-base-dir` in the agent's INI file to the absolute path of that folder. For example, if the folder is `C:\RoverWork`, use the following setting.
+
+```ini
+[agent]
+safe-base-dir=C:\RoverWork
 ```
 
 When a folder is no longer needed, select and remove it in the same settings screen or run the following in elevated PowerShell.
@@ -334,21 +328,60 @@ Remove-MpPreference -ExclusionPath 'C:\RoverWork'
 The public WMI API also accepts `ExclusionPath` through `MSFT_MpPreference.Add`, with a minimum client OS of Windows 8.1. It does not support XP.
 [WMI API requirements and parameters](https://learn.microsoft.com/en-us/previous-versions/windows/desktop/defender/add-msft-mppreference)
 If organizational policy restricts changing or viewing exclusions, ask your administrator to configure them.
-An exclusion missing from a displayed list does not establish that it is absent.
-[Managed-device restrictions](https://learn.microsoft.com/en-us/defender-endpoint/microsoft-defender-antivirus-exclusions-configure), [exclusion tamper protection](https://learn.microsoft.com/en-us/defender-endpoint/tamper-protection-antivirus-exclusions)
 
-### Log Management (Advanced topic)
+### Process Supervision And Management (Advanced topic)
 
-The resizable list shows the latest 1,000 records. Older records are saved as
-UTF-8 files in `%APPDATA%\agent-rover\logs`.
+An independent supervisor starts with the agent. If the host stops making progress
+for 15 seconds or exits unexpectedly, the supervisor confirms termination and
+restarts it. Startup has a 30-second allowance.
 
-Choose “Open log folder” from the tray to browse them.
-Normally, five files of up to 10 MiB each are retained.
-Active files belonging to other instances are preserved, so concurrent instances
-can exceed five files in total.
+Automatic host restarts retain the authentication token, port, transfer limit
+and other startup settings.
+Reconnect the driver to continue; requests from the disconnected session are
+never replayed.
 
-The status area reports save failures and records that were dropped or whose
-persistence could not be confirmed.
+Starts are limited to three in any 60-second period, with delayed retries after
+repeated failures. Choosing “Exit” stops both the host and its supervisor.
+
+TCP disconnects stop the session's work and reclaim managed application trees
+that are configured to terminate. Once termination is confirmed, other connections
+can operate even if capture-file deletion fails; file cleanup retries independently.
+
+Applications with `killTreeOnRelease: false` keep running. Their captured output
+is retained while it is still in use. Pending recovery survives automatic host restarts.
+Logs record restart reasons and the failing cleanup stage and path, including
+directories that could not be removed at shutdown.
+
+A replacement host waits until the old processes have been confirmed stopped.
+Automatic recovery does not cover an OS-wide failure or termination of the
+supervisor itself.
+
+### Agent Limits (Advanced topic)
+
+Driver requests have a default deadline of 30 seconds. An expired request closes
+the entire connection and cancels its queued operations.
+Reconnect to continue. Side effects already submitted to the target application
+cannot be undone.
+
+Windows operation budgets are 30 seconds for windows, input and clipboard, and
+normally 120 seconds for other operations.
+Recording is limited to ten minutes; result retrieval allows the recording
+duration plus 120 seconds.
+
+Windows accepts one connection by default. With `connection-mode=multiple` in the agent INI,
+it accepts up to 16 connections and reserves operation workers for up to
+eight connections. Capture directories are limited to 64 connections, including
+active and pending recovery.
+At capacity, new captures and recordings cannot start; operations that do not
+require captured output remain available.
+
+Whole-file reads and the combined incoming transfer data retained per connection
+are limited to 512 MiB by default.
+Set `max-transfer-size` in the agent INI to a positive integer in MiB, for example
+`max-transfer-size=128`. The same limit applies when retrieving captured stdout
+or stderr.
+
+Each Windows connection can own up to 64 managed processes. Split larger workloads.
 
 ---
 
@@ -377,8 +410,8 @@ work without a connection.
 
 #### Connection And Examples
 
-These examples use Bash. Register the endpoint in the `default` section of
-`$HOME/.agent-rover` before running them.
+These examples omit `--section`, so they use the `default` section. They assume
+you have registered the agent's endpoint in that section of `$HOME/.agent-rover`.
 
 ```bash
 arctl put ./app.exe 'C:\work\app.exe'
@@ -410,9 +443,9 @@ operate on the same machine.
 
 Common options can precede or follow the subcommand.
 For host and token arguments, see [Explicit Host Connections (Optional)](#explicit-host-connections-optional).
-The recording duration itself is separate from the request deadline.
-`--timeout` accepts 0.001 to 2147483.647 seconds, matching the
-[Node.js timer range](https://nodejs.org/docs/latest-v24.x/api/timers.html#settimeoutcallback-delay-args).
+
+The request deadline excludes the time spent recording. Specify `--timeout` in seconds.
+The supported range follows the [Node.js timer limits](https://nodejs.org/docs/latest-v24.x/api/timers.html#settimeoutcallback-delay-args).
 
 When using a section, each round shuffles the candidates and tries them in sequence. Busy agents,
 authentication failures, and transport failures advance to the next candidate
@@ -448,27 +481,31 @@ A file/directory type conflict fails without deleting the existing item.
 Attributes, links, differential synchronization, and transfer resumption are
 not supported. Remote paths are resolved on the target; absolute paths are recommended.
 
-Omitting `--window` captures all monitors of the current desktop. There is no
+For video recording, omitting `--window` captures all monitors of the current desktop. There is no
 special ID for the whole screen. Window IDs become invalid when their windows
 close and can be reused. Unknown IDs fail instead of selecting the whole screen.
+
 Captures contain the pixels currently visible, including overlapping windows.
 The CLI does not activate or restore windows, or wait for drawing to settle.
-Capture output paths are local; parent directories are created, and existing
-files are never overwritten. Recording uses quality 90, follows the window's
+
+The CLI saves images and videos locally, creates parent directories as needed, and requires a new output filename.
+Recording uses quality 90, follows the window's
 position, and uses its initial size. It waits for capture, transfer, and saving
-to complete. Unsupported recording and encoding failures are reported as errors.
+to complete. The command reports an error if the agent lacks recording support or encoding fails.
 
 #### Results And Interruption
 
-Success results go to stdout and errors to stderr, including with `--json`.
+Successful results go to stdout. Errors go to stderr, including when you use `--json`.
+
 Before each retry wait, stdout shows the section, each endpoint failure,
-the delay in seconds, and the retry count. Explicit connections show the host and
-port instead of a section name. With `--json`, these notices go to stderr so stdout contains
-only the result JSON.
+the delay in seconds, and the retry count. Explicit connections show the chosen host and port.
+With `--json`, these notices go to stderr and stdout contains only the result JSON.
+
 Exit codes are `0` for success, `1` for connection or operation failure,
 `2` for invalid arguments or configuration, and `130` for Ctrl+C.
 If a disconnect or deadline leaves the outcome unknown, the CLI reports that
 uncertainty and does not retry the operation automatically.
+
 Applications already started, files already transferred, and completed captures
 remain after interruption or failure. Restoring a partially written file is not
 guaranteed. Interrupting a recording does not wait for its remaining duration,
@@ -480,6 +517,7 @@ The SDK and `arctl` prefer `.agent-rover` in the working directory at invocation
 If that file or the requested section is absent, they look for the same section
 in your home directory's `.agent-rover`: `$HOME/.agent-rover` on Linux, usually
 `%USERPROFILE%\.agent-rover` on Windows.
+
 Register shared test machines in the home file and place a configuration in the
 working directory when particular tests need their own machines.
 The working directory is `process.cwd()` when the connection starts, rather than
@@ -499,11 +537,14 @@ baz.hoge.com:12345=<baz-token>
 ```
 
 Select a section with `connectRemoteAgent({ section: 'windows' })` or
-`arctl --section windows windows`. The default is `default`.
+`arctl --section windows windows`.
+
+Omit the section name to use `default`.
 Section names are case-sensitive and literal, including dots. Sections do not
 inherit entries from `default`.
 For example, if the working directory's file contains only `windows`, that
 section comes from the local file while `default` is looked up in the home file.
+
 The first matching section supplies the entire candidate list; entries from
 different files are not merged. If every candidate is busy or otherwise fails,
 retries keep using that list. Connection failures do not switch to the home file.
@@ -523,15 +564,11 @@ BOM and CRLF/LF line endings are supported.
 Entries before a section, repeated section names, and duplicate endpoints in a
 section are errors. Endpoint comparison ignores hostname case and omission of
 the default port. An empty local file has no sections, so the home file is checked.
+
 An explicitly empty selected section, syntax error, or read error fails
 immediately before connecting. If neither file provides the requested section,
 the error identifies its name and the searched paths. Syntax errors include the
 file name and line number, without echoing configuration lines or tokens.
-
-Run the repository's Notepad sample from its root with
-`AGENT_ROVER_SAMPLE_SECTION=windows npm run sample:notepad`.
-This variable selects a configuration section. Without it, the sample is skipped
-when running the full test suite.
 
 ### Explicit Host Connections (Optional)
 
@@ -584,33 +621,6 @@ is retried, by default up to 360 times at ten-second intervals.
 Use the SDK's `retry` or the CLI's `--retry-count` and `--retry-interval` to change
 these settings. Disable retries with `retry: false` or `--no-retry`.
 Authentication and transport failures return immediately.
-
-### Process Supervision And Management (Advanced topic)
-
-An independent supervisor starts with the agent. If the host stops making progress
-for 15 seconds or exits unexpectedly, the supervisor confirms termination and
-restarts it. Startup has a 30-second allowance.
-
-Automatic host restarts retain the authentication token, port, transfer limit
-and other startup settings.
-Reconnect the driver to continue; requests from the disconnected session are
-never replayed.
-
-Starts are limited to three in any 60-second period, with delayed retries after
-repeated failures. Choosing “Exit” stops both the host and its supervisor.
-
-TCP disconnects stop the session's work and reclaim managed application trees
-that are configured to terminate. Once termination is confirmed, other connections
-can operate even if capture-file deletion fails; file cleanup retries independently.
-
-Applications with `killTreeOnRelease: false` keep running. Their captured output
-is retained while it is still in use. Pending recovery survives automatic host restarts.
-Logs record restart reasons and the failing cleanup stage and path, including
-directories that could not be removed at shutdown.
-
-A replacement host waits until the old processes have been confirmed stopped.
-Automatic recovery does not cover an OS-wide failure or termination of the
-supervisor itself.
 
 ---
 
