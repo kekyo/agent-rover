@@ -100,9 +100,14 @@ it('hands the maintenance connection to a helper and confirms the replacement li
       session.release();
     }
     await ended;
-    await waitForResult(async () => {
-      expect(await readdir(dir)).not.toContain('.agent-rover-update-' + updateId);
-    }, { timeoutMs: 10000 });
+    await waitForResult(
+      async () => {
+        expect(await readdir(dir)).not.toContain(
+          '.agent-rover-update-' + updateId
+        );
+      },
+      { timeoutMs: 10000 }
+    );
 
     const replacement = await connectAgentForUpdate(target, options);
     try {
