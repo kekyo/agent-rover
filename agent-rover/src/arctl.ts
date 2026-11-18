@@ -7,6 +7,7 @@
 import type { RemoteAgent } from './index';
 import { authTokenEnvVarName, createCredentialRedactor } from './auth';
 import {
+  connectAgentForUpdate,
   connectRemoteAgentToTarget,
   resolveConnectionTarget,
 } from './driver/connection';
@@ -19,6 +20,8 @@ import { captureArctlScreenshot, recordArctlVideo } from './cli/capture';
 const main = async (): Promise<number> => {
   const args = process.argv.slice(2);
   let agent: RemoteAgent | undefined;
+  let updateSession:
+    Awaited<ReturnType<typeof connectAgentForUpdate>> | undefined;
   let executing = false;
   let interrupted = false;
   const interruption = new AbortController();
@@ -36,7 +39,9 @@ const main = async (): Promise<number> => {
   const onInterrupt = (): void => {
     interrupted = true;
     interruption.abort();
-    if (agent === undefined) {
+    if (updateSession !== undefined) {
+      updateSession.release();
+    } else if (agent === undefined) {
       // No operation or temporary transfer exists during the handshake. Ending
       // the CLI closes its pending socket even before the SDK returns a handle.
       process.stderr.write('arctl: Interrupted.\n', () => {
@@ -63,13 +68,30 @@ const main = async (): Promise<number> => {
       );
     };
     executing = true;
-    agent = await connectRemoteAgentToTarget(target, {
+    const connection = {
       ...parsed.connection,
-      onRetry: (message) => {
+      onRetry: (message: string) => {
         const output = parsed.json ? process.stderr : process.stdout;
         output.write(redact(`${message}\n`));
       },
-    });
+    };
+    if (parsed.command === 'update') {
+      updateSession = await connectAgentForUpdate(target, connection);
+      const { endpoint, capabilities } = updateSession;
+      const result = {
+        endpoint,
+        agentVersion: capabilities.agentVersion ?? null,
+        gitCommit: capabilities.gitCommit ?? null,
+        architecture: capabilities.architecture ?? null,
+        updateSupported: capabilities.features.includes('agent.update.v1'),
+      };
+      writeResult(
+        result,
+        `${endpoint.host}:${endpoint.port}  agent ${result.agentVersion ?? 'unknown'}  commit ${result.gitCommit ?? 'unknown'}  ${result.architecture ?? 'unknown architecture'}\n${result.updateSupported ? 'Remote update supported.' : 'Remote update unavailable. Install an update-capable agent manually on this PC.'}\n`
+      );
+      return 0;
+    }
+    agent = await connectRemoteAgentToTarget(target, connection);
     if (interrupted) return 130;
     if (parsed.command === 'record') {
       const result = await recordArctlVideo(
@@ -152,6 +174,7 @@ const main = async (): Promise<number> => {
     );
     return executing ? 1 : 2;
   } finally {
+    updateSession?.release();
     agent?.release();
     process.off('SIGINT', onInterrupt);
   }

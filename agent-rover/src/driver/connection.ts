@@ -461,6 +461,13 @@ const parseCapabilities = (
     features: featuresValue,
     platform: platformValue,
     protocolVersion: protocolVersionValue,
+    ...(typeof value.agentVersion === 'string' && {
+      agentVersion: value.agentVersion,
+    }),
+    ...(typeof value.gitCommit === 'string' && { gitCommit: value.gitCommit }),
+    ...((value.architecture === 'amd64' || value.architecture === 'i686') && {
+      architecture: value.architecture,
+    }),
   };
 };
 
@@ -1765,9 +1772,47 @@ export const connectRemoteAgentInSection = async (
   );
 };
 
-const connectRemoteAgentOnce = async (
+/** Authenticated connection restricted to the agent update protocol. */
+export interface AgentUpdateSession {
+  /** Selected host and port, with no credentials. */
+  readonly endpoint: { readonly host: string; readonly port: number };
+  /** Build information reported in the ready event. */
+  readonly capabilities: RemoteAgentCapabilities;
+  /** Closes this connection. */
+  readonly release: () => void;
+}
+
+/**
+ * Selects one endpoint for update inspection or installation.
+ * @param target Validated explicit endpoint or configured section.
+ * @param options Retry and connection timeout settings.
+ * @returns A session for the selected endpoint.
+ */
+export const connectAgentForUpdate = async (
+  target: ResolvedConnectionTarget,
+  options: ConnectRemoteAgentOptions
+): Promise<AgentUpdateSession> => {
+  const connectOnce = async (endpoint: ConnectionEndpoint) =>
+    await connectRemoteAgentOnce(
+      { ...endpoint, timeoutMs: options.timeoutMs ?? defaultTimeoutMs },
+      'update'
+    );
+  return target.kind === 'section'
+    ? await selectConnection(target.section, options, connectOnce)
+    : await selectExplicitConnection(target.endpoint, options, connectOnce);
+};
+
+function connectRemoteAgentOnce(
   options: ConnectionAttemptOptions
-): Promise<RemoteAgent> => {
+): Promise<RemoteAgent>;
+function connectRemoteAgentOnce(
+  options: ConnectionAttemptOptions,
+  mode: 'update'
+): Promise<AgentUpdateSession>;
+async function connectRemoteAgentOnce(
+  options: ConnectionAttemptOptions,
+  mode: 'driver' | 'update' = 'driver'
+): Promise<RemoteAgent | AgentUpdateSession> {
   const { timeoutMs, authToken } = options;
   const pending = createPendingRequestTable({
     requestTimeoutMs: timeoutMs,
@@ -2167,7 +2212,10 @@ const connectRemoteAgentOnce = async (
                 ? (eventData.capabilities as JsonValue)
                 : undefined
             );
-            if (capabilities.protocolVersion !== protocolVersion) {
+            if (
+              mode === 'driver' &&
+              capabilities.protocolVersion !== protocolVersion
+            ) {
               if (readyState !== undefined) {
                 settleReady(
                   readyState,
@@ -2309,6 +2357,14 @@ const connectRemoteAgentOnce = async (
     }
     return reference;
   };
+
+  if (mode === 'update') {
+    return {
+      endpoint: { host: options.host, port: options.port },
+      capabilities: connectedCapabilities,
+      release: releaseAgent,
+    };
+  }
 
   const receiveRecordedVideo = async (
     method: 'agent.recordVideo' | 'window.recordVideo',
@@ -4553,4 +4609,4 @@ const connectRemoteAgentOnce = async (
       await listTopLevelWindows(),
     [Symbol.dispose]: releaseAgent,
   };
-};
+}

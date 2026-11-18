@@ -58,6 +58,65 @@ const runArctl = async (args: readonly string[], configuration: string) => {
 };
 
 describe('arctl', () => {
+  it('inspects one update endpoint across test protocol versions without transferring files', async () => {
+    const requests: string[] = [];
+    const capabilities = {
+      protocolVersion: 'other-test-protocol',
+      platform: 'windows' as const,
+      features: ['agent.update.v1'],
+      agentVersion: '1.2.3',
+      gitCommit: '0123456789abcdef',
+      architecture: 'i686' as const,
+    };
+    const fake = await startFakeTcpAgent({
+      capabilities,
+      authToken: 'inspection-token',
+      beforeRequest: (method) => {
+        requests.push(method);
+        return undefined;
+      },
+    });
+    try {
+      const result = await runArctl(
+        ['--section', 'xp', '--no-retry', '--json', 'update'],
+        `[xp]\n${fake.host}:${fake.port}=inspection-token\n`
+      );
+      expect(result.code, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        command: 'update',
+        result: {
+          endpoint: { host: fake.host, port: fake.port },
+          agentVersion: '1.2.3',
+          gitCommit: capabilities.gitCommit,
+          architecture: 'i686',
+          updateSupported: true,
+        },
+      });
+      expect(result.stdout).not.toContain('inspection-token');
+      expect(requests).toEqual([]);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it('explains manual installation when inspecting a legacy update endpoint', async () => {
+    const fake = await startFakeTcpAgent({
+      protocolVersionOverride: '2026-09-09.1',
+    });
+    try {
+      const result = await runArctl(
+        ['update', '--no-retry'],
+        `[default]\n${fake.host}:${fake.port}=\n`
+      );
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.stdout).toContain(`${fake.host}:${fake.port}`);
+      expect(result.stdout).toMatch(/unknown/i);
+      expect(result.stdout).toMatch(/manual/i);
+    } finally {
+      await fake.close();
+    }
+  });
+
   it.each([
     { args: ['--no-retry'], attempts: 1 },
     { args: ['--retry-count', '0'], attempts: 1 },

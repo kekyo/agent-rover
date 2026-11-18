@@ -16,6 +16,7 @@
 
 #include "agent_log.h"
 #include "binary_codec.h"
+#include "version.h"
 #include "video_recording.h"
 #include "win32_capture.h"
 #include "win32_clipboard.h"
@@ -557,7 +558,13 @@ static std::string CapabilitiesJson() {
       "],\"platform\":\"windows\","
       "\"protocolVersion\":\"";
   output += kProtocolVersion;
-  output += "\"}";
+  output += "\",\"agentVersion\":\"" AGENT_ROVER_AGENT_VERSION
+            "\",\"gitCommit\":\"" AGENT_ROVER_AGENT_GIT_COMMIT_HASH
+#ifdef _WIN64
+            "\",\"architecture\":\"amd64\"}";
+#else
+            "\",\"architecture\":\"i686\"}";
+#endif
   return output;
 }
 

@@ -291,6 +291,22 @@ afterAll(async () => {
   }
 }, 60000);
 
+it('reports the running Windows build through the CLI and SDK', async () => {
+  const capabilities = await observer!.capabilities();
+  const { result } = JSON.parse((await arctl(['update', '--json'])).stdout);
+  expect(result).toMatchObject({
+    agentVersion: expect.stringMatching(/^\d+\.\d+\.\d+$/),
+    gitCommit: expect.stringMatching(/^[a-f\d]+$/),
+    architecture: 'amd64',
+    endpoint: { port },
+  });
+  expect(capabilities).toMatchObject({
+    agentVersion: result.agentVersion,
+    gitCommit: result.gitCommit,
+    architecture: result.architecture,
+  });
+});
+
 it('leaves a real application running with literal arguments, cwd, environment, and logs', async () => {
   const event = `Local\\AgentRoverArctlLaunch-${process.pid}`;
   const args = [

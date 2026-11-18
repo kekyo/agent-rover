@@ -12,6 +12,7 @@ import type {
 
 /** Validated operation selected by the CLI. */
 export type ArctlOperation =
+  | { /** Inspect the selected Windows agent. */ readonly command: 'update' }
   | { /** Enumerate windows. */ readonly command: 'windows' }
   | {
       /** Launch an independently owned application. */ readonly command: 'launch';
@@ -139,6 +140,14 @@ export const parseArctlArguments = (
       writeErr: () => {},
     })
     .exitOverride();
+  program
+    .command('update')
+    .description(
+      'Show the running Windows agent version and remote update support.'
+    )
+    .action(() => {
+      operation = { command: 'update' };
+    });
   program
     .command('windows')
     .description(
