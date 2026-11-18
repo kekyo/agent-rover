@@ -21,6 +21,20 @@ namespace agent_rover {
  */
 std::string CreateReadyEventJson();
 
+struct AgentUpdateSpec;
+/** Parses the build identity, bounded size and release protocol of a prepare request. */
+bool ReadAgentUpdateSpec(const std::string& json, AgentUpdateSpec* spec);
+/** Reads a string field from an update request or catalog. */
+bool FindJsonStringField(const std::string& json,const std::string& key,std::string* value);
+/** Serializes a successful response with an already encoded JSON result. */
+std::string SuccessResponseJson(const std::string& id,const std::string& result);
+/** Escapes a UTF-8 string for JSON serialization. */
+std::string JsonEscape(const std::string& value);
+/** Matches historical images against the packaged catalog. */
+bool MatchesLegacyAgent(const std::string& catalog, const AgentUpdateSpec& spec);
+
+/** Records the random identifier of this server lifetime. */
+void SetAgentInstanceId(const std::string& id);
 /** Sets the cached video capability after isolated detection.
  * @param supported Whether Media Foundation was successfully detected. */
 void SetAgentVideoCapability(bool supported);

@@ -3,6 +3,7 @@
 // Under MIT.
 // https://github.com/kekyo/agent-rover
 
+#include "agent_update.h"
 #include "json_protocol.h"
 
 #include "../protocol_version.h"
@@ -16,6 +17,7 @@
 
 #include "agent_log.h"
 #include "binary_codec.h"
+#include "version.h"
 #include "video_recording.h"
 #include "win32_capture.h"
 #include "win32_clipboard.h"
@@ -31,7 +33,7 @@ namespace agent_rover {
 
 static constexpr uint32_t kBinaryTransferChunkBytes = 64 * 1024;
 
-static std::string JsonEscape(const std::string& value) {
+std::string JsonEscape(const std::string& value) {
   std::string output;
   for (const char ch : value) {
     switch (ch) {
@@ -124,7 +126,7 @@ static bool ReadEscapedJsonString(
   return false;
 }
 
-static bool FindJsonStringField(
+bool FindJsonStringField(
     const std::string& json,
     const std::string& key,
     std::string* value) {
@@ -493,6 +495,9 @@ static bool FindJsonObjectField(
   return false;
 }
 
+static std::string agent_instance_id;
+void SetAgentInstanceId(const std::string& id) { agent_instance_id = id; }
+
 static bool agent_video_supported = false;
 
 void SetAgentVideoCapability(bool supported) { agent_video_supported = supported; }
@@ -553,15 +558,22 @@ static std::string CapabilitiesJson() {
   output += kTcpFrameCapabilityId;
   output += "\",";
   output +=
-      "\"agent.native-windows\""
+      "\"agent.update.v1\",\"agent.native-windows\""
       "],\"platform\":\"windows\","
       "\"protocolVersion\":\"";
   output += kProtocolVersion;
-  output += "\"}";
+  output += "\",\"agentInstanceId\":\"" + JsonEscape(agent_instance_id);
+  output += "\",\"agentVersion\":\"" AGENT_ROVER_AGENT_VERSION
+            "\",\"gitCommit\":\"" AGENT_ROVER_AGENT_GIT_COMMIT_HASH
+#ifdef _WIN64
+            "\",\"architecture\":\"amd64\"}";
+#else
+            "\",\"architecture\":\"i686\"}";
+#endif
   return output;
 }
 
-static std::string SuccessResponseJson(
+std::string SuccessResponseJson(
     const std::string& id,
     const std::string& result) {
   std::string output = "{\"id\":\"";
@@ -1117,6 +1129,28 @@ bool ReadAgentRequest(const std::string& payload, std::string* id, std::string* 
   return FindJsonStringField(payload, "kind", &kind) && kind == "request" &&
       FindJsonStringField(payload, "id", id) && !id->empty() && id->size() <= 128 &&
       FindJsonStringField(payload, "method", method) && !method->empty() && method->size() <= 128;
+}
+
+bool ReadAgentUpdateSpec(const std::string& json, AgentUpdateSpec* spec) {
+  std::string params;
+  return FindJsonObjectField(json, "params", &params) &&
+         FindJsonStringField(params, "sourceInstance", &spec->source_instance) &&
+         FindJsonStringField(params, "authorization", &spec->authorization) &&
+         FindJsonStringField(params, "updateId", &spec->id) &&
+         FindJsonStringField(params, "sourceSha256", &spec->source_hash) &&
+         FindJsonStringField(params, "version", &spec->version) &&
+         FindJsonStringField(params, "architecture", &spec->architecture) &&
+         FindJsonStringField(params, "sha256", &spec->hash) &&
+         FindJsonUInt64Field(params, "bytes", &spec->bytes) &&
+         FindJsonUInt32Field(params, "updateProtocol", &spec->protocol);
+}
+bool MatchesLegacyAgent(const std::string& catalog, const AgentUpdateSpec& spec) {
+  std::string release, image, digest;
+  uint64_t bytes = 0;
+  return FindJsonObjectField(catalog, spec.version, &release) &&
+         FindJsonObjectField(release, spec.architecture, &image) &&
+         FindJsonStringField(image, "sha256", &digest) && digest == spec.hash &&
+         FindJsonUInt64Field(image, "bytes", &bytes) && bytes == spec.bytes;
 }
 
 uint32_t ReadAgentVideoDuration(const std::string& payload) {

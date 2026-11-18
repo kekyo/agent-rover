@@ -16,7 +16,7 @@ namespace agent_rover {
 
 struct HostConfiguration {
   uint64_t max_transfer_bytes;
-  HANDLE mapping, pulse;
+  HANDLE mapping, pulse, supervisor, update_ready;
   uint32_t generation, host_bytes, token_bytes, config_path_bytes, safe_base_dir_bytes;
   uint16_t port, auth_required, multiple_connections, show_auth_token;
 };
@@ -56,8 +56,12 @@ int RunSupervisedServer() {
         config.auth_required != 0, std::string(token, config_path),
         config.max_transfer_bytes, config.multiple_connections != 0, config.show_auth_token != 0,
         std::string(config_path, safe_base_dir), std::string(safe_base_dir, command.payload.end())};
+    options.supervisor_handle = reinterpret_cast<uintptr_t>(config.supervisor);
+    options.update_ready = reinterpret_cast<uintptr_t>(config.update_ready);
     std::string error;
     result = RunTcpServer(options, &error);
+    if (config.update_ready) CloseHandle(config.update_ready);
+    CloseHandle(config.supervisor);
     SetHostRecoveryRegistry({});
   } catch (...) { SetHostRecoveryRegistry({}); }
   if (host_pulse) CloseHandle(host_pulse);
@@ -131,10 +135,17 @@ static cardio::promise<void> Supervise(ServerOptions options, int* result, std::
         config.multiple_connections = options.multiple_connections;
         config.show_auth_token = options.show_auth_token;
         config.max_transfer_bytes = options.max_transfer_bytes;
-        if (!DuplicateHandle(GetCurrentProcess(), RecoveryMapping(registry), WorkerProcess(host),
-            &config.mapping, 0, FALSE, DUPLICATE_SAME_ACCESS) ||
-            !DuplicateHandle(GetCurrentProcess(), pulse, WorkerProcess(host),
-            &config.pulse, EVENT_MODIFY_STATE, FALSE, 0)) throw Failure("DuplicateHandle(supervisor configuration)");
+        if (!DuplicateHandle(GetCurrentProcess(), GetCurrentProcess(), WorkerProcess(host),
+                             &config.supervisor, SYNCHRONIZE, FALSE, 0) ||
+            !DuplicateHandle(GetCurrentProcess(), RecoveryMapping(registry), WorkerProcess(host),
+                             &config.mapping, 0, FALSE, DUPLICATE_SAME_ACCESS) ||
+            !DuplicateHandle(GetCurrentProcess(), pulse, WorkerProcess(host), &config.pulse,
+                             EVENT_MODIFY_STATE, FALSE, 0))
+          throw Failure("DuplicateHandle(supervisor configuration)");
+        if (options.update_ready &&
+            !DuplicateHandle(GetCurrentProcess(), reinterpret_cast<HANDLE>(options.update_ready),
+                             WorkerProcess(host), &config.update_ready, EVENT_MODIFY_STATE, FALSE, 0))
+          throw Failure("DuplicateHandle(update readiness)");
         WorkerMessage command = {WorkerMessageKind::HostConfiguration, std::vector<unsigned char>(sizeof(config))};
         std::memcpy(command.payload.data(), &config, sizeof(config));
         command.payload.insert(command.payload.end(), options.host.begin(), options.host.end());

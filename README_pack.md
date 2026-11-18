@@ -78,6 +78,12 @@ arctl screenshot ./screen.png
 arctl record ./screen.mp4 --seconds 10 --fps 30
 ```
 
+### Update the Windows agent
+
+Run `arctl --section windows-xp update` on the driver machine to see the running version, executable architecture and update support. Add an exact release number to upgrade or downgrade one endpoint in that section. Use a section with a single endpoint to consistently target one PC. The driver verifies the GitHub release ZIP using SHA-256. Windows checks the extracted executable before restarting. Use token authentication for new builds. [Windows agent releases](https://github.com/kekyo/agent-rover/releases)
+
+For example, `arctl --section windows-xp update 0.10.0` asks for confirmation because the next update will require installation on Windows. Enter `y` to proceed. Use `--allow-legacy-downgrade` for explicit noninteractive consent. To restore remote updates, stop the old agent on Windows, replace the portable EXE or run the update-capable installer as the same user into the same directory, then start the agent.
+
 ## Features
 
 - Place the agent application on a remote machine and drive test operations remotely.

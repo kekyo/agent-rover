@@ -619,6 +619,25 @@ Use the SDK's `retry` or the CLI's `--retry-count` and `--retry-interval` to cha
 these settings. Disable retries with `retry: false` or `--no-retry`.
 Authentication and transport failures return immediately.
 
+### Updating the Windows agent
+
+Run these commands on the test driver's machine. The first reports the selected endpoint, running version, commit, executable architecture and update support. The second installs the exact release on one member of the section. Use a section with one endpoint when successive commands must reach the same PC.
+
+```bash
+arctl --section windows-xp update
+arctl --section windows-xp update 0.10.0
+```
+
+The client downloads the ZIP over HTTPS, verifies GitHub's SHA-256 and extracts the executable for the running architecture. Windows verifies the executable's SHA-256. An identical build keeps running. With authentication disabled, the agent can accept releases in its built-in legacy hash catalog or its current image. Use token authentication to install new builds. [Windows agent releases](https://github.com/kekyo/agent-rover/releases)
+
+Releases 0.1.0 through 0.10.0 require manual installation for the next update. Enter `y` to confirm or press Enter to cancel. In automation, supply explicit consent as shown below. With `--json`, progress and warnings go to stderr.
+
+```bash
+arctl --section windows-xp --json update 0.10.0 --allow-legacy-downgrade
+```
+
+The result includes the previous, requested and observed versions. An installation has an update ID. A `restored` result means the previous agent restarted. An `unconfirmed` result means the client lost confirmation. To update a running legacy agent, exit it on Windows and replace the portable EXE, or run an update-capable installer as the same user into the original directory. Start the agent and check it with `arctl update`.
+
 ---
 
 ## Reference

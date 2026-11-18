@@ -9,6 +9,11 @@ import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 
 const projectRoot = dirname(fileURLToPath(import.meta.url));
+const windowsSuites = [
+  'tests/windows-*.integration.test.ts',
+  'tests/native-agent-update.test.ts',
+  'tests/agent-update-installation.test.ts',
+];
 
 export default defineConfig({
   test: {
@@ -25,19 +30,15 @@ export default defineConfig({
         extends: true,
         test: {
           name: 'unit',
-          exclude: [
-            '**/node_modules/**',
-            '**/dist/**',
-            'tests/windows-*.integration.test.ts',
-          ],
+          exclude: ['**/node_modules/**', '**/dist/**', ...windowsSuites],
         },
       },
       {
         extends: true,
         test: {
           name: 'windows',
-          include: ['tests/windows-*.integration.test.ts'],
-          // These tests share the interactive desktop and bootstrap listener.
+          include: windowsSuites,
+          // Windows tests share the native build, interactive desktop or bootstrap listener.
           fileParallelism: false,
           sequence: { groupOrder: 1 },
         },

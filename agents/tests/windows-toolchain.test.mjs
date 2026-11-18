@@ -97,6 +97,7 @@ it('builds standalone agents without known post-XP runtime imports', async () =>
           ![
             'advapi32.dll',
             'gdi32.dll',
+            'iphlpapi.dll',
             'kernel32.dll',
             'msvcrt.dll',
             'ole32.dll',
@@ -114,6 +115,18 @@ it('builds standalone agents without known post-XP runtime imports', async () =>
       ...stdout.matchAll(/^\s+[\da-f]+\s+\d+\s+(\S+)\s*$/gmu),
     ].map((match) => match[1]);
     expect(imports).toContain('GetCurrentThreadId');
+    // The update helper checks the PID owning the listener using the XP SP2 IP Helper API.
+    const ipHelper =
+      stdout
+        .split('DLL Name: ')
+        .find((section) =>
+          section.toLowerCase().startsWith('iphlpapi.dll\n')
+        ) ?? '';
+    expect(
+      [...ipHelper.matchAll(/^\s+[\da-f]+\s+\d+\s+(\S+)\s*$/gmu)].map(
+        (m) => m[1]
+      )
+    ).toEqual(['GetExtendedTcpTable']);
     expect(
       imports.filter((name) =>
         /^(CancelIoEx|CancelSynchronousIo|GetQueuedCompletionStatusEx|GetOverlappedResultEx|GetThreadId|GetTickCount64|InitializeCriticalSectionEx|InitializeConditionVariable|SleepConditionVariableCS|SleepConditionVariableSRW|WakeConditionVariable|WakeAllConditionVariable|InitializeSRWLock|AcquireSRWLockExclusive|ReleaseSRWLockExclusive|InitOnceExecuteOnce|GetDpiForWindow|GetDpiForMonitor|SetThreadDpiAwarenessContext)$/.test(

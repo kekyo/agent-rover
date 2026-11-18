@@ -48,6 +48,8 @@ cardio::promise<void> ReadSocket(SocketConnection socket, std::span<unsigned cha
  * @param cancellation Deadline or shutdown signal. @return Completion promise. */
 cardio::promise<void> WriteSocket(SocketConnection socket, std::span<const unsigned char> bytes,
     cardio::cancellation cancellation);
+/** Shares an accepted session with one local updater process. */
+void ShareUpdateSocket(const SocketConnection& socket, DWORD process, WSAPROTOCOL_INFOW* info);
 /** Closes the socket and wakes all waiters. Safe to call repeatedly.
  * @param socket Connection to close. */
 void CloseSocket(const SocketConnection& socket);

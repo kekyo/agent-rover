@@ -28,7 +28,7 @@ CPPFLAGS += -I$(GENERATED_DIR) -Ideps/cardio/include
 CPPFLAGS_AMD64 ?= -D_WIN32_WINNT=0x0502 -DWINVER=0x0502
 CPPFLAGS_I686 ?= -D_WIN32_WINNT=0x0501 -DWINVER=0x0501
 LDFLAGS ?= -static -static-libgcc -static-libstdc++ -s -municode -mwindows
-LDLIBS ?= -luser32 -lgdi32 -lpsapi -ladvapi32 -lws2_32 -lole32 -lmfuuid -lshell32 -lcomctl32 -luserenv
+LDLIBS ?= -luser32 -lgdi32 -lpsapi -ladvapi32 -lws2_32 -liphlpapi -lole32 -lmfuuid -lshell32 -lcomctl32 -luserenv
 
 .PHONY: all amd64 i686 clean print-output remove-legacy-output version-header force-version-header
 
@@ -64,13 +64,13 @@ $(I686_OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp $(TOOLCHAIN_DEPENDENCIES) | $(VERSION_HEAD
 	@mkdir -p $(dir $@)
 	$(I686_CXX) $(CXXFLAGS) $(CPPFLAGS) $(CPPFLAGS_I686) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
 
-$(AMD64_OBJ_DIR)/agent.res.o: $(RESOURCES) $(TOOLCHAIN_DEPENDENCIES)
+$(AMD64_OBJ_DIR)/agent.res.o: $(RESOURCES) $(VERSION_HEADER) ../agent-rover/src/update/legacy-releases.json $(TOOLCHAIN_DEPENDENCIES)
 	@mkdir -p $(dir $@)
-	$(AMD64_RC) -I$(SRC_DIR) -I../images $< $@
+	$(AMD64_RC) -I$(SRC_DIR) -I$(GENERATED_DIR) -I../agent-rover/src/update -I../images $< $@
 
-$(I686_OBJ_DIR)/agent.res.o: $(RESOURCES) $(TOOLCHAIN_DEPENDENCIES)
+$(I686_OBJ_DIR)/agent.res.o: $(RESOURCES) $(VERSION_HEADER) ../agent-rover/src/update/legacy-releases.json $(TOOLCHAIN_DEPENDENCIES)
 	@mkdir -p $(dir $@)
-	$(I686_RC) -I$(SRC_DIR) -I../images $< $@
+	$(I686_RC) -I$(SRC_DIR) -I$(GENERATED_DIR) -I../agent-rover/src/update -I../images $< $@
 
 $(AMD64_OUTPUT): $(AMD64_OBJECTS)
 	@mkdir -p $(dir $@)
