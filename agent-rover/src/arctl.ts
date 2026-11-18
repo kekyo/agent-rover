@@ -17,6 +17,8 @@ import { launchArctlApplication, listArctlWindows } from './cli/commands';
 import { transferArctlFiles } from './cli/files';
 import { captureArctlScreenshot, recordArctlVideo } from './cli/capture';
 
+import { installAgentRelease } from './cli/update.ts';
+
 const main = async (): Promise<number> => {
   const args = process.argv.slice(2);
   let agent: RemoteAgent | undefined;
@@ -77,6 +79,29 @@ const main = async (): Promise<number> => {
     };
     if (parsed.command === 'update') {
       updateSession = await connectAgentForUpdate(target, connection);
+      if (parsed.version !== undefined) {
+        const result = await installAgentRelease(
+          updateSession,
+          parsed.version,
+          parsed.allowLegacy,
+          interruption.signal,
+          (message) => process.stderr.write(redact(message))
+        );
+        writeResult(
+          result,
+          result.endpoint.host +
+            ':' +
+            result.endpoint.port +
+            '  ' +
+            result.status +
+            '  ' +
+            (result.actualVersion ?? 'unknown') +
+            '\n'
+        );
+        return ['applied', 'unchanged', 'cancelled'].includes(result.status)
+          ? 0
+          : 1;
+      }
       const { endpoint, capabilities } = updateSession;
       const result = {
         endpoint,

@@ -1772,12 +1772,30 @@ export const connectRemoteAgentInSection = async (
   );
 };
 
+/** Last observed result for a single update transaction. */
+export interface AgentUpdateOutcome {
+  /** Terminal state reported by Windows or uncertainty after connection loss. */
+  readonly status: 'applied' | 'restored' | 'recovery-required' | 'unconfirmed';
+  /** Version verified after installation or restoration. */
+  readonly actualVersion: string | null;
+  /** Diagnostic supplied by the helper. */
+  readonly message: string;
+}
+
 /** Authenticated connection restricted to the agent update protocol. */
 export interface AgentUpdateSession {
   /** Selected host and port, with no credentials. */
   readonly endpoint: { readonly host: string; readonly port: number };
   /** Build information reported in the ready event. */
   readonly capabilities: RemoteAgentCapabilities;
+  /** Returns the running executable's SHA-256. */
+  readonly imageHash: () => Promise<string>;
+  /** Stages and applies one verified release to this endpoint. */
+  readonly install: (
+    updateId: string,
+    sourceSha256: string,
+    release: import('../update/release.ts').VerifiedAgentRelease
+  ) => Promise<AgentUpdateOutcome>;
   /** Closes this connection. */
   readonly release: () => void;
 }
@@ -2362,6 +2380,48 @@ async function connectRemoteAgentOnce(
     return {
       endpoint: { host: options.host, port: options.port },
       capabilities: connectedCapabilities,
+      imageHash: async () => {
+        const value = await requestJson('agent.update.inspect', undefined);
+        if (typeof value !== 'string' || !/^[0-9a-f]{64}$/u.test(value))
+          throw new Error('Invalid running agent SHA-256.');
+        return value;
+      },
+      install: async (updateId, sourceSha256, release) => {
+        const spec = {
+          updateId,
+          sourceSha256,
+          version: release.version,
+          architecture: release.architecture,
+          sha256: release.sha256,
+          bytes: release.executable.length,
+          updateProtocol: release.updateProtocol,
+        };
+        await requestJson('agent.update.prepare', spec);
+        const transfer = await sendBinaryTransfer(
+          'application/vnd.agent-rover.update',
+          release.executable
+        );
+        const response = await requestJson('agent.update.apply', {
+          updateId,
+          transferId: transfer.transferId,
+        });
+        if (
+          !isRecord(response) ||
+          response.updateId !== updateId ||
+          (response.status !== 'applied' &&
+            response.status !== 'restored' &&
+            response.status !== 'recovery-required') ||
+          (response.actualVersion !== null &&
+            typeof response.actualVersion !== 'string') ||
+          typeof response.message !== 'string'
+        )
+          throw new Error('Invalid Windows update result.');
+        return {
+          status: response.status,
+          actualVersion: response.actualVersion,
+          message: response.message,
+        };
+      },
       release: releaseAgent,
     };
   }

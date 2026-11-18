@@ -15,6 +15,7 @@ import {
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { expect, it } from 'vitest';
+import { checkRelease } from '../../agent-rover/src/update/release.ts';
 import { connectTestAgent } from '../../agent-rover/tests/helpers/test-connection.ts';
 import { waitForResult } from '../../agent-rover/src/wait.ts';
 
@@ -51,12 +52,24 @@ it('packs the same native build into a ZIP and a per-user installer', async () =
   ];
   expect(
     (await exec('unzip', ['-Z1', archive])).stdout.trim().split('\n').sort()
-  ).toEqual([...documents, 'agent-amd64.exe', 'agent-i686.exe'].sort());
-  for (const arch of ['amd64', 'i686']) {
+  ).toEqual(
+    [
+      ...documents,
+      'agent-update.json',
+      'agent-amd64.exe',
+      'agent-i686.exe',
+    ].sort()
+  );
+  const zip = await readFile(archive);
+  const digest = 'sha256:' + createHash('sha256').update(zip).digest('hex');
+  for (const arch of ['amd64', 'i686'] as const) {
+    const release = checkRelease(version, arch, zip, digest, undefined);
+    expect(release.updateProtocol).toBe(1);
     const content = await exec('unzip', ['-p', archive, `agent-${arch}.exe`], {
       encoding: 'buffer',
       maxBuffer: 8 * 1024 * 1024,
     });
+    expect(release.executable).toEqual(content.stdout);
     expect(content.stdout).toEqual(
       await readFile(resolve(root, `agents/dist/agent-${arch}.exe`))
     );

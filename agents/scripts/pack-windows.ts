@@ -1,6 +1,7 @@
 // agent-rover - Build ZIP and NSIS distributions from one native build
 // Copyright (c) Kouji Matsui. (@kekyo@mi.kekyo.net)
 // Under MIT.
+import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import {
   mkdir,
@@ -100,7 +101,27 @@ try {
     ['makensis', '-WX', script],
     { cwd: agents, maxBuffer: 8 * 1024 * 1024 }
   );
+  const images: Record<string, { bytes: number; sha256: string }> = {};
+  for (const [index, arch] of ['amd64', 'i686'].entries()) {
+    const image = await readFile(binaries[index]!.path);
+    images[arch] = {
+      bytes: image.length,
+      sha256: createHash('sha256').update(image).digest('hex'),
+    };
+  }
+  const manifest = join(stage, 'agent-update.json');
+  await writeFile(
+    manifest,
+    JSON.stringify({
+      repository: 'kekyo/agent-rover',
+      version,
+      gitCommit: await format('{git.commit.hash}'),
+      updateProtocol: 1,
+      binaries: images,
+    })
+  );
   await createZipArchive(join(stage, `${basename}.zip`), [
+    { name: 'agent-update.json', path: manifest },
     ...binaries,
     ...documents,
   ]);
