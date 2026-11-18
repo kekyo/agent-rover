@@ -38,6 +38,6 @@
     "pack": "npm run pack --workspaces --if-present"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=18"
   }
 }

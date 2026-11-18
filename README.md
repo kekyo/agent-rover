@@ -389,7 +389,7 @@ On the driver machine, the TypeScript SDK and the `arctl` command-line client sh
 ### Manual Operations With arctl
 
 `arctl` is a client for manual debugging, included in the agent-rover package.
-It runs on Node.js 20 or later. Each invocation connects, performs one operation,
+It runs on Node.js 18 or later. Each invocation connects, performs one operation,
 and disconnects, leaving launched applications, transferred files, and saved
 captures in place. Start the Windows agent on the target using the steps above.
 The Windows agent on the target does not require Node.js.

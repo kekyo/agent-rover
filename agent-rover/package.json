@@ -23,9 +23,6 @@
   "files": [
     "dist"
   ],
-  "engines": {
-    "node": ">=20"
-  },
   "scripts": {
     "build": "vite build && vite build --mode cli",
     "test": "npm run build && vitest run",
@@ -52,5 +49,8 @@
     "unplugin-dts": ">=1.0.3",
     "vite": ">=6.0.0",
     "vitest": ">=2.0.0"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
