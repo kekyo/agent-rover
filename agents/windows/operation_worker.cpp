@@ -8,6 +8,7 @@
 #include "command_line.h"
 #include "json_protocol.h"
 #include "win32_util.h"
+#include "win32_job.h"
 #include "win32_video.h"
 #include "win32_cleanup.h"
 #include "managed_launch.h"
@@ -82,8 +83,9 @@ Worker StartOperationWorker(HelperRole role, uint64_t max_transfer_bytes) {
     if (role != HelperRole::PersistentLaunch)
       limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     if (role == HelperRole::Operations || role == HelperRole::Server) limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_BREAKAWAY_OK;
-    // Opening the log folder must not tie a new Explorer process to the logger.
-    if (role == HelperRole::FileLogger) limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+    // Shell-opened Explorer and editors must outlive their isolated helpers.
+    if (role == HelperRole::FileLogger || role == HelperRole::ConfigEditor)
+      limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
     if (!SetInformationJobObject(worker->job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)))
       throw NativeFailure("SetInformationJobObject(worker)");
     worker->input = CreateWorkerPipe(&input, false);
@@ -93,6 +95,7 @@ Worker StartOperationWorker(HelperRole role, uint64_t max_transfer_bytes) {
     const auto mode = role == HelperRole::Probe ? L"--agent-probe" :
         role == HelperRole::Server ? L"--agent-server" :
         role == HelperRole::FileLogger ? L"--agent-log-worker" :
+        role == HelperRole::ConfigEditor ? L"--agent-config-editor" :
         (role == HelperRole::Launch || role == HelperRole::PersistentLaunch) ? L"--agent-launch-worker" :
         role == HelperRole::Cleanup ? L"--agent-cleanup-worker" : L"--agent-worker";
     std::vector<std::wstring> arguments = {mode};
@@ -171,8 +174,10 @@ cardio::promise<WorkerMessage> ReadWorker(Worker worker, cardio::cancellation ca
   co_return message;
 }
 
-cardio::promise<void> InitializeOperationWorker(Worker worker) {
+cardio::promise<void> InitializeOperationWorker(Worker worker, std::string safe_base_dir) {
   auto deadline = cardio::cancellations::timeout(3000);
+  WorkerMessage configuration = {WorkerMessageKind::WorkspaceConfiguration, {safe_base_dir.begin(), safe_base_dir.end()}};
+  co_await WriteWorker(worker, std::move(configuration), deadline.get_cancellation());
   const auto ready = co_await ReadWorker(worker, deadline.get_cancellation());
   if (ready.kind != WorkerMessageKind::Complete) throw std::runtime_error("Missing worker readiness message.");
 }
@@ -243,25 +248,15 @@ static cardio::promise<void> WaitForJobExit(HANDLE job, cardio::cancellation can
   // (a Job is not generally signaled when its last process exits).
   for (unsigned int snapshot = 0; snapshot < 16 && !JobEmpty(job); ++snapshot) {
     cancellation.throw_if_cancellation_requested();
-    std::vector<ULONG_PTR> storage(130);
-    for (;;) {
-      if (QueryInformationJobObject(job, JobObjectBasicProcessIdList, storage.data(),
-          storage.size() * sizeof(ULONG_PTR), nullptr)) break;
-      if (GetLastError() != ERROR_MORE_DATA || storage.size() >= 65538)
-        throw NativeFailure("QueryInformationJobObject(process ids)");
-      storage.resize(storage.size() * 2);
-    }
-    const auto list = reinterpret_cast<const JOBOBJECT_BASIC_PROCESS_ID_LIST*>(storage.data());
+    std::vector<uint32_t> ids;
+    OperationError error;
+    if (!ListJobProcessIds(job, &ids, &error)) throw std::runtime_error(error.message);
     bool observed = false;
-    for (DWORD i = 0; i < list->NumberOfProcessIdsInList; ++i) {
-      const auto process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE, list->ProcessIdList[i]);
-      if (!process) {
-        if (GetLastError() == ERROR_INVALID_PARAMETER) continue;
-        throw NativeFailure("OpenProcess(owned exit)");
-      }
-      BOOL member = FALSE;
-      if (!IsProcessInJob(process, job, &member)) { const auto error = NativeFailure("IsProcessInJob"); CloseHandle(process); throw error; }
-      if (!member) { CloseHandle(process); continue; } // A recycled PID is never a termination target.
+    for (const auto id : ids) {
+      HANDLE process = nullptr;
+      if (!OpenJobProcess(job, id, SYNCHRONIZE | PROCESS_QUERY_INFORMATION, &process, &error))
+        throw std::runtime_error(error.message);
+      if (!process) continue;
       try { co_await cardio::from_win32_handle(process, cancellation); }
       catch (...) { CloseHandle(process); throw; }
       CloseHandle(process);
@@ -499,6 +494,11 @@ int RunOperationWorker(bool probe, uint64_t max_transfer_bytes) {
       WSACleanup();
       return 0;
     }
+    WorkerMessage configuration;
+    if (!ReadWorkerCommand(&configuration) || configuration.kind != WorkerMessageKind::WorkspaceConfiguration ||
+        configuration.payload.empty() || configuration.payload.size() > 131072) return 1;
+    const std::string safe_base_dir(configuration.payload.begin(), configuration.payload.end());
+    if (safe_base_dir.find('\0') != std::string::npos || !IsAbsoluteWindowsPath(Utf8ToWide(safe_base_dir))) return 1;
     bool owns_capture = false;
     InstallManagedLaunchBroker();
     SendWorkerReply(WorkerMessageKind::Complete, {});
@@ -540,7 +540,7 @@ int RunOperationWorker(bool probe, uint64_t max_transfer_bytes) {
         }
         std::vector<BinaryTransferChunk> chunks;
         OutboundFileTransfer file = {};
-        const auto response = HandleJsonRequest(request, &transfers, &recordings, &chunks, &file);
+        const auto response = HandleJsonRequest(request, safe_base_dir, &transfers, &recordings, &chunks, &file);
         PrintAgentLogEvent(CreateAgentResultLog(response));
         try {
           for (const auto& chunk : chunks) SendWorkerChunk(chunk);

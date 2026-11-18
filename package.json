@@ -25,7 +25,10 @@
   ],
   "files": [
     "LICENSE",
-    "images/agent-rover-120.png"
+    "images/agent-rover-120.png",
+    "images/agent.png",
+    "images/agent-menu.png",
+    "images/architecture.png"
   ],
   "scripts": {
     "dependencies": "reskill",

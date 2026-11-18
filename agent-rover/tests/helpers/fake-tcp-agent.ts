@@ -49,6 +49,10 @@ import {
 } from '../../src/driver/tcp-frame';
 
 export interface FakeTcpAgentOptions {
+  /** Absolute workspace path reported by the agent. */
+  readonly safeBaseDir?: string;
+  /** Explicit response for malformed workspace response tests. */
+  readonly safeBaseDirResult?: JsonValue;
   /** Complete the operation, then close the socket instead of acknowledging it. */
   readonly disconnectAfterRequest?: readonly string[];
   /** Close after flushing the successful response. */
@@ -95,6 +99,11 @@ export interface FakeTcpAgent {
   readonly port: number;
   readonly requestUsedBase64: () => boolean;
   readonly setProcesses: (processes: readonly RemoteProcessSnapshot[]) => void;
+  /** Sets Job descendants independently of the system-wide process list. */
+  readonly setManagedDescendants: (
+    rootProcessId: number,
+    processes: readonly RemoteProcessSnapshot[]
+  ) => void;
   readonly setMonitors: (monitors: readonly RemoteMonitor[]) => void;
   readonly setWindows: (windows: readonly AppWindowSnapshot[]) => void;
 }
@@ -126,6 +135,7 @@ export const defaultFakeCapabilities: RemoteAgentCapabilities = {
     'file.exists',
     'file.mkdir',
     'file.mkdtemp',
+    'file.safeBaseDir',
     'process.createCaptureDirectory',
     'file.manifest',
     'file.read',
@@ -140,6 +150,7 @@ export const defaultFakeCapabilities: RemoteAgentCapabilities = {
     'process.launchManaged',
     'process.managedSnapshot',
     'process.managedRunning',
+    'process.managedProcesses',
     'process.readCaptured',
     'process.releaseManaged',
     'process.snapshot',
@@ -459,6 +470,10 @@ export const startFakeTcpAgent = async (
   const files = new Map<string, Buffer>();
   const processes = new Map<number, RemoteProcessSnapshot>();
   const managedProcesses = new Map<number, number>();
+  const managedDescendants = new Map<
+    number,
+    readonly RemoteProcessSnapshot[]
+  >();
   const responsesToDrop = new Map(Object.entries(options.dropResponses ?? {}));
   const videoRecordings = new Map<
     string,
@@ -502,6 +517,10 @@ export const startFakeTcpAgent = async (
     }
     directories.add(normalized);
   };
+
+  const safeBaseDir = options.safeBaseDir ?? 'C:/Windows/Temp';
+  ensureDirectory(safeBaseDir);
+  let nextTempDirectory = 0;
 
   const fileStatJson = (path: string): JsonValue | undefined => {
     const normalized = normalizePath(path);
@@ -666,6 +685,14 @@ export const startFakeTcpAgent = async (
       switch (method) {
         case 'agent.capabilities':
           sendSuccess(id, toJson(capabilities));
+          return;
+        case 'file.safeBaseDir':
+          sendSuccess(
+            id,
+            options.safeBaseDirResult === undefined
+              ? { path: safeBaseDir }
+              : options.safeBaseDirResult
+          );
           return;
         case 'clipboard.readText':
           sendSuccess(id, {
@@ -927,6 +954,24 @@ export const startFakeTcpAgent = async (
             });
           }
           return;
+        case 'process.managedProcesses': {
+          const processId = managedProcesses.get(
+            Number(recordParams.managedProcessId)
+          );
+          if (processId === undefined) {
+            sendFailure(id, 'Unknown managed process id.');
+            return;
+          }
+          sendSuccess(
+            id,
+            toJson(
+              (managedDescendants.get(processId) ?? []).filter(
+                (process) => process.running
+              )
+            )
+          );
+          return;
+        }
         case 'process.managedRunning': {
           const processId = managedProcesses.get(
             Number(recordParams.managedProcessId)
@@ -934,7 +979,10 @@ export const startFakeTcpAgent = async (
           sendSuccess(
             id,
             processId !== undefined &&
-              processes.get(processId)?.running === true
+              (processes.get(processId)?.running === true ||
+                (managedDescendants.get(processId) ?? []).some(
+                  (process) => process.running
+                ))
           );
           return;
         }
@@ -983,6 +1031,7 @@ export const startFakeTcpAgent = async (
             return;
           }
           options.killedManagedProcessIds?.push(managedProcessId);
+          managedDescendants.set(processId, []);
           options.killedProcessIds?.push(processId);
           const current = processes.get(processId);
           processes.set(processId, {
@@ -1026,6 +1075,7 @@ export const startFakeTcpAgent = async (
             });
           }
           managedProcesses.delete(managedProcessId);
+          managedDescendants.delete(processId);
           managedProcessOptions.delete(managedProcessId);
           const dropped = responsesToDrop.get(method) ?? 0;
           if (dropped > 0) {
@@ -1341,21 +1391,58 @@ export const startFakeTcpAgent = async (
           sendSuccess(id, null);
           return;
         }
-        case 'process.createCaptureDirectory':
-        case 'file.mkdtemp': {
-          const prefix =
-            method === 'process.createCaptureDirectory'
-              ? 'C:/agent-rover-managed-process-'
-              : recordParams.prefix;
-          if (typeof prefix !== 'string') {
-            sendFailure(id, 'file.mkdtemp requires prefix.');
-            return;
-          }
-          const path = `${prefix}fake`;
+        case 'process.createCaptureDirectory': {
+          const path = 'C:/agent-rover-managed-process-fake';
           ensureDirectory(path);
           sendSuccess(id, {
             path,
           });
+          return;
+        }
+        case 'file.mkdtemp': {
+          const prefix =
+            recordParams.prefix === undefined
+              ? 'agent-rover-'
+              : recordParams.prefix;
+          const absolute =
+            typeof prefix === 'string' &&
+            /^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+)/u.test(prefix);
+          if (
+            typeof prefix !== 'string' ||
+            !prefix ||
+            prefix.includes('\0') ||
+            (!absolute &&
+              (prefix === '.' || prefix === '..' || /[\\/:]/u.test(prefix)))
+          ) {
+            sendTcpProtocolMessage(socket, {
+              id,
+              kind: 'response',
+              ok: false,
+              error: {
+                code: 'INVALID_ARGUMENT',
+                message: 'Invalid temporary directory prefix.',
+              },
+            });
+            return;
+          }
+          const resolved = absolute
+            ? prefix
+            : `${safeBaseDir.replace(/[\\/]$/u, '')}\\${prefix}`;
+          const path = `${resolved}fake${String(++nextTempDirectory)}`;
+          if (!directories.has(parentPath(path))) {
+            sendTcpProtocolMessage(socket, {
+              id,
+              kind: 'response',
+              ok: false,
+              error: {
+                code: 'OPERATION_FAILED',
+                message: 'The parent directory does not exist.',
+              },
+            });
+            return;
+          }
+          directories.add(normalizePath(path));
+          sendSuccess(id, { path });
           return;
         }
         case 'file.remove': {
@@ -1597,6 +1684,9 @@ export const startFakeTcpAgent = async (
     host: '127.0.0.1',
     port: address.port,
     requestUsedBase64: (): boolean => sawBase64Write,
+    setManagedDescendants: (rootProcessId, descendants): void => {
+      managedDescendants.set(rootProcessId, [...descendants]);
+    },
     setProcesses: (nextProcesses): void => {
       processes.clear();
       for (const process of nextProcesses) {

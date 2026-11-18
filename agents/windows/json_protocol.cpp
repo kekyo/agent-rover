@@ -530,6 +530,7 @@ static std::string CapabilitiesJson() {
       "\"file.remove\","
       "\"file.rename\","
       "\"file.mkdtemp\","
+      "\"file.safeBaseDir\","
       "\"process.createCaptureDirectory\","
       "\"process.kill\","
       "\"process.killManaged\","
@@ -538,6 +539,7 @@ static std::string CapabilitiesJson() {
       "\"process.launchManaged\","
       "\"process.managedSnapshot\","
       "\"process.managedRunning\","
+      "\"process.managedProcesses\","
       "\"process.readCaptured\","
       "\"process.snapshot\","
       "\"eventLogs.read\","
@@ -1126,6 +1128,10 @@ std::string CreateCapabilitiesResponse(const std::string& id) {
   return SuccessResponseJson(id, CapabilitiesJson());
 }
 
+std::string CreateSafeBaseDirResponse(const std::string& id, const std::string& path) {
+  return SuccessResponseJson(id, "{\"path\":\"" + JsonEscape(path) + "\"}");
+}
+
 std::string CreateAgentFailure(const std::string& id, const std::string& code, const std::string& message) {
   return "{\"id\":\"" + JsonEscape(id) + "\",\"kind\":\"response\",\"ok\":false,\"error\":{\"code\":\"" +
       JsonEscape(code) + "\",\"message\":\"" + JsonEscape(message) + "\"}}";
@@ -1147,6 +1153,7 @@ std::string CreateAgentResultLog(const std::string& payload) {
 
 std::string HandleJsonRequest(
     const std::string& payload,
+    const std::string& safe_base_dir,
     BinaryTransferStore* transfers,
     VideoRecordingStore* recordings,
     std::vector<BinaryTransferChunk>* outbound_chunks,
@@ -1354,7 +1361,7 @@ std::string HandleJsonRequest(
     }
     return SuccessResponseJson(id, ProcessSnapshotJson(process));
   }
-  if (method == "process.managedRunning" || method == "process.readCaptured") {
+  if (method == "process.managedRunning" || method == "process.managedProcesses" || method == "process.readCaptured") {
     int managed_id = 0;
     if (!FindJsonNumberField(payload, "managedProcessId", &managed_id) || managed_id <= 0) return FailureResponseJson(id, "A managed process ID is required.");
     OperationError error;
@@ -1362,6 +1369,11 @@ std::string HandleJsonRequest(
       bool running = false;
       if (!ManagedProcessRunning(static_cast<uint32_t>(managed_id), &running, &error)) return OperationFailureJson(id, method, error);
       return SuccessResponseJson(id, running ? "true" : "false");
+    }
+    if (method == "process.managedProcesses") {
+      std::vector<ProcessSnapshot> processes;
+      if (!ListManagedProcesses(static_cast<uint32_t>(managed_id), &processes, &error)) return OperationFailureJson(id, method, error);
+      return SuccessResponseJson(id, ProcessSnapshotArrayJson(processes));
     }
     std::string stream;
     if (!FindJsonStringField(payload, "stream", &stream) || (stream != "stdout" && stream != "stderr")) return FailureResponseJson(id, "Capture stream must be stdout or stderr.");
@@ -1711,13 +1723,20 @@ std::string HandleJsonRequest(
     return SuccessResponseJson(id, "null");
   }
   if (method == "file.mkdtemp" || method == "process.createCaptureDirectory") {
-    std::string prefix;
-    if (method == "file.mkdtemp" && !FindJsonStringField(payload, "prefix", &prefix)) {
-      return FailureResponseJson(id, "file.mkdtemp requires prefix.");
+    std::optional<std::string> prefix;
+    if (method == "file.mkdtemp") {
+      std::string params;
+      if (FindJsonObjectField(payload, "params", &params) && params.find("\"prefix\"") != std::string::npos) {
+        std::string value;
+        if (!FindJsonStringField(params, "prefix", &value))
+          return CreateAgentFailure(id, "INVALID_ARGUMENT", "file.mkdtemp prefix must be a string when supplied.");
+        prefix = std::move(value);
+      }
     }
     std::string path;
     OperationError error;
-    if (!(method == "process.createCaptureDirectory" ? CreateCaptureDirectory(&path, &error) : MakeTempDirectory(prefix, &path, &error))) {
+    if (!(method == "process.createCaptureDirectory" ? CreateCaptureDirectory(&path, &error) : MakeTempDirectory(safe_base_dir, prefix, &path, &error))) {
+      if (error.reason == "invalidArgument") return CreateAgentFailure(id, "INVALID_ARGUMENT", error.message);
       return OperationFailureJson(id, method, error);
     }
     std::string output = "{\"path\":";

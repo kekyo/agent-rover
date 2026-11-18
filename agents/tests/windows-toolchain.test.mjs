@@ -105,6 +105,7 @@ it('builds standalone agents without known post-XP runtime imports', async () =>
             'ws2_32.dll',
             'shell32.dll',
             'comctl32.dll',
+            'userenv.dll',
           ].includes(name)
       )
     ).toEqual([]);

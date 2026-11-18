@@ -1120,6 +1120,16 @@ const parseTempDirectory = (value: JsonValue | undefined): string => {
   return readString(value, 'path');
 };
 
+const parseSafeBaseDirectory = (value: JsonValue | undefined): string => {
+  if (!isRecord(value) || typeof value.path !== 'string' || !value.path) {
+    throw createRemoteAgentError(
+      'PROTOCOL_ERROR',
+      'file.safeBaseDir result must include a nonempty path.'
+    );
+  }
+  return value.path;
+};
+
 const parseApplicationProcess = (
   value: JsonValue | undefined
 ): RemoteApplicationProcess => {
@@ -3126,11 +3136,11 @@ const connectRemoteAgentOnce = async (
       throw new Error(`Process is still running: ${String(processId)}.`);
     }, options);
 
-  const makeRemoteTempDirectory = async (prefix: string): Promise<string> =>
+  const makeRemoteTempDirectory = async (
+    prefix: string | undefined
+  ): Promise<string> =>
     parseTempDirectory(
-      await requestJson('file.mkdtemp', {
-        prefix,
-      })
+      await requestJson('file.mkdtemp', prefix === undefined ? {} : { prefix })
     );
 
   const readRemoteFile = async (path: string): Promise<Buffer> =>
@@ -3732,7 +3742,13 @@ const connectRemoteAgentOnce = async (
 
     const snapshot = async (): Promise<RemoteManagedProcessSnapshot> => {
       const root = await rootSnapshot();
-      const trackedProcesses = await collectTrackedProcesses(root);
+      const trackedProcesses = options.nativeManaged
+        ? parseProcessSnapshotArray(
+            await requestJson('process.managedProcesses', {
+              managedProcessId: nativeManagedProcessId(),
+            })
+          )
+        : await collectTrackedProcesses(root);
       const nativeRunning = options.nativeManaged
         ? await requestJson('process.managedRunning', {
             managedProcessId: nativeManagedProcessId(),
@@ -3747,9 +3763,10 @@ const connectRemoteAgentOnce = async (
         processes: trackedProcesses,
         root,
         running:
-          nativeRunning ||
           root.running ||
-          trackedProcesses.some((process) => process.running),
+          (options.nativeManaged
+            ? nativeRunning
+            : trackedProcesses.some((process) => process.running)),
       };
     };
 
@@ -3895,7 +3912,9 @@ const connectRemoteAgentOnce = async (
       );
       const effectiveQuery = query ?? {};
       const trackedProcessIds = new Set([
-        current.root.id,
+        ...(!options.nativeManaged || current.root.running
+          ? [current.root.id]
+          : []),
         ...current.processes.map((process) => process.id),
       ]);
       const trackedMatches = candidates.filter(
@@ -4344,6 +4363,10 @@ const connectRemoteAgentOnce = async (
     findWindows: async (query): Promise<readonly AppWindow[]> =>
       await findWindowsByQuery(query),
     files: {
+      safeBaseDir: async (): Promise<string> =>
+        parseSafeBaseDirectory(
+          await requestJson('file.safeBaseDir', undefined)
+        ),
       downloadDirectory: async (
         options
       ): Promise<RemoteDirectoryDownloadResult> =>

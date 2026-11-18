@@ -10,6 +10,7 @@
 #include <tlhelp32.h>
 
 #include <cstdio>
+#include <algorithm>
 #include <cwctype>
 #include <map>
 #include <string>
@@ -17,6 +18,7 @@
 
 #include "command_line.h"
 #include "win32_files.h"
+#include "win32_job.h"
 #include "win32_util.h"
 
 namespace agent_rover {
@@ -560,6 +562,35 @@ bool SnapshotManagedProcess(
   return SnapshotProcessHandle(
       entry.process_id, entry.process, entry.name, entry.path,
       has_parent_process_id, parent_process_id, snapshot, error);
+}
+
+bool ListManagedProcesses(uint32_t managed_id, std::vector<ProcessSnapshot>* processes,
+                          OperationError* error) {
+  processes->clear();
+  const auto iterator = g_managed_processes.find(managed_id);
+  if (iterator == g_managed_processes.end()) { *error = "Unknown managed process id."; return false; }
+  const auto& entry = iterator->second;
+  std::vector<uint32_t> ids;
+  if (!ListJobProcessIds(entry.job, &ids, error)) return false;
+  std::vector<ProcessSnapshot> result;
+  for (const auto id : ids) {
+    if (id == entry.process_id) continue;
+    HANDLE process = nullptr;
+    if (!OpenJobProcess(entry.job, id, PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+                        &process, error)) return false;
+    if (!process) continue;
+    uint32_t parent_id = 0;
+    const bool has_parent = ReadParentProcessId(id, &parent_id);
+    ProcessSnapshot snapshot = {};
+    // Never reopen by PID after membership was checked: the handle is the identity.
+    const bool success = SnapshotProcessHandle(id, process, "", "", has_parent, parent_id, &snapshot, error);
+    CloseHandle(process);
+    if (!success) return false;
+    if (snapshot.running) result.push_back(std::move(snapshot));
+  }
+  std::sort(result.begin(), result.end(), [](const auto& left, const auto& right) { return left.id < right.id; });
+  *processes = std::move(result);
+  return true;
 }
 
 bool KillProcess(uint32_t process_id, OperationError* error) {

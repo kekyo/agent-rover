@@ -1,9 +1,15 @@
-import { execFile } from 'node:child_process';
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
+// agent-rover - Explicit Windows distribution archives
+// Copyright (c) Kouji Matsui. (@kekyo@mi.kekyo.net)
+// Under MIT.
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
+interface ZipEntry {
+  content: Buffer;
+  crc: number;
+  fileName: Buffer;
+  localHeaderOffset: number;
+  modified: { time: number; date: number };
+}
 const minimumZipDate = new Date(Date.UTC(1980, 0, 1, 0, 0, 0));
 
 const crc32Table = new Uint32Array(256);
@@ -18,17 +24,17 @@ for (let value = 0; value < crc32Table.length; value += 1) {
   crc32Table[value] = crc >>> 0;
 }
 
-const crc32 = (buffer) => {
+const crc32 = (buffer: Buffer) => {
   let crc = 0xffffffff;
 
   for (const byte of buffer) {
-    crc = crc32Table[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+    crc = crc32Table[(crc ^ byte) & 0xff]! ^ (crc >>> 8);
   }
 
   return (crc ^ 0xffffffff) >>> 0;
 };
 
-const toDosDateTime = (date) => {
+const toDosDateTime = (date: Date) => {
   const normalizedDate = date < minimumZipDate ? minimumZipDate : date;
   const year = normalizedDate.getUTCFullYear();
   const month = normalizedDate.getUTCMonth() + 1;
@@ -43,15 +49,15 @@ const toDosDateTime = (date) => {
   };
 };
 
-const writeUInt16 = (buffer, value, offset) => {
+const writeUInt16 = (buffer: Buffer, value: number, offset: number) => {
   buffer.writeUInt16LE(value, offset);
 };
 
-const writeUInt32 = (buffer, value, offset) => {
+const writeUInt32 = (buffer: Buffer, value: number, offset: number) => {
   buffer.writeUInt32LE(value >>> 0, offset);
 };
 
-const createLocalFileHeader = (entry) => {
+const createLocalFileHeader = (entry: ZipEntry) => {
   const header = Buffer.alloc(30);
 
   writeUInt32(header, 0x04034b50, 0);
@@ -69,7 +75,7 @@ const createLocalFileHeader = (entry) => {
   return Buffer.concat([header, entry.fileName]);
 };
 
-const createCentralDirectoryHeader = (entry) => {
+const createCentralDirectoryHeader = (entry: ZipEntry) => {
   const header = Buffer.alloc(46);
 
   writeUInt32(header, 0x02014b50, 0);
@@ -97,6 +103,10 @@ const createEndOfCentralDirectory = ({
   entryCount,
   centralDirectorySize,
   centralDirectoryOffset,
+}: {
+  entryCount: number;
+  centralDirectorySize: number;
+  centralDirectoryOffset: number;
 }) => {
   const header = Buffer.alloc(22);
 
@@ -112,7 +122,14 @@ const createEndOfCentralDirectory = ({
   return header;
 };
 
-const createZipArchive = async (outputPath, inputs) => {
+/** Writes a store-only ZIP using explicit relative entry names.
+ * @param outputPath Output archive path.
+ * @param inputs Files and their archive-relative names.
+ * @returns Completes after the archive is written. */
+export const createZipArchive = async (
+  outputPath: string,
+  inputs: readonly { name: string; path: string }[]
+) => {
   const localParts = [];
   const centralParts = [];
   const entries = [];
@@ -156,89 +173,3 @@ const createZipArchive = async (outputPath, inputs) => {
     Buffer.concat([...localParts, ...centralParts, endOfCentralDirectory])
   );
 };
-
-export const getScrewUpVersion = async (agentsRoot) => {
-  const screwUpPath = resolve(
-    agentsRoot,
-    '..',
-    'node_modules',
-    'screw-up',
-    'dist',
-    'main.mjs'
-  );
-  const result = await execFileAsync(process.execPath, [
-    screwUpPath,
-    'dump',
-    agentsRoot,
-  ]);
-  const metadata = JSON.parse(result.stdout);
-
-  if (typeof metadata.version !== 'string' || metadata.version.length === 0) {
-    throw new Error('screw-up did not return a package version.');
-  }
-
-  return metadata.version;
-};
-
-export const findWindowsAgentBinaries = async (agentsRoot) => {
-  const dist = join(agentsRoot, 'dist');
-  const names = await readdir(dist);
-
-  return names
-    .filter((name) => /^agent-(?!rover-agent-).+\.exe$/u.test(name))
-    .sort()
-    .map((name) => ({
-      name,
-      path: join(dist, name),
-    }));
-};
-
-export const createWindowsAgentArchive = async ({
-  repoRoot,
-  agentsRoot,
-  version,
-}) => {
-  const binaries = await findWindowsAgentBinaries(agentsRoot);
-
-  if (binaries.length === 0) {
-    throw new Error('No Windows agent binaries were found in agents/dist.');
-  }
-
-  const archivePath = join(
-    repoRoot,
-    'artifacts',
-    `agent-rover-windows-${version}.zip`
-  );
-  const inputs = [
-    ...binaries,
-    {
-      name: 'LICENSE',
-      path: join(repoRoot, 'LICENSE'),
-    },
-    {
-      name: 'README_pack.md',
-      path: join(repoRoot, 'README_pack.md'),
-    },
-  ].sort((left, right) => left.name.localeCompare(right.name));
-
-  await createZipArchive(archivePath, inputs);
-
-  return archivePath;
-};
-
-const main = async () => {
-  const agentsRoot = resolve(import.meta.dirname, '..');
-  const repoRoot = resolve(agentsRoot, '..');
-  const version = await getScrewUpVersion(agentsRoot);
-  const archivePath = await createWindowsAgentArchive({
-    agentsRoot,
-    repoRoot,
-    version,
-  });
-
-  console.log(`Created ${archivePath}`);
-};
-
-if (process.argv[1] === import.meta.filename) {
-  await main();
-}

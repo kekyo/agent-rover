@@ -17,7 +17,7 @@ namespace agent_rover {
 struct HostConfiguration {
   uint64_t max_transfer_bytes;
   HANDLE mapping, pulse;
-  uint32_t generation, host_bytes, token_bytes;
+  uint32_t generation, host_bytes, token_bytes, config_path_bytes, safe_base_dir_bytes;
   uint16_t port, auth_required, multiple_connections, show_auth_token;
 };
 static HANDLE host_pulse = nullptr;
@@ -38,17 +38,24 @@ int RunSupervisedServer() {
     HostConfiguration config = {};
     std::memcpy(&config, command.payload.data(), sizeof(config));
     if (config.host_bytes > 32768 || config.token_bytes > 32768 ||
-        command.payload.size() != sizeof(config) + config.host_bytes + config.token_bytes ||
+        !config.config_path_bytes || config.config_path_bytes > 131072 ||
+        !config.safe_base_dir_bytes || config.safe_base_dir_bytes > 131072 ||
+        command.payload.size() != sizeof(config) + config.host_bytes + config.token_bytes +
+            config.config_path_bytes + config.safe_base_dir_bytes ||
         !config.generation || !config.max_transfer_bytes || config.max_transfer_bytes % kBytesPerMiB ||
-        config.multiple_connections > 1 || config.show_auth_token > 1) return 1;
+        config.auth_required > 1 || config.multiple_connections > 1 || config.show_auth_token > 1) return 1;
     host_pulse = config.pulse;
     auto registry = AttachRecoveryRegistry(config.mapping, config.generation);
     SetHostRecoveryRegistry(registry);
     SetHelperBreakaway(true);
     const auto begin = command.payload.begin() + sizeof(config);
+    const auto token = begin + config.host_bytes;
+    const auto config_path = token + config.token_bytes;
+    const auto safe_base_dir = config_path + config.config_path_bytes;
     ServerOptions options = {std::string(begin, begin + config.host_bytes), config.port,
-        config.auth_required != 0, std::string(begin + config.host_bytes, command.payload.end()),
-        config.max_transfer_bytes, config.multiple_connections != 0, config.show_auth_token != 0};
+        config.auth_required != 0, std::string(token, config_path),
+        config.max_transfer_bytes, config.multiple_connections != 0, config.show_auth_token != 0,
+        std::string(config_path, safe_base_dir), std::string(safe_base_dir, command.payload.end())};
     std::string error;
     result = RunTcpServer(options, &error);
     SetHostRecoveryRegistry({});
@@ -118,6 +125,8 @@ static cardio::promise<void> Supervise(ServerOptions options, int* result, std::
         HostConfiguration config = {};
         config.generation = generation;
         config.host_bytes = options.host.size(); config.token_bytes = options.auth_token.size();
+        config.config_path_bytes = options.config_path.size();
+        config.safe_base_dir_bytes = options.safe_base_dir.size();
         config.port = options.port; config.auth_required = options.auth_required;
         config.multiple_connections = options.multiple_connections;
         config.show_auth_token = options.show_auth_token;
@@ -130,6 +139,8 @@ static cardio::promise<void> Supervise(ServerOptions options, int* result, std::
         std::memcpy(command.payload.data(), &config, sizeof(config));
         command.payload.insert(command.payload.end(), options.host.begin(), options.host.end());
         command.payload.insert(command.payload.end(), options.auth_token.begin(), options.auth_token.end());
+        command.payload.insert(command.payload.end(), options.config_path.begin(), options.config_path.end());
+        command.payload.insert(command.payload.end(), options.safe_base_dir.begin(), options.safe_base_dir.end());
         auto initialization = cardio::cancellations::timeout(10000);
         co_await WriteWorker(host, std::move(command), initialization.get_cancellation());
         PrintAgentLogEvent("phase=supervisor-start generation=" + std::to_string(generation));

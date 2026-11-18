@@ -16,7 +16,7 @@ $(OUTPUT)/i686/repair.exe: $(REPAIR_SOURCES) ../../windows/win32_cleanup.cpp ../
 	@mkdir -p $(@D)
 	$(I686_CXX) $(CXXFLAGS) -Wno-error=cast-function-type $(REPAIR_SOURCES) -o $@ -ladvapi32 -lbcrypt
 
-LIFECYCLE_SOURCES := lifecycle.cpp ../../windows/win32_util.cpp ../../windows/command_line.cpp ../../windows/operation_error.cpp ../../windows/win32_files.cpp ../../windows/binary_codec.cpp
+LIFECYCLE_SOURCES := lifecycle.cpp ../../windows/win32_util.cpp ../../windows/command_line.cpp ../../windows/operation_error.cpp ../../windows/win32_files.cpp ../../windows/binary_codec.cpp ../../windows/win32_job.cpp
 LIFECYCLE_HEADERS := $(wildcard ../../windows/*.h) ../../windows/win32_process.cpp ../../deps/cardio/include/cardio.h
 
 $(OUTPUT)/amd64/lifecycle.exe: $(LIFECYCLE_SOURCES) $(LIFECYCLE_HEADERS)

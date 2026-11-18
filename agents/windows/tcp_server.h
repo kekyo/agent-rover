@@ -29,6 +29,10 @@ struct ServerOptions {
   bool multiple_connections = false;
   /** Whether the log viewer may display and copy the authentication token. */
   bool show_auth_token = true;
+  /** Absolute INI path selected at public startup. */
+  std::string config_path = {};
+  /** Existing absolute Windows directory recommended for test files. */
+  std::string safe_base_dir = {};
 };
 
 /**

@@ -28,9 +28,9 @@ CPPFLAGS += -I$(GENERATED_DIR) -Ideps/cardio/include
 CPPFLAGS_AMD64 ?= -D_WIN32_WINNT=0x0502 -DWINVER=0x0502
 CPPFLAGS_I686 ?= -D_WIN32_WINNT=0x0501 -DWINVER=0x0501
 LDFLAGS ?= -static -static-libgcc -static-libstdc++ -s -municode -mwindows
-LDLIBS ?= -luser32 -lgdi32 -lpsapi -ladvapi32 -lws2_32 -lole32 -lmfuuid -lshell32 -lcomctl32
+LDLIBS ?= -luser32 -lgdi32 -lpsapi -ladvapi32 -lws2_32 -lole32 -lmfuuid -lshell32 -lcomctl32 -luserenv
 
-.PHONY: all amd64 i686 clean print-output remove-legacy-output version-header
+.PHONY: all amd64 i686 clean print-output remove-legacy-output version-header force-version-header
 
 all: remove-legacy-output amd64 i686
 
@@ -38,18 +38,29 @@ amd64: $(AMD64_OUTPUT)
 
 i686: $(I686_OUTPUT)
 
-version-header:
+version-header: $(VERSION_HEADER)
+
+force-version-header:
+
+# Updating the file target makes its new timestamp visible to dependent objects
+# in this make invocation. Preserve it when screw-up emits unchanged metadata.
+$(VERSION_HEADER): $(VERSION_TEMPLATE) force-version-header
 	@mkdir -p $(dir $(VERSION_HEADER))
-	$(SCREW_UP) format --input $(VERSION_TEMPLATE) $(VERSION_HEADER) >/dev/null
+	$(SCREW_UP) format --input $(VERSION_TEMPLATE) $(VERSION_HEADER).tmp >/dev/null
+	@if cmp -s $(VERSION_HEADER).tmp $(VERSION_HEADER); then \
+		rm -f $(VERSION_HEADER).tmp; \
+	else \
+		mv -f $(VERSION_HEADER).tmp $(VERSION_HEADER); \
+	fi
 
 remove-legacy-output:
 	rm -f $(LEGACY_OUTPUTS)
 
-$(AMD64_OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp $(TOOLCHAIN_DEPENDENCIES) | version-header
+$(AMD64_OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp $(TOOLCHAIN_DEPENDENCIES) | $(VERSION_HEADER)
 	@mkdir -p $(dir $@)
 	$(AMD64_CXX) $(CXXFLAGS) $(CPPFLAGS) $(CPPFLAGS_AMD64) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
 
-$(I686_OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp $(TOOLCHAIN_DEPENDENCIES) | version-header
+$(I686_OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp $(TOOLCHAIN_DEPENDENCIES) | $(VERSION_HEADER)
 	@mkdir -p $(dir $@)
 	$(I686_CXX) $(CXXFLAGS) $(CPPFLAGS) $(CPPFLAGS_I686) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
 
@@ -73,7 +84,7 @@ print-output:
 	@printf '%s\n' '$(AMD64_OUTPUT)' '$(I686_OUTPUT)'
 
 clean:
-	rm -f $(AMD64_OUTPUT) $(I686_OUTPUT) $(LEGACY_OUTPUTS) $(VERSION_HEADER)
+	rm -f $(AMD64_OUTPUT) $(I686_OUTPUT) $(LEGACY_OUTPUTS) $(VERSION_HEADER) $(VERSION_HEADER).tmp
 	rm -rf $(OBJ_ROOT)
 
 -include $(DEPENDENCIES)

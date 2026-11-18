@@ -10,6 +10,7 @@
 #include "auth.h"
 #include "frame.h"
 #include "file_logger.h"
+#include "config_editor.h"
 #include "json_protocol.h"
 #include "operation_worker.h"
 #include "operation_limits.h"
@@ -77,6 +78,7 @@ struct ServerState {
   SocketConnection listener;
   AgentGuiHandle gui;
   FileLoggerHandle logger;
+  ConfigEditorHandle config_editor;
   std::string listen_status = "Starting...", log_status;
   cardio::cancellation_source stop;
   std::list<std::shared_ptr<ClientSession>> sessions;
@@ -308,7 +310,7 @@ static cardio::promise<void> ExecuteRequests(std::shared_ptr<ClientSession> sess
           if (session->server->workers >= kMaxWorkers) throw std::runtime_error("Operation worker limit reached.");
           session->worker = StartOperationWorker(HelperRole::Operations, session->server->options.max_transfer_bytes);
           ++session->server->workers;
-          co_await InitializeOperationWorker(session->worker);
+          co_await InitializeOperationWorker(session->worker, session->server->options.safe_base_dir);
         }
         if (UsesDesktop(request.method)) {
           co_await AcquireDesktop(session->server, cancel.get_cancellation());
@@ -406,10 +408,12 @@ static cardio::promise<void> ServeClient(std::shared_ptr<ClientSession> session)
         request.budget_ms = OperationBudgetMs(request.method, session->video_duration_ms);
         const auto context = RequestContext(session->id, request);
         PrintAgentLogEvent(context + " phase=received");
-        if (request.method == "agent.capabilities") {
+        if (request.method == "agent.capabilities" || request.method == "file.safeBaseDir") {
           ReleaseRequestBytes(session, request.frame.payload.size() + kFrameHeaderBytes);
           PrintAgentLogEvent(context + " phase=execute");
-          EnqueueOutput(session, JsonFrame(CreateCapabilitiesResponse(request.id)), context, request.received);
+          const auto response = request.method == "agent.capabilities" ? CreateCapabilitiesResponse(request.id) :
+              CreateSafeBaseDirResponse(request.id, options.safe_base_dir);
+          EnqueueOutput(session, JsonFrame(response), context, request.received);
           PrintAgentLogEvent(context + " phase=succeeded" + Elapsed(request.received));
           continue;
         }
@@ -559,6 +563,7 @@ static cardio::promise<void> Serve(std::shared_ptr<ServerState> server, int* res
   server->recovery_ready.Notify();
   co_await server->recovery;
   PrintAgentLogEvent("phase=shutdown connections drained");
+  co_await StopConfigEditor(server->config_editor);
   co_await StopFileLogger(server->logger);
 }
 
@@ -582,9 +587,14 @@ int RunTcpServer(const ServerOptions& options, std::string* error) {
       }
     });
     SetAgentGuiOpenLogs(server->gui, [weak] { if (auto state = weak.lock()) OpenFileLogFolder(state->logger); });
+    server->config_editor = CreateConfigEditor(options.config_path, [weak](const std::wstring& error) {
+      if (auto state = weak.lock()) ShowAgentGuiError(state->gui, error);
+    });
+    SetAgentGuiOpenConfig(server->gui, [weak] { if (auto state = weak.lock()) RequestConfigEditor(state->config_editor); });
     SetAgentLogSink([weak](const AgentLogRecord& record) {
       if (auto state = weak.lock()) { NotifyAgentGuiLog(state->gui); EnqueueFileLog(state->logger, record); }
     });
+    PrintAgentLogEvent("phase=configuration path=" + SanitizeAgentLogField(options.config_path));
     auto reaping = ReapSessions(server);
     server->recovery = RecoverFiles(server.get());
     auto progress = ReportProgress(server, server->stop.get_cancellation());
